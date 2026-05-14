@@ -1,0 +1,210 @@
+"""LLM 模型配置管理接口"""
+
+import uuid
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.llm.ollama import OllamaLLM
+from app.models.llm.vllm import VllmLLM
+
+from app.schema.db import LLMConfig
+from app.storage.database import get_db
+
+router = APIRouter(prefix="/api/llm-configs", tags=["LLM Config"])
+
+
+class LLMConfigCreate(BaseModel):
+    name: str
+    provider: str  # ollama | vllm
+    base_url: str
+    model: str
+    api_key: Optional[str] = None
+    is_default: bool = False
+
+
+class LLMConfigUpdate(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class LLMConfigResponse(BaseModel):
+    model_config = {"from_attributes": True}
+    id: str
+    name: str
+    provider: str
+    base_url: str
+    model: str
+    api_key_set: bool  # 是否已设置 API Key（不返回明文）
+    is_default: bool
+    created_at: str
+
+
+@router.get("", response_model=list[LLMConfigResponse])
+async def list_llm_configs(db: AsyncSession = Depends(get_db)):
+    """获取所有 LLM 模型配置"""
+    result = await db.execute(select(LLMConfig).order_by(LLMConfig.created_at.desc()))
+    configs = result.scalars().all()
+    return [
+        LLMConfigResponse(
+            id=c.id,
+            name=c.name,
+            provider=c.provider,
+            base_url=c.base_url,
+            model=c.model,
+            api_key_set=bool(c.api_key),
+            is_default=c.is_default,
+            created_at=c.created_at.isoformat() if c.created_at else "",
+        )
+        for c in configs
+    ]
+
+
+@router.post("", response_model=LLMConfigResponse, status_code=201)
+async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(get_db)):
+    """创建 LLM 模型配置"""
+    config_id = str(uuid.uuid4())
+
+    # 如果设为默认，取消其他默认
+    if body.is_default:
+        result = await db.execute(select(LLMConfig).where(LLMConfig.is_default == True))
+        for c in result.scalars().all():
+            c.is_default = False
+
+    config = LLMConfig(
+        id=config_id,
+        name=body.name,
+        provider=body.provider,
+        base_url=body.base_url,
+        model=body.model,
+        api_key=body.api_key or None,
+        is_default=body.is_default,
+    )
+    db.add(config)
+    await db.flush()
+    await db.refresh(config)
+
+    return LLMConfigResponse(
+        id=config.id,
+        name=config.name,
+        provider=config.provider,
+        base_url=config.base_url,
+        model=config.model,
+        api_key_set=bool(config.api_key),
+        is_default=config.is_default,
+        created_at=config.created_at.isoformat() if config.created_at else "",
+    )
+
+
+@router.put("/{config_id}", response_model=LLMConfigResponse)
+async def update_llm_config(config_id: str, body: LLMConfigUpdate, db: AsyncSession = Depends(get_db)):
+    """更新 LLM 模型配置"""
+    result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if config is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    update_data = body.model_dump(exclude_unset=True)
+
+    # 如果设为默认，取消其他默认
+    if update_data.get("is_default"):
+        others = await db.execute(select(LLMConfig).where(LLMConfig.is_default == True, LLMConfig.id != config_id))
+        for c in others.scalars().all():
+            c.is_default = False
+
+    for field, value in update_data.items():
+        setattr(config, field, value)
+
+    await db.flush()
+    await db.refresh(config)
+
+    return LLMConfigResponse(
+        id=config.id,
+        name=config.name,
+        provider=config.provider,
+        base_url=config.base_url,
+        model=config.model,
+        api_key_set=bool(config.api_key),
+        is_default=config.is_default,
+        created_at=config.created_at.isoformat() if config.created_at else "",
+    )
+
+
+@router.delete("/{config_id}", status_code=204)
+async def delete_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
+    """删除 LLM 模型配置"""
+    result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if config is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    await db.delete(config)
+    await db.flush()
+
+
+class LLMTestRequest(BaseModel):
+    """测试模型连通性请求"""
+    provider: str
+    base_url: str
+    model: str
+    api_key: Optional[str] = None
+
+
+class LLMTestResponse(BaseModel):
+    """测试模型连通性响应"""
+    success: bool
+    message: str
+    reply: Optional[str] = None
+
+
+@router.post("/test", response_model=LLMTestResponse)
+async def test_llm_connection(body: LLMTestRequest):
+    """测试 LLM 模型连通性，发送一条简单消息验证配置是否正确"""
+    try:
+        if body.provider == "ollama":
+            llm = OllamaLLM(base_url=body.base_url, model=body.model)
+        else:
+            llm = VllmLLM(base_url=body.base_url, model=body.model, api_key=body.api_key or "")
+
+        # 发送简单测试消息
+        messages = [{"role": "user", "content": "你好，请回复测试成功"}]
+        reply = await llm.generate(messages)
+
+        # 关闭连接
+        if hasattr(llm, "close"):
+            await llm.close()
+
+        return LLMTestResponse(success=True, message="连接成功", reply=reply[:200])
+    except Exception as e:
+        return LLMTestResponse(success=False, message=f"连接失败: {str(e)}")
+
+
+@router.post("/{config_id}/test", response_model=LLMTestResponse)
+async def test_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
+    """测试已保存的模型配置连通性"""
+    result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if config is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    try:
+        if config.provider == "ollama":
+            llm = OllamaLLM(base_url=config.base_url, model=config.model)
+        else:
+            llm = VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
+
+        messages = [{"role": "user", "content": "你好，请回复测试成功"}]
+        reply = await llm.generate(messages)
+
+        if hasattr(llm, "close"):
+            await llm.close()
+
+        return LLMTestResponse(success=True, message="连接成功", reply=reply[:200])
+    except Exception as e:
+        return LLMTestResponse(success=False, message=f"连接失败: {str(e)}")

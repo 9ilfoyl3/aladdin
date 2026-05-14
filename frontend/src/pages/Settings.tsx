@@ -1,0 +1,228 @@
+import { useState, useEffect } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Save, RefreshCw, Cpu, Brain, Bot, Layers } from 'lucide-react'
+import { systemApi } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { Label } from '@/components/ui/label'
+
+// 配置数据类型
+interface SystemConfig {
+  embed_model: string
+  embed_device: string
+  rerank_model: string
+  rerank_device: string
+  agent_max_iterations: number
+  agent_timeout: number
+  parent_chunk_size: number
+  child_chunk_size: number
+  chunk_overlap: number
+  [key: string]: string | number
+}
+
+// 配置字段定义
+interface ConfigField {
+  key: string
+  label: string
+  type: string
+  hint?: string
+  options?: string[]
+}
+
+// 配置字段分组定义
+interface ConfigGroup {
+  title: string
+  icon: React.ReactNode
+  description: string
+  fields: ConfigField[]
+}
+
+// 系统配置页面
+function Settings() {
+  const queryClient = useQueryClient()
+  const [form, setForm] = useState<SystemConfig | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const configGroups: ConfigGroup[] = [
+    {
+      title: 'Embedding 配置',
+      icon: <Cpu className="h-5 w-5 text-primary" />,
+      description: '向量化模型配置，用于文档和查询的语义编码',
+      fields: [
+        { key: 'embed_model', label: 'Embedding 模型', type: 'text', hint: '如 BAAI/bge-m3' },
+        { key: 'embed_device', label: '运行设备', type: 'select', options: ['cuda', 'cpu'] },
+      ],
+    },
+    {
+      title: 'Rerank 配置',
+      icon: <Brain className="h-5 w-5 text-primary" />,
+      description: '重排序模型配置，用于对检索结果进行精排',
+      fields: [
+        { key: 'rerank_model', label: 'Rerank 模型', type: 'text', hint: '如 BAAI/bge-reranker-v2-m3' },
+        { key: 'rerank_device', label: '运行设备', type: 'select', options: ['cuda', 'cpu'] },
+      ],
+    },
+    {
+      title: 'Agent 配置',
+      icon: <Bot className="h-5 w-5 text-primary" />,
+      description: 'Agent 编排参数，控制迭代检索的深度和超时',
+      fields: [
+        { key: 'agent_max_iterations', label: '最大迭代次数', type: 'number' },
+        { key: 'agent_timeout', label: '超时时间 (秒)', type: 'number' },
+      ],
+    },
+    {
+      title: '切片配置',
+      icon: <Layers className="h-5 w-5 text-primary" />,
+      description: '文档切片参数，影响检索粒度和上下文完整性',
+      fields: [
+        { key: 'parent_chunk_size', label: '父块大小', type: 'number' },
+        { key: 'child_chunk_size', label: '子块大小', type: 'number' },
+        { key: 'chunk_overlap', label: '重叠大小', type: 'number' },
+      ],
+    },
+  ]
+
+  const { data: config, isLoading } = useQuery({
+    queryKey: ['system-config'],
+    queryFn: () => systemApi.getConfig() as Promise<SystemConfig>,
+  })
+
+  useEffect(() => {
+    if (config) {
+      setForm({ ...config })
+    }
+  }, [config])
+
+  const saveMutation = useMutation({
+    mutationFn: (data: SystemConfig) => systemApi.updateConfig(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['system-config'] })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    },
+  })
+
+  function updateField(key: string, value: string | number) {
+    if (!form) return
+    setForm({ ...form, [key]: value })
+  }
+
+  function handleSave(e: React.FormEvent) {
+    e.preventDefault()
+    if (form) {
+      saveMutation.mutate(form)
+    }
+  }
+
+  if (isLoading || !form) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">系统配置</h1>
+            <p className="text-muted-foreground text-sm mt-1">配置模型参数、检索策略和系统设置</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-center py-20">
+          <div className="text-center">
+            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">加载中...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {/* 页面头部 */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">系统配置</h1>
+          <p className="text-muted-foreground text-sm mt-1">配置模型参数、检索策略和系统设置</p>
+        </div>
+        <Button onClick={handleSave} disabled={saveMutation.isPending} className="gap-2 cursor-pointer">
+          {saveMutation.isPending ? (
+            <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : (
+            <Save className="h-4 w-4" />
+          )}
+          {saved ? '已保存' : '保存配置'}
+        </Button>
+      </div>
+
+      {/* 配置表单 */}
+      <form onSubmit={handleSave} className="space-y-5">
+        {configGroups.map((group) => (
+          <div
+            key={group.title}
+            className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:border-primary/20"
+          >
+            {/* 分组头部 */}
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-9 h-9 rounded-lg bg-primary/8 flex items-center justify-center shrink-0">
+                {group.icon}
+              </div>
+              <div>
+                <h3 className="font-semibold text-sm">{group.title}</h3>
+                <p className="text-xs text-muted-foreground">{group.description}</p>
+              </div>
+            </div>
+
+            {/* 字段 */}
+            <div className="grid gap-4 md:grid-cols-2">
+              {group.fields.map((field) => (
+                <div key={field.key} className="space-y-1.5">
+                  <Label className="text-xs">{field.label}</Label>
+                  {field.type === 'select' && field.options ? (
+                    <Select
+                      value={String(form[field.key] || '')}
+                      onValueChange={(val) => updateField(field.key, val)}
+                    >
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {field.options.map((opt) => (
+                          <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : field.type === 'number' ? (
+                    <Input
+                      type="number"
+                      value={form[field.key] ?? ''}
+                      onChange={(e) => updateField(field.key, Number(e.target.value))}
+                      className="h-9"
+                    />
+                  ) : (
+                    <Input
+                      type="text"
+                      value={String(form[field.key] || '')}
+                      onChange={(e) => updateField(field.key, e.target.value)}
+                      className="h-9"
+                    />
+                  )}
+                  {field.hint && (
+                    <p className="text-[11px] text-muted-foreground">{field.hint}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </form>
+
+      {/* 保存错误提示 */}
+      {saveMutation.isError && (
+        <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          保存失败: {saveMutation.error?.message || '未知错误'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default Settings
