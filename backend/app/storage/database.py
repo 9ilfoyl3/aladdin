@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
@@ -29,7 +30,27 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+async def _migrate_db() -> None:
+    """执行简单的增量迁移（为已有表添加新列）"""
+    async with engine.begin() as conn:
+        # llm_configs 表添加 stream_enabled 列
+        try:
+            await conn.execute(
+                text("ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT 1")
+            )
+        except Exception:
+            pass  # 列已存在，忽略
+        # llm_configs 表添加 max_context_tokens 列
+        try:
+            await conn.execute(
+                text("ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER")
+            )
+        except Exception:
+            pass  # 列已存在，忽略
+
+
 async def init_db() -> None:
-    """初始化数据库，创建所有表"""
+    """初始化数据库，创建所有表并执行迁移"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _migrate_db()

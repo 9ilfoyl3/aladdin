@@ -71,6 +71,8 @@ class VllmLLM(LLMProvider):
     async def stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
         """流式生成回复，逐块返回内容
 
+        如果远端不支持流式（返回非 200），自动降级为非流式调用并逐段输出。
+
         Args:
             messages: 对话消息列表
 
@@ -87,17 +89,24 @@ class VllmLLM(LLMProvider):
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 流式请求 URL: {url}")
             async with self._client.stream("POST", url, json=payload) as resp:
-                resp.raise_for_status()
-                # vLLM 流式返回 SSE 格式：data: {...}\n\n
+                if resp.status_code != 200:
+                    # 流式不支持，降级为非流式
+                    print(f"[vLLM] 流式请求返回 {resp.status_code}，降级为非流式")
+                    await resp.aclose()
+                    result = await self.generate(messages, **kwargs)
+                    # 分段输出模拟流式
+                    chunk_size = 4
+                    for i in range(0, len(result), chunk_size):
+                        yield result[i:i + chunk_size]
+                    return
+                # 正常流式处理：vLLM 流式返回 SSE 格式 data: {...}\n\n
                 async for line in resp.aiter_lines():
                     line = line.strip()
                     if not line:
                         continue
-                    # 跳过非 data 行
                     if not line.startswith("data:"):
                         continue
                     data_str = line[len("data:"):].strip()
-                    # 结束标记
                     if data_str == "[DONE]":
                         break
                     chunk = json.loads(data_str)
@@ -105,7 +114,12 @@ class VllmLLM(LLMProvider):
                     if content:
                         yield content
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"vLLM 流式请求失败: HTTP {e.response.status_code}") from e
+            # raise_for_status 触发的异常，同样降级
+            print(f"[vLLM] 流式 HTTPStatusError {e.response.status_code}，降级为非流式")
+            result = await self.generate(messages, **kwargs)
+            chunk_size = 4
+            for i in range(0, len(result), chunk_size):
+                yield result[i:i + chunk_size]
         except httpx.RequestError as e:
             raise RuntimeError(f"vLLM 连接失败: {e}") from e
 

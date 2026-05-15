@@ -100,7 +100,7 @@ export const systemApi = {
 // LLM 模型配置接口
 export const llmConfigApi = {
   list: () => request<unknown[]>('/llm-configs'),
-  create: (data: { name: string; provider: string; base_url: string; model: string; api_key?: string; is_default?: boolean }) =>
+  create: (data: { name: string; provider: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; max_context_tokens?: number }) =>
     request<unknown>('/llm-configs', {
       method: 'POST',
       body: JSON.stringify(data),

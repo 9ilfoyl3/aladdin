@@ -17,6 +17,8 @@ interface LLMConfigItem {
   model: string
   api_key_set: boolean
   is_default: boolean
+  stream_enabled: boolean
+  max_context_tokens: number | null
   created_at: string
 }
 
@@ -27,6 +29,8 @@ interface FormData {
   model: string
   api_key: string
   is_default: boolean
+  stream_enabled: boolean
+  max_context_tokens: string
 }
 
 const emptyForm: FormData = {
@@ -36,6 +40,8 @@ const emptyForm: FormData = {
   model: '',
   api_key: '',
   is_default: false,
+  stream_enabled: true,
+  max_context_tokens: '',
 }
 
 function Models() {
@@ -57,6 +63,8 @@ function Models() {
       model: data.model,
       api_key: data.api_key || undefined,
       is_default: data.is_default,
+      stream_enabled: data.stream_enabled,
+      max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['llm-configs'] })
@@ -136,6 +144,8 @@ function Models() {
       model: item.model,
       api_key: '',
       is_default: item.is_default,
+      stream_enabled: item.stream_enabled,
+      max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
     })
     setShowDialog(true)
   }
@@ -349,6 +359,30 @@ function Models() {
                 className="rounded border-border"
               />
               <Label htmlFor="is_default" className="text-sm font-normal cursor-pointer">设为默认模型</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="stream_enabled"
+                checked={form.stream_enabled}
+                onChange={(e) => setForm({ ...form, stream_enabled: e.target.checked })}
+                className="rounded border-border"
+              />
+              <Label htmlFor="stream_enabled" className="text-sm font-normal cursor-pointer">启用流式输出</Label>
+              <span className="text-xs text-muted-foreground">（部分模型不支持流式，关闭后使用非流式生成）</span>
+            </div>
+            <div>
+              <Label>最大上下文长度（token）</Label>
+              <Input
+                type="number"
+                value={form.max_context_tokens}
+                onChange={(e) => setForm({ ...form, max_context_tokens: e.target.value })}
+                placeholder="不填则不限制，建议设为模型上下文窗口的 60%"
+                className="mt-1.5"
+              />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                限制发送给模型的检索上下文长度，超出部分按相关性从低到高裁剪
+              </p>
             </div>
             {dialogTestResult && (
               <div className={`p-2.5 rounded-lg text-xs ${dialogTestResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>

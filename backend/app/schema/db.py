@@ -92,4 +92,6 @@ class LLMConfig(Base):
     model: Mapped[str] = mapped_column(String, nullable=False)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    stream_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

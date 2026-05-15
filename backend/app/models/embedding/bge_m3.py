@@ -6,6 +6,11 @@
 """
 
 import asyncio
+import os
+
+# 强制 HuggingFace 离线模式，避免联网检查模型更新
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from FlagEmbedding import BGEM3FlagModel
 

@@ -24,6 +24,8 @@ class LLMConfigCreate(BaseModel):
     model: str
     api_key: Optional[str] = None
     is_default: bool = False
+    stream_enabled: bool = True
+    max_context_tokens: Optional[int] = None
 
 
 class LLMConfigUpdate(BaseModel):
@@ -33,6 +35,8 @@ class LLMConfigUpdate(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     is_default: Optional[bool] = None
+    stream_enabled: Optional[bool] = None
+    max_context_tokens: Optional[int] = None
 
 
 class LLMConfigResponse(BaseModel):
@@ -44,6 +48,8 @@ class LLMConfigResponse(BaseModel):
     model: str
     api_key_set: bool  # 是否已设置 API Key（不返回明文）
     is_default: bool
+    stream_enabled: bool
+    max_context_tokens: Optional[int] = None
     created_at: str
 
 
@@ -61,6 +67,8 @@ async def list_llm_configs(db: AsyncSession = Depends(get_db)):
             model=c.model,
             api_key_set=bool(c.api_key),
             is_default=c.is_default,
+            stream_enabled=c.stream_enabled,
+            max_context_tokens=c.max_context_tokens,
             created_at=c.created_at.isoformat() if c.created_at else "",
         )
         for c in configs
@@ -86,6 +94,8 @@ async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(ge
         model=body.model,
         api_key=body.api_key or None,
         is_default=body.is_default,
+        stream_enabled=body.stream_enabled,
+        max_context_tokens=body.max_context_tokens,
     )
     db.add(config)
     await db.flush()
@@ -99,6 +109,8 @@ async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(ge
         model=config.model,
         api_key_set=bool(config.api_key),
         is_default=config.is_default,
+        stream_enabled=config.stream_enabled,
+        max_context_tokens=config.max_context_tokens,
         created_at=config.created_at.isoformat() if config.created_at else "",
     )
 
@@ -133,6 +145,8 @@ async def update_llm_config(config_id: str, body: LLMConfigUpdate, db: AsyncSess
         model=config.model,
         api_key_set=bool(config.api_key),
         is_default=config.is_default,
+        stream_enabled=config.stream_enabled,
+        max_context_tokens=config.max_context_tokens,
         created_at=config.created_at.isoformat() if config.created_at else "",
     )
 

@@ -49,10 +49,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _get_llm_for_request(model_config_id: str | None) -> LLMProvider:
-    """根据 model_config_id 获取 LLM 实例
+async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None]:
+    """根据 model_config_id 获取 LLM 实例和配置
 
     优先级：指定 ID > 数据库中的默认配置 > 系统全局配置
+
+    Returns:
+        (LLM 实例, 是否启用流式, 最大上下文 token 数)
     """
     if model_config_id:
         async with async_session() as session:
@@ -61,7 +64,7 @@ async def _get_llm_for_request(model_config_id: str | None) -> LLMProvider:
             )
             config = result.scalar_one_or_none()
             if config:
-                return _create_llm_from_config(config)
+                return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 尝试使用数据库中标记为默认的配置
     async with async_session() as session:
@@ -70,10 +73,10 @@ async def _get_llm_for_request(model_config_id: str | None) -> LLMProvider:
         )
         config = result.scalar_one_or_none()
         if config:
-            return _create_llm_from_config(config)
+            return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 回退到系统全局配置
-    return get_model_manager().llm
+    return get_model_manager().llm, True, None
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
@@ -99,13 +102,25 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 2)
 
 
-def _build_context(chunks: list[RetrievalResult]) -> str:
-    """将检索结果拼接为上下文文本"""
+def _build_context(chunks: list[RetrievalResult], max_tokens: int | None = None) -> str:
+    """将检索结果拼接为上下文文本，按 chunk 粒度控制总长度
+
+    Args:
+        chunks: 检索结果列表（已按相关性排序）
+        max_tokens: 上下文最大 token 数，None 表示不限制
+    """
     if not chunks:
         return "（未找到相关内容）"
     parts = []
+    total_chars = 0
+    # 按 2 字符/token 估算
+    max_chars = max_tokens * 2 if max_tokens else None
     for i, chunk in enumerate(chunks, 1):
-        parts.append(f"[{i}] {chunk.content}")
+        entry = f"[{i}] {chunk.content}"
+        if max_chars and total_chars + len(entry) > max_chars:
+            break
+        parts.append(entry)
+        total_chars += len(entry)
     return "\n\n".join(parts)
 
 
@@ -244,6 +259,8 @@ async def _stream_response(
     kb_id: str | None,
     mode: str,
     llm: LLMProvider,
+    stream_enabled: bool = True,
+    max_context_tokens: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -286,7 +303,7 @@ async def _stream_response(
             chunks = []
 
     # 构建上下文和消息
-    context = _build_context(chunks)
+    context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
     messages = _build_messages(request, context, has_context)
     llm_degraded = False
@@ -300,12 +317,23 @@ async def _stream_response(
 
     # 流式生成内容，LLM 异常时降级为返回检索上下文
     try:
-        async for token in llm.stream(messages):
-            chunk_data = ChatCompletionChunk(
-                id=completion_id,
-                choices=[StreamChoice(delta=DeltaContent(content=token))],
-            )
-            yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
+        if stream_enabled:
+            async for token in llm.stream(messages):
+                chunk_data = ChatCompletionChunk(
+                    id=completion_id,
+                    choices=[StreamChoice(delta=DeltaContent(content=token))],
+                )
+                yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
+        else:
+            # 非流式生成：一次性获取完整回复，然后分段推送
+            result = await llm.generate(messages)
+            chunk_size = 4
+            for i in range(0, len(result), chunk_size):
+                chunk_data = ChatCompletionChunk(
+                    id=completion_id,
+                    choices=[StreamChoice(delta=DeltaContent(content=result[i:i + chunk_size]))],
+                )
+                yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
     except Exception as e:
         logger.warning("LLM 流式生成失败，降级为纯检索结果: %s", e)
         llm_degraded = True
@@ -357,7 +385,7 @@ async def chat_completions(request: ChatCompletionRequest):
     mode = await _get_retrieval_mode(request.knowledge_base_id, request.retrieval_mode)
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
-    llm = await _get_llm_for_request(request.model_config_id)
+    llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
 
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
@@ -366,7 +394,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens),
             media_type="text/event-stream",
         )
 
@@ -377,7 +405,7 @@ async def chat_completions(request: ChatCompletionRequest):
         except Exception as e:
             logger.error("检索失败: %s", e)
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")
-    context = _build_context(chunks)
+    context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
     messages = _build_messages(request, context, has_context)
 
