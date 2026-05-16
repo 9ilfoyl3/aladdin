@@ -56,6 +56,14 @@ class DocumentPipeline:
                 load_result = loader.load(file_path)
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
 
+                # 检查提取的文本是否为空（常见于扫描件 PDF）
+                # TODO: 后续集成 OCR（PaddleOCR / pytesseract）支持扫描件文档
+                stripped_content = load_result.content.strip()
+                if not stripped_content or len(stripped_content) < 10:
+                    raise ValueError(
+                        "文档提取文本为空，可能是扫描件或图片型文档，当前暂不支持 OCR 识别"
+                    )
+
                 # 2. Chunk：父子 chunk 切分
                 chunk_result = self.chunker.chunk(load_result.content, load_result.metadata)
 

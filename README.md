@@ -130,7 +130,8 @@
 - **迭代反思**：两级评估（分数快判 + LLM 深度评估），覆盖度增幅不足时提前终止
 - **结构性碎片惩罚**：Rerank 阶段对标题/目录等无实质信息的短文本施加分数惩罚
 - **多模型管理**：数据库持久化多个 LLM 配置，支持创建/编辑/删除/设为默认/连通性测试，对话时动态切换
-- **流式响应**：SSE 流式输出，兼容 OpenAI API 格式，Agent 模式实时推送思考进度事件
+- **上下文窗口管理**：可配置每个模型的最大上下文 token 数，按 chunk 相关性智能截断，适配不同窗口大小的模型
+- **流式响应**：SSE 流式输出，兼容 OpenAI API 格式，Agent 模式实时推送思考进度事件；支持按模型配置开关流式
 - **引用溯源**：回答附带引用来源（文件名、子块内容、父块上下文、相关性分数）
 - **API Key 认证**：SHA256 哈希存储，支持创建/撤销/调用统计，仅 `/v1/` 路径需认证
 - **检索测试**：独立的检索测试页面，对比不同模式效果
@@ -139,9 +140,17 @@
 
 ### 前置要求
 
-- Python 3.14+
-- Node.js 18+
-- Docker（用于 Milvus）
+| 依赖 | 版本要求 | 说明 |
+|------|----------|------|
+| Python | 3.12+ | 推荐 3.12 或 3.14，macOS 可通过 Homebrew 安装 |
+| Node.js | 18+ | 前端构建，推荐 LTS 版本 |
+| Docker | 20.10+ | 用于运行 Milvus 向量数据库 |
+| pip | 最新 | Python 包管理 |
+
+**平台说明：**
+- **macOS**：`EMBED_DEVICE=cpu`、`RERANK_DEVICE=cpu`（Apple Silicon 暂不支持 CUDA）
+- **Windows**：建议使用 WSL2 运行 Docker 和后端，或直接在 Windows 上运行（需 Python 3.12+）
+- **Linux（有 GPU）**：`EMBED_DEVICE=cuda`、`RERANK_DEVICE=cuda`
 
 ### 安装与启动
 
@@ -244,6 +253,7 @@ aladdin/
 
 ## 未来扩展方向
 
+- **扫描件 OCR 支持**：集成 PaddleOCR / pytesseract，自动识别扫描件 PDF 并提取文本（当前扫描件会提示不支持）
 - **语义切分**：基于 embedding 相似度变化点切分，进一步提升 chunk 质量
 - **LLM Rerank**：用大模型做精排，替代小模型 Reranker，提升专业领域排序精度
 - **Chunk 富化**：启用 Enricher，为每个 chunk 生成摘要和关键词，提升检索召回
