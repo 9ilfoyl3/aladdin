@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agent_node_config import router as agent_node_config_router
 from app.api.api_key import router as api_key_router
 from app.api.chat import router as chat_router
 from app.api.document import router as document_router
@@ -52,6 +53,7 @@ app.include_router(system_router)
 app.include_router(api_key_router)
 app.include_router(llm_config_router)
 app.include_router(ocr_config_router)
+app.include_router(agent_node_config_router)
 
 
 @app.get("/")

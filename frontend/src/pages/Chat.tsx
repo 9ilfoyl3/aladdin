@@ -64,10 +64,10 @@ function Chat() {
     queryFn: () => knowledgeBaseApi.list() as Promise<KnowledgeBaseItem[]>,
   })
 
-  // 获取 LLM 模型列表
+  // 获取 LLM 模型列表（仅对话可见模型）
   const { data: llmConfigs = [] } = useQuery({
-    queryKey: ['llm-configs'],
-    queryFn: () => llmConfigApi.list() as Promise<LLMConfigItem[]>,
+    queryKey: ['llm-configs', 'chat-visible'],
+    queryFn: () => llmConfigApi.list(true) as Promise<LLMConfigItem[]>,
   })
 
   // 默认选中 is_default 的模型
@@ -502,9 +502,13 @@ function Chat() {
                     <span className="max-w-[80px] truncate">{selectedModelName || '模型'}</span>
                   </SelectTrigger>
                   <SelectContent>
-                    {llmConfigs.map((config) => (
-                      <SelectItem key={config.id} value={config.id}>{config.name}</SelectItem>
-                    ))}
+                    {llmConfigs.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用的对话模型，请先在模型管理中添加</div>
+                    ) : (
+                      llmConfigs.map((config) => (
+                        <SelectItem key={config.id} value={config.id}>{config.name}</SelectItem>
+                      ))
+                    )}
                   </SelectContent>
                 </Select>
 

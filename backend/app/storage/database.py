@@ -47,6 +47,13 @@ async def _migrate_db() -> None:
             )
         except Exception:
             pass  # 列已存在，忽略
+        # llm_configs 表添加 chat_visible 列（默认 true，确保现有模型行为不变）
+        try:
+            await conn.execute(
+                text("ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT 1")
+            )
+        except Exception:
+            pass  # 列已存在，忽略
 
 
 async def init_db() -> None:

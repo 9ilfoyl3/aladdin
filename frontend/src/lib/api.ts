@@ -99,8 +99,9 @@ export const systemApi = {
 
 // LLM 模型配置接口
 export const llmConfigApi = {
-  list: () => request<unknown[]>('/llm-configs'),
-  create: (data: { name: string; provider: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; max_context_tokens?: number }) =>
+  list: (chatVisible?: boolean) =>
+    request<unknown[]>(chatVisible !== undefined ? `/llm-configs?chat_visible=${chatVisible}` : '/llm-configs'),
+  create: (data: { name: string; provider: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; max_context_tokens?: number; chat_visible?: boolean }) =>
     request<unknown>('/llm-configs', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -117,6 +118,32 @@ export const llmConfigApi = {
   testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string }) =>
     request<{ success: boolean; message: string; reply?: string }>('/llm-configs/test', {
       method: 'POST',
+      body: JSON.stringify(data),
+    }),
+}
+
+// Agent 节点配置接口类型
+export interface AgentNodeConfigResponse {
+  router_model_id: string | null
+  router_model_name: string | null
+  rewriter_model_id: string | null
+  rewriter_model_name: string | null
+  reflector_model_id: string | null
+  reflector_model_name: string | null
+}
+
+export interface AgentNodeConfigUpdate {
+  router_model_id?: string | null
+  rewriter_model_id?: string | null
+  reflector_model_id?: string | null
+}
+
+// Agent 节点配置接口
+export const agentNodeConfigApi = {
+  get: () => request<AgentNodeConfigResponse>('/agent-node-configs'),
+  update: (data: AgentNodeConfigUpdate) =>
+    request<AgentNodeConfigResponse>('/agent-node-configs', {
+      method: 'PUT',
       body: JSON.stringify(data),
     }),
 }
