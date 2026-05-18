@@ -6,6 +6,7 @@ import {
   Key,
   Settings,
   Cpu,
+  ScanText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -15,6 +16,7 @@ const navItems = [
   { to: '/chat', label: '对话', icon: MessageSquare },
   { to: '/retrieval', label: '检索测试', icon: Search },
   { to: '/models', label: '模型管理', icon: Cpu },
+  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText },
   { to: '/api-keys', label: 'API Key', icon: Key },
   { to: '/settings', label: '系统配置', icon: Settings },
 ]

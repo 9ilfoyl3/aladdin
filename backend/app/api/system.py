@@ -44,6 +44,15 @@ class SystemConfigResponse(BaseModel):
     chunk_overlap: int
     milvus_host: str
     milvus_port: int
+    # OCR 配置
+    ocr_enabled: bool
+    ocr_provider: str
+    ocr_fallback_provider: str
+    ocr_paddleocr_lang: str
+    ocr_paddleocr_use_gpu: bool
+    ocr_external_api_url: str
+    ocr_external_api_key: str  # 脱敏显示
+    ocr_external_api_timeout: float
 
 
 class SystemConfigUpdate(BaseModel):
@@ -59,6 +68,15 @@ class SystemConfigUpdate(BaseModel):
     parent_chunk_size: int | None = None
     child_chunk_size: int | None = None
     chunk_overlap: int | None = None
+    # OCR 配置
+    ocr_enabled: bool | None = None
+    ocr_provider: str | None = None
+    ocr_fallback_provider: str | None = None
+    ocr_paddleocr_lang: str | None = None
+    ocr_paddleocr_use_gpu: bool | None = None
+    ocr_external_api_url: str | None = None
+    ocr_external_api_key: str | None = None
+    ocr_external_api_timeout: float | None = None
 
 
 # ============================================================
@@ -125,6 +143,15 @@ async def health_check():
     return HealthResponse(status=overall, services=services)
 
 
+def _mask_ocr_api_key(key: str) -> str:
+    """OCR API Key 脱敏：显示 **** + 最后4位"""
+    if not key:
+        return ""
+    if len(key) <= 4:
+        return "****"
+    return "****" + key[-4:]
+
+
 @router.get("/config", response_model=SystemConfigResponse)
 async def get_config():
     """获取系统配置"""
@@ -149,6 +176,14 @@ async def get_config():
         chunk_overlap=settings.chunk_overlap,
         milvus_host=settings.milvus_host,
         milvus_port=settings.milvus_port,
+        ocr_enabled=settings.ocr_enabled,
+        ocr_provider=settings.ocr_provider,
+        ocr_fallback_provider=settings.ocr_fallback_provider,
+        ocr_paddleocr_lang=settings.ocr_paddleocr_lang,
+        ocr_paddleocr_use_gpu=settings.ocr_paddleocr_use_gpu,
+        ocr_external_api_url=settings.ocr_external_api_url,
+        ocr_external_api_key=_mask_ocr_api_key(settings.ocr_external_api_key),
+        ocr_external_api_timeout=settings.ocr_external_api_timeout,
     )
 
 
@@ -165,8 +200,11 @@ async def update_config(body: SystemConfigUpdate):
     update_data = body.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if hasattr(settings, field):
-            # 如果 api_key 传入的是脱敏值（含***），跳过不更新
+            # 如果 llm_api_key 传入的是脱敏值（含***），跳过不更新
             if field == "llm_api_key" and "***" in (value or ""):
+                continue
+            # 如果 ocr_external_api_key 传入的是脱敏值（含****），跳过不更新
+            if field == "ocr_external_api_key" and "****" in (value or ""):
                 continue
             object.__setattr__(settings, field, value)
 
@@ -191,4 +229,12 @@ async def update_config(body: SystemConfigUpdate):
         chunk_overlap=settings.chunk_overlap,
         milvus_host=settings.milvus_host,
         milvus_port=settings.milvus_port,
+        ocr_enabled=settings.ocr_enabled,
+        ocr_provider=settings.ocr_provider,
+        ocr_fallback_provider=settings.ocr_fallback_provider,
+        ocr_paddleocr_lang=settings.ocr_paddleocr_lang,
+        ocr_paddleocr_use_gpu=settings.ocr_paddleocr_use_gpu,
+        ocr_external_api_url=settings.ocr_external_api_url,
+        ocr_external_api_key=_mask_ocr_api_key(settings.ocr_external_api_key),
+        ocr_external_api_timeout=settings.ocr_external_api_timeout,
     )

@@ -3,9 +3,12 @@
 流程：load → chunk → enrich → embed → index（写入 Milvus + SQLite）
 """
 
+from __future__ import annotations
+
 import logging
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,9 +17,12 @@ from app.models.manager import ModelManager
 from app.pipeline.chunker import HierarchicalChunker
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
-from app.pipeline.loader import get_loader
+from app.pipeline.loader import LoadResult, get_loader
 from app.schema.db import Chunk, Document
 from app.storage.milvus import MilvusClient
+
+if TYPE_CHECKING:
+    from app.pipeline.ocr.manager import OCRManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +35,11 @@ class DocumentPipeline:
         model_manager: ModelManager,
         milvus_client: MilvusClient,
         db_session_factory: async_sessionmaker[AsyncSession],
+        ocr_manager: OCRManager | None = None,
     ):
         self.milvus = milvus_client
         self.db_session_factory = db_session_factory
+        self.ocr_manager = ocr_manager
         # 初始化管道各节点
         self.chunker = HierarchicalChunker()
         self.enricher = Enricher(llm=None, enabled=False)
@@ -57,12 +65,30 @@ class DocumentPipeline:
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
 
                 # 检查提取的文本是否为空（常见于扫描件 PDF）
-                # TODO: 后续集成 OCR（PaddleOCR / pytesseract）支持扫描件文档
                 stripped_content = load_result.content.strip()
                 if not stripped_content or len(stripped_content) < 10:
-                    raise ValueError(
-                        "文档提取文本为空，可能是扫描件或图片型文档，当前暂不支持 OCR 识别"
-                    )
+                    if self.ocr_manager:
+                        # OCR 可用，调用 OCR 识别
+                        print(f"[Pipeline] 文档 {doc_id} 文本为空或过短(长度={len(stripped_content)})，触发 OCR")
+                        ocr_result = await self.ocr_manager.recognize(file_path)
+                        load_result = LoadResult(
+                            content=ocr_result.full_text,
+                            metadata={
+                                **load_result.metadata,
+                                "ocr_provider": ocr_result.provider_name,
+                            },
+                        )
+                        print(f"[Pipeline] 文档 {doc_id} OCR 完成, Provider: {ocr_result.provider_name}, 文本长度: {len(ocr_result.full_text)}")
+                        logger.info(
+                            "文档 %s 通过 OCR (%s) 获取文本，长度: %d",
+                            doc_id,
+                            ocr_result.provider_name,
+                            len(ocr_result.full_text),
+                        )
+                    else:
+                        raise ValueError(
+                            "文档提取文本为空，且未配置 OCR 服务"
+                        )
 
                 # 2. Chunk：父子 chunk 切分
                 chunk_result = self.chunker.chunk(load_result.content, load_result.metadata)

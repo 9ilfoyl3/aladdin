@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, RefreshCw, Cpu, Brain, Bot, Layers } from 'lucide-react'
+import { Save, RefreshCw, Cpu, Brain, Bot, Layers, ScanText } from 'lucide-react'
 import { systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 
 // 配置数据类型
@@ -18,7 +19,15 @@ interface SystemConfig {
   parent_chunk_size: number
   child_chunk_size: number
   chunk_overlap: number
-  [key: string]: string | number
+  ocr_enabled: boolean
+  ocr_provider: string
+  ocr_fallback_provider: string
+  ocr_paddleocr_lang: string
+  ocr_paddleocr_use_gpu: boolean
+  ocr_external_api_url: string
+  ocr_external_api_key: string
+  ocr_external_api_timeout: number
+  [key: string]: string | number | boolean
 }
 
 // 配置字段定义
@@ -28,6 +37,8 @@ interface ConfigField {
   type: string
   hint?: string
   options?: string[]
+  optionLabels?: string[]
+  visibleWhen?: (form: SystemConfig) => boolean
 }
 
 // 配置字段分组定义
@@ -82,6 +93,21 @@ function Settings() {
         { key: 'chunk_overlap', label: '重叠大小', type: 'number' },
       ],
     },
+    {
+      title: 'OCR 配置',
+      icon: <ScanText className="h-5 w-5 text-primary" />,
+      description: 'OCR 识别服务配置，用于扫描件和图片型文档的文字提取',
+      fields: [
+        { key: 'ocr_enabled', label: '启用 OCR', type: 'switch' },
+        { key: 'ocr_provider', label: '默认 Provider', type: 'select', options: ['paddleocr', 'external_api'], optionLabels: ['PaddleOCR', '外部 API'], visibleWhen: (f) => f.ocr_enabled },
+        { key: 'ocr_fallback_provider', label: 'Fallback Provider', type: 'select', options: ['', 'paddleocr', 'external_api'], optionLabels: ['不启用', 'PaddleOCR', '外部 API'], visibleWhen: (f) => f.ocr_enabled },
+        { key: 'ocr_paddleocr_lang', label: 'PaddleOCR 语言', type: 'text', hint: '如 "ch"(中文)、"en"(英文)', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'paddleocr' || f.ocr_fallback_provider === 'paddleocr') },
+        { key: 'ocr_paddleocr_use_gpu', label: 'PaddleOCR GPU 加速', type: 'switch', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'paddleocr' || f.ocr_fallback_provider === 'paddleocr') },
+        { key: 'ocr_external_api_url', label: '外部 OCR API 地址', type: 'text', hint: '如 http://ocr-service:8080/recognize', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
+        { key: 'ocr_external_api_key', label: '外部 OCR API 密钥', type: 'password', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
+        { key: 'ocr_external_api_timeout', label: '超时时间 (秒)', type: 'number', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
+      ],
+    },
   ]
 
   const { data: config, isLoading } = useQuery({
@@ -104,7 +130,7 @@ function Settings() {
     },
   })
 
-  function updateField(key: string, value: string | number) {
+  function updateField(key: string, value: string | number | boolean) {
     if (!form) return
     setForm({ ...form, [key]: value })
   }
@@ -173,28 +199,46 @@ function Settings() {
 
             {/* 字段 */}
             <div className="grid gap-4 md:grid-cols-2">
-              {group.fields.map((field) => (
-                <div key={field.key} className="space-y-1.5">
+              {group.fields
+                .filter((field) => !field.visibleWhen || field.visibleWhen(form))
+                .map((field) => (
+                <div key={field.key} className="space-y-1.5 relative">
                   <Label className="text-xs">{field.label}</Label>
-                  {field.type === 'select' && field.options ? (
+                  {field.type === 'switch' ? (
+                    <div className="flex items-center h-9">
+                      <Switch
+                        checked={!!form[field.key]}
+                        onCheckedChange={(val) => updateField(field.key, val)}
+                      />
+                    </div>
+                  ) : field.type === 'select' && field.options ? (
                     <Select
-                      value={String(form[field.key] || '')}
-                      onValueChange={(val) => updateField(field.key, val)}
+                      value={String(form[field.key] ?? '')}
+                      onValueChange={(val) => updateField(field.key, val === '__none__' ? '' : val)}
                     >
                       <SelectTrigger className="h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {field.options.map((opt) => (
-                          <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                        {field.options.map((opt, idx) => (
+                          <SelectItem key={opt || '__none__'} value={opt || '__none__'}>
+                            {field.optionLabels ? field.optionLabels[idx] : opt}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   ) : field.type === 'number' ? (
                     <Input
                       type="number"
-                      value={form[field.key] ?? ''}
+                      value={form[field.key] != null ? Number(form[field.key]) : ''}
                       onChange={(e) => updateField(field.key, Number(e.target.value))}
+                      className="h-9"
+                    />
+                  ) : field.type === 'password' ? (
+                    <Input
+                      type="password"
+                      value={String(form[field.key] || '')}
+                      onChange={(e) => updateField(field.key, e.target.value)}
                       className="h-9"
                     />
                   ) : (

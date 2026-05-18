@@ -40,6 +40,20 @@ class Settings(BaseSettings):
     child_chunk_size: int = 300
     chunk_overlap: int = 50
 
+    # OCR 配置
+    ocr_enabled: bool = True
+    ocr_provider: str = "paddleocr"
+    ocr_fallback_provider: str = ""
+
+    # PaddleOCR 配置
+    ocr_paddleocr_lang: str = "ch"
+    ocr_paddleocr_use_gpu: bool = False
+
+    # 外部 OCR API 配置
+    ocr_external_api_url: str = ""
+    ocr_external_api_key: str = ""
+    ocr_external_api_timeout: float = 30.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

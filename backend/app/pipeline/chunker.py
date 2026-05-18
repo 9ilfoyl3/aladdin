@@ -30,9 +30,14 @@ _STRUCTURE_PATTERNS = [
     r'^#{1,6}\s+',
     # 带序号的标题格式：第一条、第二章等
     r'^第[一二三四五六七八九十百千\d]+[条章节款项]',
+    # VL 模型特有标记（如 [Non-Text]、[Image]、[Figure] 等）
+    r'^\[(?:Non-Text|Image|Figure|Chart|Table)\]',
 ]
 
 _STRUCTURE_RE = re.compile('|'.join(f'(?:{p})' for p in _STRUCTURE_PATTERNS), re.MULTILINE)
+
+# HTML 表格块正则（匹配完整的 <table>...</table>）
+_TABLE_BLOCK_RE = re.compile(r'<table>.*?</table>', re.DOTALL)
 
 
 @dataclass
@@ -91,18 +96,50 @@ class HierarchicalChunker:
     def _split_parent_chunks(self, text: str) -> list[str]:
         """按结构标记和段落边界切分父块
 
-        优先级：结构标记 > 双换行段落 > 句子边界 > 强制切分
+        优先级：表格整块保护 > 结构标记 > 双换行段落 > 句子边界 > 强制切分
         """
-        # 检测是否有结构化标记
-        has_structure = bool(_STRUCTURE_RE.search(text))
+        # 先将 <table>...</table> 块提取为独立段落，避免被切断
+        segments = self._split_preserving_tables(text)
 
-        if has_structure:
-            sections = self._split_by_structure(text)
-        else:
-            sections = self._split_by_paragraphs(text)
+        result: list[str] = []
+        for segment in segments:
+            if segment.startswith("<table>"):
+                # 表格块直接作为独立段落
+                result.append(segment)
+            else:
+                # 非表格部分按原有逻辑切分
+                has_structure = bool(_STRUCTURE_RE.search(segment))
+                if has_structure:
+                    result.extend(self._split_by_structure(segment))
+                else:
+                    result.extend(self._split_by_paragraphs(segment))
 
         # 合并过短的 section，拆分过长的 section
-        return self._normalize_chunks(sections)
+        return self._normalize_chunks(result)
+
+    def _split_preserving_tables(self, text: str) -> list[str]:
+        """将文本按 <table>...</table> 块拆分，保持表格完整性
+
+        返回交替的 [普通文本, 表格块, 普通文本, ...] 列表
+        """
+        segments: list[str] = []
+        last_end = 0
+
+        for match in _TABLE_BLOCK_RE.finditer(text):
+            # 表格前的普通文本
+            before = text[last_end:match.start()].strip()
+            if before:
+                segments.append(before)
+            # 表格块本身
+            segments.append(match.group())
+            last_end = match.end()
+
+        # 最后一段普通文本
+        after = text[last_end:].strip()
+        if after:
+            segments.append(after)
+
+        return segments if segments else [text]
 
     def _split_by_structure(self, text: str) -> list[str]:
         """按结构标记切分，每个标记开始一个新段落"""
@@ -198,9 +235,24 @@ class HierarchicalChunker:
         return chunks if chunks else [text]
 
     def _split_child_chunks(self, text: str) -> list[str]:
-        """将父块切分为子块，优先按结构标记切分，否则按字符数+句子边界"""
+        """将父块切分为子块，保护表格完整性，优先按结构标记切分"""
         if len(text) <= self.child_size:
             return [text]
+
+        # 如果包含表格，先按表格拆分保护
+        if "<table>" in text:
+            segments = self._split_preserving_tables(text)
+            chunks: list[str] = []
+            for segment in segments:
+                if segment.startswith("<table>"):
+                    # 表格块作为独立子块（即使超过 child_size 也不切断）
+                    chunks.append(segment)
+                elif len(segment) <= self.child_size:
+                    chunks.append(segment)
+                else:
+                    chunks.extend(self._split_child_by_size(segment))
+            chunks = self._merge_short_chunks(chunks)
+            return chunks if chunks else [text]
 
         # 如果父块内有结构标记，先按结构切分
         has_structure = bool(_STRUCTURE_RE.search(text))

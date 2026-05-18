@@ -29,6 +29,10 @@ transformers>=4.44.0,<5.0.0
 torch>=2.5.0
 numpy>=2.0.0
 
+# OCR (optional)
+# paddleocr>=2.7.0  # 本地 OCR 引擎，不安装则 PaddleOCRProvider 不注册
+# httpx 已在上方 HTTP & API 部分引入，ExternalAPIProvider 直接使用
+
 # 测试
 pytest>=8.3.3
 pytest-asyncio>=0.24.0

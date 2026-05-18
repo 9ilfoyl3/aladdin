@@ -7,6 +7,7 @@ import Retrieval from './pages/Retrieval'
 import Settings from './pages/Settings'
 import ApiKeys from './pages/ApiKeys'
 import Models from './pages/Models'
+import OcrServices from './pages/OcrServices'
 
 // 应用根组件：路由配置
 function App() {
@@ -19,6 +20,7 @@ function App() {
         <Route path="chat" element={<Chat />} />
         <Route path="retrieval" element={<Retrieval />} />
         <Route path="models" element={<Models />} />
+        <Route path="ocr-services" element={<OcrServices />} />
         <Route path="api-keys" element={<ApiKeys />} />
         <Route path="settings" element={<Settings />} />
       </Route>

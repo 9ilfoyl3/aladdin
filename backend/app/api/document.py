@@ -13,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.manager import get_model_manager
+from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
-from app.schema.db import Chunk, Document, KnowledgeBase
+from app.schema.db import Chunk, Document, KnowledgeBase, OCRConfig
 from app.storage.database import async_session, get_db
 from app.storage.milvus import MilvusClient
 
@@ -78,10 +79,20 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
     try:
         manager = get_model_manager()
         milvus = _get_milvus()
+
+        # 从数据库加载 OCR 配置
+        ocr_manager = None
+        async with async_session() as session:
+            result = await session.execute(select(OCRConfig))
+            configs = result.scalars().all()
+        if configs:
+            ocr_manager = OCRManager(configs)
+
         pipeline = DocumentPipeline(
             model_manager=manager,
             milvus_client=milvus,
             db_session_factory=async_session,
+            ocr_manager=ocr_manager,
         )
         await pipeline.process(file_path, doc_id, kb_id)
     except Exception as e:

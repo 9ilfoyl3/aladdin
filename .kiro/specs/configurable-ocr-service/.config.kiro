@@ -1,0 +1,6 @@
+{
+  "specType": "feature",
+  "workflowType": "design-first",
+  "featureName": "configurable-ocr-service",
+  "designArtifacts": ["high-level", "low-level"]
+}
