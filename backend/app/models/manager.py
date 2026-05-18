@@ -10,8 +10,6 @@ from app.config import Settings
 from app.models.provider import LLMProvider, EmbedProvider, RerankProvider
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
-from app.models.embedding.bge_m3 import BgeM3Embedder
-from app.models.rerank.bge_reranker import BgeReranker
 
 
 class ModelManager:
@@ -27,12 +25,32 @@ class ModelManager:
         self.reranker: RerankProvider = self._init_reranker(config)
 
     def _init_embedder(self, config: Settings) -> EmbedProvider:
-        """初始化 bge-m3 嵌入模型"""
-        return BgeM3Embedder(model_name=config.embed_model, device=config.embed_device)
+        """根据配置初始化嵌入模型
+
+        支持两种 provider：
+        - flag-embedding: 使用 FlagEmbedding 库，支持稠密+稀疏向量，Windows 兼容性差
+        - sentence-transformers: 跨平台兼容，仅稠密向量，稀疏检索需配合 BM25
+        """
+        if config.embed_provider == "flag-embedding":
+            from app.models.embedding.bge_m3 import BgeM3Embedder
+            return BgeM3Embedder(model_name=config.embed_model, device=config.embed_device)
+        else:
+            from app.models.embedding.sentence_transformer import SentenceTransformerEmbedder
+            return SentenceTransformerEmbedder(model_name=config.embed_model, device=config.embed_device)
 
     def _init_reranker(self, config: Settings) -> RerankProvider:
-        """初始化 bge-reranker 重排序模型"""
-        return BgeReranker(model_name=config.rerank_model, device=config.rerank_device)
+        """根据配置初始化重排序模型
+
+        支持两种 provider：
+        - flag-embedding: 使用 FlagEmbedding 库的 FlagReranker，Windows 兼容性差
+        - sentence-transformers: 使用 CrossEncoder，跨平台兼容
+        """
+        if config.rerank_provider == "flag-embedding":
+            from app.models.rerank.bge_reranker import BgeReranker
+            return BgeReranker(model_name=config.rerank_model, device=config.rerank_device)
+        else:
+            from app.models.rerank.cross_encoder_reranker import CrossEncoderReranker
+            return CrossEncoderReranker(model_name=config.rerank_model, device=config.rerank_device)
 
     async def close(self):
         """清理资源"""
