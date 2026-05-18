@@ -76,7 +76,10 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
             return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 回退到系统全局配置
-    return get_model_manager().llm, True, None
+    settings = get_settings()
+    if settings.llm_provider == "vllm":
+        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None
+    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:

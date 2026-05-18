@@ -1,19 +1,28 @@
-"""SQLite 数据库初始化与会话管理"""
+"""PostgreSQL 数据库初始化与会话管理"""
 
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
 from app.schema.db import Base
 
-# 将 sqlite:/// 转换为 sqlite+aiosqlite:/// 以支持异步
 _settings = get_settings()
-_database_url = _settings.database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+_database_url = _settings.database_url
 
-# 异步引擎
-engine = create_async_engine(_database_url, echo=False)
+# 兼容处理：如果用户配置了不带驱动的 URL，自动补上异步驱动
+if _database_url.startswith("sqlite:///"):
+    _database_url = _database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+elif _database_url.startswith("postgresql://"):
+    _database_url = _database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# 异步引擎（PostgreSQL 使用连接池，pool_size 可按需调整）
+engine = create_async_engine(
+    _database_url,
+    echo=False,
+    pool_size=10,
+    max_overflow=20,
+)
 
 # 异步会话工厂
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -30,27 +39,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def _migrate_db() -> None:
-    """执行简单的增量迁移（为已有表添加新列）"""
-    async with engine.begin() as conn:
-        # llm_configs 表添加 stream_enabled 列
-        try:
-            await conn.execute(
-                text("ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT 1")
-            )
-        except Exception:
-            pass  # 列已存在，忽略
-        # llm_configs 表添加 max_context_tokens 列
-        try:
-            await conn.execute(
-                text("ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER")
-            )
-        except Exception:
-            pass  # 列已存在，忽略
-
-
 async def init_db() -> None:
-    """初始化数据库，创建所有表并执行迁移"""
+    """初始化数据库，创建所有表"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await _migrate_db()

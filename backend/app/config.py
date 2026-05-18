@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # 数据库
-    database_url: str = "sqlite:///data/rag.db"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin"
 
     # Milvus
     milvus_host: str = "localhost"
@@ -25,11 +25,11 @@ class Settings(BaseSettings):
 
     # Embedding
     embed_model: str = "BAAI/bge-m3"
-    embed_device: str = "cuda"  # cuda | cpu
+    embed_device: str = "cpu"  # cuda | cpu
 
     # Rerank
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_device: str = "cuda"  # cuda | cpu
+    rerank_device: str = "cpu"  # cuda | cpu
 
     # Agent
     agent_max_iterations: int = 3
@@ -40,9 +40,7 @@ class Settings(BaseSettings):
     child_chunk_size: int = 300
     chunk_overlap: int = 50
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 @lru_cache()
