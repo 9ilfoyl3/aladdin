@@ -381,6 +381,8 @@ async def chat_completions(request: ChatCompletionRequest):
     # 获取 LLM 实例（根据 model_config_id 动态选择）
     llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
 
+    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
+
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
     degraded = False
