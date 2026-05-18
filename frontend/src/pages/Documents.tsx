@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
 import {
   Upload,
   FileText,
@@ -408,7 +409,9 @@ function Documents() {
                   <div className="text-xs text-muted-foreground mb-1.5 font-medium">
                     切片 #{chunk.chunk_index ?? idx + 1}
                   </div>
-                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{chunk.content}</p>
+                  <div className="text-sm leading-relaxed prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0 [&_table]:text-xs [&_table]:border-collapse [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:px-2 [&_th]:py-1">
+                    <ReactMarkdown>{chunk.content}</ReactMarkdown>
+                  </div>
                 </div>
               ))
             )}

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Integer, String, Text, JSON, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Float, Integer, String, Text, JSON, DateTime, ForeignKey, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -95,3 +95,21 @@ class LLMConfig(Base):
     stream_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class OCRConfig(Base):
+    """OCR 服务配置表"""
+    __tablename__ = "ocr_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)  # paddleocr | external_api
+    api_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timeout: Mapped[float] = mapped_column(Float, default=30.0)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
+    extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+

@@ -24,12 +24,14 @@ class Settings(BaseSettings):
     llm_api_key: str = ""  # 远端 API 的密钥（vllm provider 使用）
 
     # Embedding
+    embed_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding
     embed_model: str = "BAAI/bge-m3"
-    embed_device: str = "cpu"  # cuda | cpu
+    embed_device: str = "cpu"  # cuda | cpu | mps
 
     # Rerank
+    rerank_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_device: str = "cpu"  # cuda | cpu
+    rerank_device: str = "cpu"  # cuda | cpu | mps
 
     # Agent
     agent_max_iterations: int = 3
@@ -39,6 +41,20 @@ class Settings(BaseSettings):
     parent_chunk_size: int = 1500
     child_chunk_size: int = 300
     chunk_overlap: int = 50
+
+    # OCR 配置
+    ocr_enabled: bool = True
+    ocr_provider: str = "paddleocr"
+    ocr_fallback_provider: str = ""
+
+    # PaddleOCR 配置
+    ocr_paddleocr_lang: str = "ch"
+    ocr_paddleocr_use_gpu: bool = False
+
+    # 外部 OCR API 配置
+    ocr_external_api_url: str = ""
+    ocr_external_api_key: str = ""
+    ocr_external_api_timeout: float = 30.0
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

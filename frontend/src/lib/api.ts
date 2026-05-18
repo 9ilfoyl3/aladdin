@@ -120,3 +120,49 @@ export const llmConfigApi = {
       body: JSON.stringify(data),
     }),
 }
+
+// OCR 服务配置接口类型
+export interface OCRConfigItem {
+  id: string
+  name: string
+  provider_type: string
+  api_url: string
+  api_key_set: boolean
+  timeout: number
+  is_default: boolean
+  is_fallback: boolean
+  extra_config: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface OCRTestResult {
+  success: boolean
+  message: string
+  elapsed_ms: number | null
+}
+
+// OCR 服务配置接口
+export const ocrConfigApi = {
+  list: () => request<OCRConfigItem[]>('/ocr-configs'),
+  create: (data: { name: string; provider_type: string; api_url: string; api_key?: string; timeout?: number; is_default?: boolean; is_fallback?: boolean; extra_config?: Record<string, unknown> }) =>
+    request<OCRConfigItem>('/ocr-configs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Record<string, unknown>) =>
+    request<OCRConfigItem>(`/ocr-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/ocr-configs/${id}`, { method: 'DELETE' }),
+  test: (data: { provider_type: string; api_url: string; api_key?: string; timeout?: number }) =>
+    request<OCRTestResult>('/ocr-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testSaved: (id: string) =>
+    request<OCRTestResult>(`/ocr-configs/${id}/test`, { method: 'POST' }),
+}
+

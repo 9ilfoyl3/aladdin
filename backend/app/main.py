@@ -10,6 +10,7 @@ from app.api.chat import router as chat_router
 from app.api.document import router as document_router
 from app.api.knowledge_base import router as kb_router
 from app.api.llm_config import router as llm_config_router
+from app.api.ocr_config import router as ocr_config_router
 from app.api.middleware import ApiKeyAuthMiddleware
 from app.api.retrieval import router as retrieval_router
 from app.api.system import router as system_router
@@ -50,6 +51,7 @@ app.include_router(retrieval_router)
 app.include_router(system_router)
 app.include_router(api_key_router)
 app.include_router(llm_config_router)
+app.include_router(ocr_config_router)
 
 
 @app.get("/")

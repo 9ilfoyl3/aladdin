@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Search, FileText, Zap, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react'
 import { retrievalApi, knowledgeBaseApi, llmConfigApi } from '@/lib/api'
@@ -70,6 +70,16 @@ function Retrieval() {
     queryKey: ['llm-configs'],
     queryFn: () => llmConfigApi.list() as Promise<LLMConfigItem[]>,
   })
+
+  // 默认选中 is_default 的模型
+  useEffect(() => {
+    if (llmConfigs.length > 0 && !selectedModel) {
+      const defaultConfig = llmConfigs.find((c) => c.is_default)
+      if (defaultConfig) {
+        setSelectedModel(defaultConfig.id)
+      }
+    }
+  }, [llmConfigs, selectedModel])
 
   // 检索请求（非 agent 模式）
   const searchMutation = useMutation({
