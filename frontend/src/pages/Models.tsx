@@ -114,12 +114,18 @@ function Models() {
     setDialogTesting(true)
     setDialogTestResult(null)
     try {
-      const result = await llmConfigApi.testConnection({
-        provider: form.provider,
-        base_url: form.base_url,
-        model: form.model,
-        api_key: form.api_key || undefined,
-      })
+      let result
+      // 编辑模式下，如果用户没有重新输入 API Key，使用已保存配置测试
+      if (editingItem && !form.api_key && editingItem.api_key_set) {
+        result = await llmConfigApi.test(editingItem.id)
+      } else {
+        result = await llmConfigApi.testConnection({
+          provider: form.provider,
+          base_url: form.base_url,
+          model: form.model,
+          api_key: form.api_key || undefined,
+        })
+      }
       setDialogTestResult(result)
     } catch {
       setDialogTestResult({ success: false, message: '请求失败' })
