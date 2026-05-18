@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,13 @@ class LLMConfigCreate(BaseModel):
     stream_enabled: bool = True
     max_context_tokens: Optional[int] = None
 
+    @field_validator("max_context_tokens", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
+
 
 class LLMConfigUpdate(BaseModel):
     name: Optional[str] = None
@@ -37,6 +44,13 @@ class LLMConfigUpdate(BaseModel):
     is_default: Optional[bool] = None
     stream_enabled: Optional[bool] = None
     max_context_tokens: Optional[int] = None
+
+    @field_validator("max_context_tokens", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
 
 
 class LLMConfigResponse(BaseModel):
@@ -168,6 +182,7 @@ class LLMTestRequest(BaseModel):
     base_url: str
     model: str
     api_key: Optional[str] = None
+    config_id: Optional[str] = None  # 编辑已有配置时传入，用于补全空密钥
 
 
 class LLMTestResponse(BaseModel):
@@ -178,13 +193,22 @@ class LLMTestResponse(BaseModel):
 
 
 @router.post("/test", response_model=LLMTestResponse)
-async def test_llm_connection(body: LLMTestRequest):
+async def test_llm_connection(body: LLMTestRequest, db: AsyncSession = Depends(get_db)):
     """测试 LLM 模型连通性，发送一条简单消息验证配置是否正确"""
+    api_key = body.api_key or ""
+
+    # 如果密钥为空且提供了 config_id，从数据库补全
+    if not api_key and body.config_id:
+        result = await db.execute(select(LLMConfig).where(LLMConfig.id == body.config_id))
+        existing = result.scalar_one_or_none()
+        if existing and existing.api_key:
+            api_key = existing.api_key
+
     try:
         if body.provider == "ollama":
             llm = OllamaLLM(base_url=body.base_url, model=body.model)
         else:
-            llm = VllmLLM(base_url=body.base_url, model=body.model, api_key=body.api_key or "")
+            llm = VllmLLM(base_url=body.base_url, model=body.model, api_key=api_key)
 
         # 发送简单测试消息
         messages = [{"role": "user", "content": "你好，请回复测试成功"}]

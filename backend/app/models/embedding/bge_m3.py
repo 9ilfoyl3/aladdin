@@ -7,6 +7,12 @@
 兼容 Windows / macOS / Linux 全平台。
 """
 
+import os
+
+# 强制离线模式：模型已下载到本地，不联网检查更新
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import asyncio
 import os
 from collections import defaultdict
