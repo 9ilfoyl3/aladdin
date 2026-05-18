@@ -15,9 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
+# 安装 Python 依赖（包含 FlagEmbedding，生产环境使用）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir FlagEmbedding>=1.3.0
 
 # ============ 阶段二：最终镜像 ============
 FROM python:3.12-slim

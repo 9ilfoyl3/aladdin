@@ -85,10 +85,10 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
-      - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
+      - EMBED_DEVICE=${EMBED_DEVICE:-cuda}
+      - RERANK_DEVICE=${RERANK_DEVICE:-cuda}
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-flag-embedding}
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-flag-embedding}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
       - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
