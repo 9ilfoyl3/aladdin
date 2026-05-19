@@ -108,7 +108,7 @@ docker compose up -d
 ```
 
 ## 4. 访问
-- 前端: http://服务器IP
+- 前端: http://服务器IP:8888
 - 后端 API: http://服务器IP:8000
 - API 文档: http://服务器IP:8000/docs
 

@@ -43,7 +43,7 @@ docker compose up -d
 
 echo ""
 echo "=== 部署完成 ==="
-echo "前端: http://$(hostname -I | awk '{print $1}')"
+echo "前端: http://$(hostname -I | awk '{print $1}'):8888"
 echo "后端: http://$(hostname -I | awk '{print $1}'):8000"
 echo "API 文档: http://$(hostname -I | awk '{print $1}'):8000/docs"
 echo ""

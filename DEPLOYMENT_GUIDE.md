@@ -377,4 +377,6 @@ chmod +x deploy-intranet.sh
 ./deploy-intranet.sh
 ```
 
+访问 `http://服务器IP:8888` 即可。API 文档在 `http://服务器IP:8000/docs`。
+
 生产环境默认使用 `flag-embedding` provider + `cuda` 设备。
