@@ -76,7 +76,10 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
             return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 回退到系统全局配置
-    return get_model_manager().llm, True, None
+    settings = get_settings()
+    if settings.llm_provider == "vllm":
+        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None
+    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
@@ -196,19 +199,10 @@ def _get_milvus_client() -> MilvusClient:
 
 
 async def _get_retrieval_mode(kb_id: str, request_mode: str | None) -> str:
-    """确定检索模式：请求指定 > 知识库配置 > 默认 hybrid"""
+    """确定检索模式：请求指定 > 默认 agent"""
     if request_mode:
         return request_mode
-
-    # 从数据库查询知识库配置
-    async with async_session() as session:
-        stmt = select(KnowledgeBase.retrieval_mode).where(KnowledgeBase.id == kb_id)
-        result = await session.execute(stmt)
-        row = result.scalar_one_or_none()
-        if row:
-            return row
-
-    return "hybrid"
+    return "agent"
 
 
 async def _retrieve_chunks(
@@ -426,6 +420,8 @@ async def chat_completions(request: ChatCompletionRequest):
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
     llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
+
+    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
 
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []

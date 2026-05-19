@@ -53,6 +53,7 @@ function Chat() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
+  const [retrievalMode, setRetrievalMode] = useState('auto')
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -126,6 +127,7 @@ function Chat() {
           stream: true,
           knowledge_base_id: selectedKb || undefined,
           model_config_id: selectedModel || undefined,
+          retrieval_mode: retrievalMode === 'auto' ? undefined : retrievalMode,
         }),
       })
 
@@ -490,6 +492,16 @@ function Chat() {
                     {knowledgeBases.map((kb) => (
                       <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
                     ))}
+                  </SelectContent>
+                </Select>
+
+                <Select value={retrievalMode} onValueChange={setRetrievalMode}>
+                  <SelectTrigger className="h-7 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">智能检索</SelectItem>
+                    <SelectItem value="hybrid">快速检索</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

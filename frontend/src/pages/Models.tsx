@@ -481,7 +481,7 @@ function Models() {
                 type="password"
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                placeholder={editingItem ? '留空保持不变' : '输入 API 密钥（可选）'}
+                placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
                 className="mt-1.5"
               />
             </div>
