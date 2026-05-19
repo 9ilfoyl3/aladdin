@@ -65,6 +65,14 @@ $images = @(
     "minio/minio:RELEASE.2023-03-20T20-16-18Z"
 )
 
+# 确保基础设施镜像已拉取
+Write-Host "  确保基础镜像已拉取..."
+foreach ($img in $images) {
+    if ($img -notlike "aladdin-*") {
+        docker pull $img 2>$null
+    }
+}
+
 foreach ($img in $images) {
     $filename = ($img -replace "[/:]", "_") + ".tar"
     Write-Host "  导出 $img -> $filename"
