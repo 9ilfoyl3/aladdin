@@ -237,10 +237,131 @@ function Models() {
           <h1 className="text-2xl font-bold tracking-tight">模型管理</h1>
           <p className="text-muted-foreground text-sm mt-1">配置多个 LLM 模型，在对话中灵活切换</p>
         </div>
-        <Button onClick={openCreate} className="gap-2 cursor-pointer">
-          <Plus className="h-4 w-4" />
-          添加模型
-        </Button>
+        <div className="flex items-center gap-2">
+          {nodeConfigSaved && (
+            <span className="text-sm text-green-600 flex items-center gap-1 animate-in fade-in duration-200">
+              <CheckCircle className="h-4 w-4" />
+              已保存
+            </span>
+          )}
+          <Button
+            onClick={handleNodeConfigSave}
+            disabled={nodeConfigMutation.isPending}
+            variant="outline"
+            className="gap-2 cursor-pointer"
+          >
+            <Save className="h-4 w-4" />
+            {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
+          </Button>
+          <Button onClick={openCreate} className="gap-2 cursor-pointer">
+            <Plus className="h-4 w-4" />
+            添加模型
+          </Button>
+        </div>
+      </div>
+
+      {/* Agent 节点模型配置 - 紧凑内联 */}
+      <div className="mb-6 pb-6 border-b border-border">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+                <Route className="h-4 w-4 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm leading-tight">查询路由</h3>
+                <p className="text-[11px] text-muted-foreground">判断意图，决定是否检索</p>
+              </div>
+            </div>
+            <Select
+              value={nodeForm.router_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
+                <RefreshCw className="h-4 w-4 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm leading-tight">查询改写</h3>
+                <p className="text-[11px] text-muted-foreground">优化查询，提升召回质量</p>
+              </div>
+            </div>
+            <Select
+              value={nodeForm.rewriter_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center">
+                <Brain className="h-4 w-4 text-violet-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm leading-tight">结果反思</h3>
+                <p className="text-[11px] text-muted-foreground">评估结果，决定是否重检索</p>
+              </div>
+            </div>
+            <Select
+              value={nodeForm.reflector_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
       </div>
 
       {/* 搜索栏 + 筛选 + 视图切换 */}
@@ -306,7 +427,7 @@ function Models() {
           <p className="text-muted-foreground text-sm">没有匹配的模型</p>
         </div>
       ) : viewMode === 'grid' ? (
-        <div className="max-h-[520px] overflow-y-auto pr-1">
+        <div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredConfigs.map((config) => (
               <div
@@ -368,7 +489,7 @@ function Models() {
         </div>
       ) : (
         /* 列表视图 */
-        <div className="max-h-[520px] overflow-y-auto border border-border rounded-xl">
+        <div className="border border-border rounded-xl">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
               <tr>
@@ -416,140 +537,6 @@ function Models() {
           </table>
         </div>
       )}
-
-      {/* Agent 节点模型配置 */}
-      <div className="mt-10 pt-8 border-t border-border">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-xl font-semibold tracking-tight">Agent 节点模型配置</h2>
-            <p className="text-muted-foreground text-sm mt-1">为 Agent 各执行节点指定独立模型，未配置的节点将使用对话时选择的模型</p>
-          </div>
-          <div className="flex items-center gap-3">
-            {nodeConfigSaved && (
-              <span className="text-sm text-green-600 flex items-center gap-1 animate-in fade-in duration-200">
-                <CheckCircle className="h-4 w-4" />
-                已保存
-              </span>
-            )}
-            <Button
-              onClick={handleNodeConfigSave}
-              disabled={nodeConfigMutation.isPending}
-              size="sm"
-              className="gap-2 cursor-pointer"
-            >
-              <Save className="h-3.5 w-3.5" />
-              {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {/* Router 节点卡片 */}
-          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-9 h-9 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                <Route className="h-4.5 w-4.5 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm">查询路由</h3>
-                <p className="text-xs text-muted-foreground">Router</p>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">判断用户意图，决定是否需要检索知识库</p>
-            <Select
-              value={nodeForm.router_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Rewriter 节点卡片 */}
-          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center">
-                <RefreshCw className="h-4.5 w-4.5 text-amber-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm">查询改写</h3>
-                <p className="text-xs text-muted-foreground">Rewriter</p>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">优化用户查询，提升检索召回质量</p>
-            <Select
-              value={nodeForm.rewriter_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Reflector 节点卡片 */}
-          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-9 h-9 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                <Brain className="h-4.5 w-4.5 text-violet-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm">结果反思</h3>
-                <p className="text-xs text-muted-foreground">Reflector</p>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">评估检索结果质量，决定是否需要重新检索</p>
-            <Select
-              value={nodeForm.reflector_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      </div>
 
       {/* 创建/编辑对话框 */}
       <Dialog open={showDialog} onOpenChange={closeDialog}>
