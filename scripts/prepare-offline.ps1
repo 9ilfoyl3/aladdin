@@ -98,6 +98,7 @@ Write-Host "`n[5/5] 复制部署配置..." -ForegroundColor Cyan
 
 Copy-Item docker-compose-production.yml "$DEPLOY_DIR\docker-compose.yml"
 Copy-Item backend\.env.example "$DEPLOY_DIR\.env.example"
+Copy-Item backend\.env.production "$DEPLOY_DIR\.env"
 
 # 生成部署说明
 @"
