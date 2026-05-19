@@ -21,7 +21,7 @@ class BaseLoader(ABC):
 
 
 # 支持的文件类型
-SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx"}
+SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "jpg", "jpeg", "png"}
 
 
 def get_loader(file_type: str) -> BaseLoader:
@@ -60,6 +60,9 @@ def get_loader(file_type: str) -> BaseLoader:
     elif file_type == "pptx":
         from app.pipeline.loaders.pptx_loader import PptxLoader
         return PptxLoader()
+    elif file_type in ("jpg", "jpeg", "png"):
+        from app.pipeline.loaders.image_loader import ImageLoader
+        return ImageLoader()
 
     # 不应到达此处
     raise ValueError(f"未实现的加载器: {file_type}")
