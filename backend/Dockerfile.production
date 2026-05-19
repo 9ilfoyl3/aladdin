@@ -7,7 +7,7 @@ FROM python:3.12-slim AS builder
 WORKDIR /app
 
 # 安装系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     build-essential \
     libglib2.0-0 \
     libsm6 \
@@ -27,7 +27,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 安装运行时系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     libglib2.0-0 \
     libsm6 \
     libxext6 \

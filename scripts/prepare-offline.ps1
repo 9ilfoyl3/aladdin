@@ -44,12 +44,20 @@ if (Test-Path $BGE_RERANKER) {
 # ============================================================
 Write-Host "`n[2/5] 构建后端镜像..." -ForegroundColor Cyan
 docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  错误: 后端镜像构建失败！" -ForegroundColor Red
+    exit 1
+}
 
 # ============================================================
 # 3. 构建前端 Docker 镜像
 # ============================================================
 Write-Host "`n[3/5] 构建前端镜像..." -ForegroundColor Cyan
 docker build -t aladdin-frontend:latest frontend/
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  错误: 前端镜像构建失败！" -ForegroundColor Red
+    exit 1
+}
 
 # ============================================================
 # 4. 导出所有 Docker 镜像
@@ -77,6 +85,10 @@ foreach ($img in $images) {
     $filename = ($img -replace "[/:]", "_") + ".tar"
     Write-Host "  导出 $img -> $filename"
     docker save $img -o "$DEPLOY_DIR\$filename"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  错误: 导出 $img 失败！" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ============================================================
