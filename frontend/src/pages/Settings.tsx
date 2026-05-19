@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, RefreshCw, Cpu, Brain, Bot, Layers, ScanText } from 'lucide-react'
+import { Save, RefreshCw, Cpu, Brain, Bot, Layers } from 'lucide-react'
 import { systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,14 +19,6 @@ interface SystemConfig {
   parent_chunk_size: number
   child_chunk_size: number
   chunk_overlap: number
-  ocr_enabled: boolean
-  ocr_provider: string
-  ocr_fallback_provider: string
-  ocr_paddleocr_lang: string
-  ocr_paddleocr_use_gpu: boolean
-  ocr_external_api_url: string
-  ocr_external_api_key: string
-  ocr_external_api_timeout: number
   [key: string]: string | number | boolean
 }
 
@@ -93,21 +85,7 @@ function Settings() {
         { key: 'chunk_overlap', label: '重叠大小', type: 'number' },
       ],
     },
-    {
-      title: 'OCR 配置',
-      icon: <ScanText className="h-5 w-5 text-primary" />,
-      description: 'OCR 识别服务配置，用于扫描件和图片型文档的文字提取',
-      fields: [
-        { key: 'ocr_enabled', label: '启用 OCR', type: 'switch' },
-        { key: 'ocr_provider', label: '默认 Provider', type: 'select', options: ['paddleocr', 'external_api'], optionLabels: ['PaddleOCR', '外部 API'], visibleWhen: (f) => f.ocr_enabled },
-        { key: 'ocr_fallback_provider', label: 'Fallback Provider', type: 'select', options: ['', 'paddleocr', 'external_api'], optionLabels: ['不启用', 'PaddleOCR', '外部 API'], visibleWhen: (f) => f.ocr_enabled },
-        { key: 'ocr_paddleocr_lang', label: 'PaddleOCR 语言', type: 'text', hint: '如 "ch"(中文)、"en"(英文)', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'paddleocr' || f.ocr_fallback_provider === 'paddleocr') },
-        { key: 'ocr_paddleocr_use_gpu', label: 'PaddleOCR GPU 加速', type: 'switch', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'paddleocr' || f.ocr_fallback_provider === 'paddleocr') },
-        { key: 'ocr_external_api_url', label: '外部 OCR API 地址', type: 'text', hint: '如 http://ocr-service:8080/recognize', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
-        { key: 'ocr_external_api_key', label: '外部 OCR API 密钥', type: 'password', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
-        { key: 'ocr_external_api_timeout', label: '超时时间 (秒)', type: 'number', visibleWhen: (f) => f.ocr_enabled && (f.ocr_provider === 'external_api' || f.ocr_fallback_provider === 'external_api') },
-      ],
-    },
+
   ]
 
   const { data: config, isLoading } = useQuery({

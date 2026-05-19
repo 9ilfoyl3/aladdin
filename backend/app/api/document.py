@@ -61,6 +61,7 @@ class ChunkResponse(BaseModel):
     content: str
     chunk_index: int | None
     created_at: str
+    children: list[str] = []  # 子块内容列表，用于前端高亮
 
 
 # ============================================================
@@ -266,16 +267,27 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/api/documents/{doc_id}/chunks", response_model=list[ChunkResponse])
 async def list_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
-    """查看文档的切片列表"""
+    """查看文档的切片列表（返回父块 + 子块内容用于高亮）"""
     # 验证文档存在
     doc_result = await db.execute(select(Document).where(Document.id == doc_id))
     if doc_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="文档不存在")
 
+    # 查询父块
     result = await db.execute(
-        select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_index)
+        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.parent_id.is_(None)).order_by(Chunk.chunk_index)
     )
-    chunks = result.scalars().all()
+    parent_chunks = result.scalars().all()
+
+    # 查询所有子块，按 parent_id 分组
+    child_result = await db.execute(
+        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.parent_id.isnot(None)).order_by(Chunk.chunk_index)
+    )
+    all_children = child_result.scalars().all()
+    children_by_parent: dict[str, list[str]] = {}
+    for child in all_children:
+        children_by_parent.setdefault(child.parent_id, []).append(child.content)
+
     return [
         ChunkResponse(
             id=c.id,
@@ -285,6 +297,7 @@ async def list_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
             content=c.content,
             chunk_index=c.chunk_index,
             created_at=c.created_at.isoformat() if c.created_at else "",
+            children=children_by_parent.get(c.id, []),
         )
-        for c in chunks
+        for c in parent_chunks
     ]
