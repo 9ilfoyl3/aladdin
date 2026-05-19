@@ -1,20 +1,19 @@
 """bge-reranker-v2-m3 本地重排序实现
 
-使用 FlagEmbedding 库加载 FlagReranker，
+使用 sentence-transformers 的 CrossEncoder 加载 bge-reranker 模型，
 对候选文档按相关性重新排序。
 通过 asyncio.to_thread 包装同步调用以兼容异步接口。
 
 分数经 sigmoid 归一化到 [0, 1] 区间，便于设置统一阈值和跨查询比较。
 
-注意：FlagReranker 底层 tokenizer 非线程安全，
-并发调用会触发 "Already borrowed" 错误，需用锁串行化。
+兼容 Windows / macOS / Linux 全平台。
 """
 
 import asyncio
 import math
 import threading
 
-from FlagEmbedding import FlagReranker
+from sentence_transformers import CrossEncoder
 
 from app.models.provider import RerankProvider
 
@@ -31,15 +30,13 @@ class BgeReranker(RerankProvider):
         """初始化 reranker 模型
 
         Args:
-            model_name: 模型名称或路径
+            model_name: 模型名称或本地路径
             device: 推理设备，cuda 或 cpu
         """
         self.model_name = model_name
         self.device = device
-        # use_fp16 仅在 cuda 设备上启用
-        use_fp16 = device == "cuda"
-        self._model = FlagReranker(model_name, use_fp16=use_fp16, device=device)
-        # FlagReranker 的 tokenizer 非线程安全，并发调用需串行化
+        self._model = CrossEncoder(model_name, device=device)
+        # CrossEncoder 的 predict 方法非线程安全，并发调用需串行化
         self._lock = threading.Lock()
 
     def _compute(self, query: str, documents: list[str]) -> list[float]:
@@ -49,8 +46,10 @@ class BgeReranker(RerankProvider):
         """
         pairs = [[query, doc] for doc in documents]
         with self._lock:
-            raw_scores = self._model.compute_score(pairs)
-        # 单文档时返回 float，统一转为 list
+            raw_scores = self._model.predict(pairs, show_progress_bar=False)
+        # 统一转为 list
+        if hasattr(raw_scores, 'tolist'):
+            raw_scores = raw_scores.tolist()
         if isinstance(raw_scores, (int, float)):
             raw_scores = [raw_scores]
         # sigmoid 归一化

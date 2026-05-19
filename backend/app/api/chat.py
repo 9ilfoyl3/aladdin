@@ -38,7 +38,7 @@ from app.schema.api import (
     StreamChoice,
     UsageInfo,
 )
-from app.schema.db import KnowledgeBase, LLMConfig
+from app.schema.db import AgentNodeConfig, KnowledgeBase, LLMConfig
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient
 
@@ -76,7 +76,10 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
             return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 回退到系统全局配置
-    return get_model_manager().llm, True, None
+    settings = get_settings()
+    if settings.llm_provider == "vllm":
+        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None
+    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
@@ -85,6 +88,42 @@ def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
         return OllamaLLM(base_url=config.base_url, model=config.model)
     else:
         return VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
+
+
+async def _get_node_llm(node_name: str, fallback_llm: LLMProvider) -> LLMProvider:
+    """获取指定 Agent 节点的独立 LLM 实例
+
+    从 AgentNodeConfig 表查询节点配置，若配置有效则创建对应 LLM 实例；
+    未配置或创建失败时返回 fallback_llm。
+
+    Args:
+        node_name: 节点名称（router / rewriter / reflector）
+        fallback_llm: 回退使用的对话 LLM
+
+    Returns:
+        节点专属 LLM 或 fallback LLM
+    """
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(AgentNodeConfig).where(AgentNodeConfig.node_name == node_name)
+            )
+            node_config = result.scalar_one_or_none()
+            if not node_config or not node_config.model_config_id:
+                return fallback_llm
+
+            llm_result = await session.execute(
+                select(LLMConfig).where(LLMConfig.id == node_config.model_config_id)
+            )
+            llm_config = llm_result.scalar_one_or_none()
+            if not llm_config:
+                return fallback_llm
+
+            return _create_llm_from_config(llm_config)
+    except Exception as e:
+        logger.warning("加载节点 [%s] 独立模型失败，使用对话模型: %s", node_name, e)
+        return fallback_llm
+
 
 # RAG 系统提示词模板
 _SYSTEM_PROMPT = """你是一个知识库问答助手。请根据以下检索到的参考内容回答用户问题。
@@ -160,19 +199,10 @@ def _get_milvus_client() -> MilvusClient:
 
 
 async def _get_retrieval_mode(kb_id: str, request_mode: str | None) -> str:
-    """确定检索模式：请求指定 > 知识库配置 > 默认 hybrid"""
+    """确定检索模式：请求指定 > 默认 agent"""
     if request_mode:
         return request_mode
-
-    # 从数据库查询知识库配置
-    async with async_session() as session:
-        stmt = select(KnowledgeBase.retrieval_mode).where(KnowledgeBase.id == kb_id)
-        result = await session.execute(stmt)
-        row = result.scalar_one_or_none()
-        if row:
-            return row
-
-    return "hybrid"
+    return "agent"
 
 
 async def _retrieve_chunks(
@@ -199,7 +229,11 @@ async def _retrieve_chunks(
         return results, False
 
     elif mode == "agent":
-        # Agent 模式：完整编排，使用对话选择的 LLM
+        # Agent 模式：完整编排，各节点加载独立 LLM
+        router_llm = await _get_node_llm("router", llm)
+        rewriter_llm = await _get_node_llm("rewriter", llm)
+        reflector_llm = await _get_node_llm("reflector", llm)
+
         vector_retriever = VectorRetriever(manager.embedder, milvus)
         sparse_retriever = SparseRetriever(manager.embedder, milvus)
         hybrid_retriever = HybridRetriever(
@@ -209,10 +243,10 @@ async def _retrieve_chunks(
             db_session_factory=async_session,
         )
         orchestrator = AgentOrchestrator(
-            router=QueryRouter(llm),
-            rewriter=QueryRewriter(llm),
+            router=QueryRouter(router_llm),
+            rewriter=QueryRewriter(rewriter_llm),
             executor=RetrievalExecutor(hybrid_retriever, embedder=manager.embedder),
-            reflector=Reflector(llm),
+            reflector=Reflector(reflector_llm),
             retriever=hybrid_retriever,
             max_iterations=settings.agent_max_iterations,
             timeout=settings.agent_timeout,
@@ -386,6 +420,8 @@ async def chat_completions(request: ChatCompletionRequest):
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
     llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
+
+    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
 
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []

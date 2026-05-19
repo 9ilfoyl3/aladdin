@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server } from 'lucide-react'
-import { llmConfigApi } from '@/lib/api'
+import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Save } from 'lucide-react'
+import { llmConfigApi, agentNodeConfigApi } from '@/lib/api'
+import type { AgentNodeConfigUpdate } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -19,6 +20,7 @@ interface LLMConfigItem {
   is_default: boolean
   stream_enabled: boolean
   max_context_tokens: number | null
+  chat_visible: boolean
   created_at: string
 }
 
@@ -31,6 +33,7 @@ interface FormData {
   is_default: boolean
   stream_enabled: boolean
   max_context_tokens: string
+  chat_visible: boolean
 }
 
 const emptyForm: FormData = {
@@ -42,6 +45,7 @@ const emptyForm: FormData = {
   is_default: false,
   stream_enabled: true,
   max_context_tokens: '',
+  chat_visible: true,
 }
 
 function Models() {
@@ -65,6 +69,7 @@ function Models() {
       is_default: data.is_default,
       stream_enabled: data.stream_enabled,
       max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
+      chat_visible: data.chat_visible,
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['llm-configs'] })
@@ -110,6 +115,45 @@ function Models() {
   const [dialogTestResult, setDialogTestResult] = useState<{ success: boolean; message: string; reply?: string } | null>(null)
   const [dialogTesting, setDialogTesting] = useState(false)
 
+  // Agent 节点配置相关状态
+  const { data: nodeConfig } = useQuery({
+    queryKey: ['agent-node-configs'],
+    queryFn: () => agentNodeConfigApi.get(),
+  })
+
+  const [nodeForm, setNodeForm] = useState<AgentNodeConfigUpdate>({})
+  const [nodeConfigSaved, setNodeConfigSaved] = useState(false)
+
+  // 同步节点配置到表单
+  useEffect(() => {
+    if (nodeConfig) {
+      setNodeForm({
+        router_model_id: nodeConfig.router_model_id,
+        rewriter_model_id: nodeConfig.rewriter_model_id,
+        reflector_model_id: nodeConfig.reflector_model_id,
+      })
+    }
+  }, [nodeConfig])
+
+  const nodeConfigMutation = useMutation({
+    mutationFn: (data: AgentNodeConfigUpdate) => agentNodeConfigApi.update(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agent-node-configs'] })
+      setNodeConfigSaved(true)
+      setTimeout(() => setNodeConfigSaved(false), 2000)
+    },
+  })
+
+  function handleNodeConfigSave() {
+    // null 值转换为空字符串以清除绑定
+    const payload: AgentNodeConfigUpdate = {
+      router_model_id: nodeForm.router_model_id === null ? '' : nodeForm.router_model_id,
+      rewriter_model_id: nodeForm.rewriter_model_id === null ? '' : nodeForm.rewriter_model_id,
+      reflector_model_id: nodeForm.reflector_model_id === null ? '' : nodeForm.reflector_model_id,
+    }
+    nodeConfigMutation.mutate(payload)
+  }
+
   async function handleTestInDialog() {
     setDialogTesting(true)
     setDialogTestResult(null)
@@ -152,6 +196,7 @@ function Models() {
       is_default: item.is_default,
       stream_enabled: item.stream_enabled,
       max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
+      chat_visible: item.chat_visible,
     })
     setShowDialog(true)
   }
@@ -229,6 +274,9 @@ function Models() {
               {/* 名称 + Provider */}
               <div className="flex items-center gap-2 mb-3">
                 <h3 className="font-semibold text-base truncate">{config.name}</h3>
+                {!config.chat_visible && (
+                  <Badge variant="secondary" className="text-xs shrink-0">仅内部</Badge>
+                )}
                 <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
                   {config.provider}
                 </Badge>
@@ -294,6 +342,87 @@ function Models() {
         </div>
       )}
 
+      {/* Agent 节点模型配置 */}
+      <div className="mt-10 pt-8 border-t border-border">
+        <div className="mb-6">
+          <h2 className="text-xl font-semibold tracking-tight">Agent 节点模型配置</h2>
+          <p className="text-muted-foreground text-sm mt-1">为 Agent 各执行节点指定独立模型，未配置的节点将使用对话时选择的模型</p>
+        </div>
+
+        <div className="space-y-4 max-w-md">
+          <div>
+            <Label>查询路由 (Router)</Label>
+            <Select
+              value={nodeForm.router_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="mt-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <Label>查询改写 (Rewriter)</Label>
+            <Select
+              value={nodeForm.rewriter_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="mt-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <Label>结果反思 (Reflector)</Label>
+            <Select
+              value={nodeForm.reflector_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
+            >
+              <SelectTrigger className="mt-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                {configs.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center gap-3 pt-2">
+            <Button
+              onClick={handleNodeConfigSave}
+              disabled={nodeConfigMutation.isPending}
+              className="gap-2 cursor-pointer"
+            >
+              <Save className="h-4 w-4" />
+              {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
+            </Button>
+            {nodeConfigSaved && (
+              <span className="text-sm text-green-600 flex items-center gap-1">
+                <CheckCircle className="h-4 w-4" />
+                保存成功
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* 创建/编辑对话框 */}
       <Dialog open={showDialog} onOpenChange={closeDialog}>
         <DialogContent>
@@ -352,7 +481,7 @@ function Models() {
                 type="password"
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                placeholder={editingItem ? '留空保持不变' : '输入 API 密钥（可选）'}
+                placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
                 className="mt-1.5"
               />
             </div>
@@ -365,6 +494,16 @@ function Models() {
                 className="rounded border-border"
               />
               <Label htmlFor="is_default" className="text-sm font-normal cursor-pointer">设为默认模型</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="chat_visible"
+                checked={form.chat_visible}
+                onChange={(e) => setForm({ ...form, chat_visible: e.target.checked })}
+                className="rounded border-border"
+              />
+              <Label htmlFor="chat_visible" className="text-sm font-normal cursor-pointer">允许在对话中选择此模型</Label>
             </div>
             <div className="flex items-center gap-2">
               <input
