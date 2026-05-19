@@ -174,7 +174,10 @@ async def _perform_ocr_test(provider_type: str, api_url: str, api_key: Optional[
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.head(api_url, headers=headers)
             elapsed_ms = (time.time() - start) * 1000
-            return OCRTestResponse(success=True, message=f"连接成功，状态码 {response.status_code}", elapsed_ms=elapsed_ms)
+            if 200 <= response.status_code < 400:
+                return OCRTestResponse(success=True, message=f"连接成功，状态码 {response.status_code}", elapsed_ms=elapsed_ms)
+            else:
+                return OCRTestResponse(success=False, message=f"服务异常，状态码 {response.status_code}", elapsed_ms=elapsed_ms)
         else:
             return OCRTestResponse(success=False, message="不支持的 provider 类型", elapsed_ms=None)
     except httpx.TimeoutException:
