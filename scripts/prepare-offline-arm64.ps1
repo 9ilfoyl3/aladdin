@@ -15,8 +15,8 @@ New-Item -ItemType Directory -Force -Path $DEPLOY_DIR | Out-Null
 # 0. 确保 buildx 支持 ARM64
 # ============================================================
 Write-Host "`n[0/5] 检查 Docker buildx 多架构支持..." -ForegroundColor Cyan
-docker buildx create --name arm-builder --use 2>$null
-docker buildx inspect --bootstrap 2>$null
+$null = docker buildx create --name arm-builder --use 2>&1
+$null = docker buildx inspect --bootstrap 2>&1
 Write-Host "  buildx 就绪"
 
 # ============================================================
