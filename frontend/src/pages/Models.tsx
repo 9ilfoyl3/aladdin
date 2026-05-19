@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Save } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Save, Route, RefreshCw, Brain, Search, LayoutGrid, List } from 'lucide-react'
 import { llmConfigApi, agentNodeConfigApi } from '@/lib/api'
 import type { AgentNodeConfigUpdate } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -53,11 +53,25 @@ function Models() {
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<LLMConfigItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [filterProvider, setFilterProvider] = useState<string>('all')
 
   const { data: configs = [], isLoading } = useQuery({
     queryKey: ['llm-configs'],
     queryFn: () => llmConfigApi.list() as Promise<LLMConfigItem[]>,
   })
+
+  // 搜索和筛选
+  const filteredConfigs = useMemo(() => {
+    return configs.filter((c) => {
+      const matchesSearch = !searchQuery ||
+        c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        c.model.toLowerCase().includes(searchQuery.toLowerCase())
+      const matchesProvider = filterProvider === 'all' || c.provider === filterProvider
+      return matchesSearch && matchesProvider
+    })
+  }, [configs, searchQuery, filterProvider])
 
   const createMutation = useMutation({
     mutationFn: (data: FormData) => llmConfigApi.create({
@@ -218,7 +232,7 @@ function Models() {
   return (
     <div>
       {/* 页面头部 */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">模型管理</h1>
           <p className="text-muted-foreground text-sm mt-1">配置多个 LLM 模型，在对话中灵活切换</p>
@@ -228,6 +242,45 @@ function Models() {
           添加模型
         </Button>
       </div>
+
+      {/* 搜索栏 + 筛选 + 视图切换 */}
+      {configs.length > 0 && (
+        <div className="flex items-center gap-3 mb-4">
+          <div className="relative flex-1 max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索模型名称..."
+              className="pl-9 h-9"
+            />
+          </div>
+          <Select value={filterProvider} onValueChange={setFilterProvider}>
+            <SelectTrigger className="w-[140px] h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部 Provider</SelectItem>
+              <SelectItem value="ollama">Ollama</SelectItem>
+              <SelectItem value="vllm">OpenAI 兼容</SelectItem>
+            </SelectContent>
+          </Select>
+          <div className="flex items-center border border-border rounded-lg p-0.5 ml-auto">
+            <button
+              onClick={() => setViewMode('grid')}
+              className={`p-1.5 rounded-md cursor-pointer transition-colors ${viewMode === 'grid' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              <LayoutGrid className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setViewMode('list')}
+              className={`p-1.5 rounded-md cursor-pointer transition-colors ${viewMode === 'list' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              <List className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 模型列表 */}
       {isLoading ? (
@@ -248,177 +301,252 @@ function Models() {
             添加模型
           </Button>
         </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {configs.map((config) => (
-            <div
-              key={config.id}
-              className="group relative rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-lg hover:border-primary/20 hover:-translate-y-0.5"
-            >
-              {/* 默认标记 */}
-              {config.is_default && (
-                <div className="absolute top-4 right-4">
-                  <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />
-                </div>
-              )}
-
-              {/* 图标 */}
-              <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
-                {config.provider === 'ollama' ? (
-                  <Server className="h-5 w-5 text-primary" />
-                ) : (
-                  <Globe className="h-5 w-5 text-primary" />
-                )}
-              </div>
-
-              {/* 名称 + Provider */}
-              <div className="flex items-center gap-2 mb-3">
-                <h3 className="font-semibold text-base truncate">{config.name}</h3>
-                {!config.chat_visible && (
-                  <Badge variant="secondary" className="text-xs shrink-0">仅内部</Badge>
-                )}
-                <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                  {config.provider}
-                </Badge>
-              </div>
-
-              {/* 详细信息 */}
-              <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
-                <p className="truncate">
-                  <span className="text-foreground/60">地址:</span> {config.base_url}
-                </p>
-                <p className="truncate">
-                  <span className="text-foreground/60">模型:</span> {config.model}
-                </p>
-                <p>
-                  <span className="text-foreground/60">密钥:</span> {config.api_key_set ? '已设置' : '未设置'}
-                </p>
-              </div>
-
-              {/* 操作按钮 */}
-              <div className="flex items-center gap-1 pt-3 border-t border-border/60">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs gap-1 cursor-pointer"
-                  onClick={() => testMutation.mutate(config.id)}
-                  disabled={testingId === config.id}
-                >
-                  <Zap className="h-3.5 w-3.5" />
-                  {testingId === config.id ? '测试中' : '测试'}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs gap-1 cursor-pointer"
-                  onClick={() => openEdit(config)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                  编辑
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
-                  onClick={() => deleteMutation.mutate(config.id)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  删除
-                </Button>
-              </div>
-
-              {/* 测试结果 */}
-              {testResult && testResult.id === config.id && (
-                <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-                  <div className="flex items-center gap-1.5">
-                    {testResult.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                    <span>{testResult.message}</span>
+      ) : filteredConfigs.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12">
+          <p className="text-muted-foreground text-sm">没有匹配的模型</p>
+        </div>
+      ) : viewMode === 'grid' ? (
+        <div className="max-h-[520px] overflow-y-auto pr-1">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {filteredConfigs.map((config) => (
+              <div
+                key={config.id}
+                className="group relative rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-lg hover:border-primary/20 hover:-translate-y-0.5"
+              >
+                {config.is_default && (
+                  <div className="absolute top-4 right-4">
+                    <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />
                   </div>
-                  {testResult.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResult.reply}</p>}
+                )}
+                <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
+                  {config.provider === 'ollama' ? (
+                    <Server className="h-5 w-5 text-primary" />
+                  ) : (
+                    <Globe className="h-5 w-5 text-primary" />
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+                <div className="flex items-center gap-2 mb-3">
+                  <h3 className="font-semibold text-base truncate">{config.name}</h3>
+                  {!config.chat_visible && (
+                    <Badge variant="secondary" className="text-xs shrink-0">仅内部</Badge>
+                  )}
+                  <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
+                    {config.provider}
+                  </Badge>
+                </div>
+                <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
+                  <p className="truncate"><span className="text-foreground/60">地址:</span> {config.base_url}</p>
+                  <p className="truncate"><span className="text-foreground/60">模型:</span> {config.model}</p>
+                  <p><span className="text-foreground/60">密钥:</span> {config.api_key_set ? '已设置' : '未设置'}</p>
+                </div>
+                <div className="flex items-center gap-1 pt-3 border-t border-border/60">
+                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 cursor-pointer" onClick={() => testMutation.mutate(config.id)} disabled={testingId === config.id}>
+                    <Zap className="h-3.5 w-3.5" />
+                    {testingId === config.id ? '测试中' : '测试'}
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 cursor-pointer" onClick={() => openEdit(config)}>
+                    <Pencil className="h-3.5 w-3.5" />
+                    编辑
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    删除
+                  </Button>
+                </div>
+                {testResult && testResult.id === config.id && (
+                  <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                    <div className="flex items-center gap-1.5">
+                      {testResult.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                      <span>{testResult.message}</span>
+                    </div>
+                    {testResult.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResult.reply}</p>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        /* 列表视图 */
+        <div className="max-h-[520px] overflow-y-auto border border-border rounded-xl">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
+              <tr>
+                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">名称</th>
+                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">Provider</th>
+                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden md:table-cell">模型</th>
+                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden lg:table-cell">地址</th>
+                <th className="text-right font-medium px-4 py-2.5 text-muted-foreground">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredConfigs.map((config) => (
+                <tr key={config.id} className="border-b border-border/50 last:border-0 hover:bg-muted/30 transition-colors">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{config.name}</span>
+                      {config.is_default && <Star className="h-3.5 w-3.5 text-yellow-500 fill-yellow-500" />}
+                      {!config.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">仅内部</Badge>}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20">
+                      {config.provider}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground truncate max-w-[160px] hidden md:table-cell">{config.model}</td>
+                  <td className="px-4 py-3 text-muted-foreground truncate max-w-[200px] hidden lg:table-cell">{config.base_url}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={() => testMutation.mutate(config.id)} disabled={testingId === config.id}>
+                        <Zap className="h-3 w-3" />
+                        {testingId === config.id ? '...' : '测试'}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={() => openEdit(config)}>
+                        <Pencil className="h-3 w-3" />
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
       {/* Agent 节点模型配置 */}
       <div className="mt-10 pt-8 border-t border-border">
-        <div className="mb-6">
-          <h2 className="text-xl font-semibold tracking-tight">Agent 节点模型配置</h2>
-          <p className="text-muted-foreground text-sm mt-1">为 Agent 各执行节点指定独立模型，未配置的节点将使用对话时选择的模型</p>
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">Agent 节点模型配置</h2>
+            <p className="text-muted-foreground text-sm mt-1">为 Agent 各执行节点指定独立模型，未配置的节点将使用对话时选择的模型</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {nodeConfigSaved && (
+              <span className="text-sm text-green-600 flex items-center gap-1 animate-in fade-in duration-200">
+                <CheckCircle className="h-4 w-4" />
+                已保存
+              </span>
+            )}
+            <Button
+              onClick={handleNodeConfigSave}
+              disabled={nodeConfigMutation.isPending}
+              size="sm"
+              className="gap-2 cursor-pointer"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
+            </Button>
+          </div>
         </div>
 
-        <div className="space-y-4 max-w-md">
-          <div>
-            <Label>查询路由 (Router)</Label>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {/* Router 节点卡片 */}
+          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-9 h-9 rounded-lg bg-blue-500/10 flex items-center justify-center">
+                <Route className="h-4.5 w-4.5 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm">查询路由</h3>
+                <p className="text-xs text-muted-foreground">Router</p>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">判断用户意图，决定是否需要检索知识库</p>
             <Select
               value={nodeForm.router_model_id || '__none__'}
               onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
             >
-              <SelectTrigger className="mt-1.5">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
                 {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
-          <div>
-            <Label>查询改写 (Rewriter)</Label>
+          {/* Rewriter 节点卡片 */}
+          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center">
+                <RefreshCw className="h-4.5 w-4.5 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm">查询改写</h3>
+                <p className="text-xs text-muted-foreground">Rewriter</p>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">优化用户查询，提升检索召回质量</p>
             <Select
               value={nodeForm.rewriter_model_id || '__none__'}
               onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
             >
-              <SelectTrigger className="mt-1.5">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
                 {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
-          <div>
-            <Label>结果反思 (Reflector)</Label>
+          {/* Reflector 节点卡片 */}
+          <div className="rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-md hover:border-primary/20">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-9 h-9 rounded-lg bg-violet-500/10 flex items-center justify-center">
+                <Brain className="h-4.5 w-4.5 text-violet-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-sm">结果反思</h3>
+                <p className="text-xs text-muted-foreground">Reflector</p>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">评估检索结果质量，决定是否需要重新检索</p>
             <Select
               value={nodeForm.reflector_model_id || '__none__'}
               onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
             >
-              <SelectTrigger className="mt-1.5">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">未配置（使用对话模型）</SelectItem>
+                <SelectItem value="__none__">
+                  <span className="text-muted-foreground">使用对话模型</span>
+                </SelectItem>
                 {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-center gap-2">
+                      {m.name}
+                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
+                    </span>
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </div>
-
-          <div className="flex items-center gap-3 pt-2">
-            <Button
-              onClick={handleNodeConfigSave}
-              disabled={nodeConfigMutation.isPending}
-              className="gap-2 cursor-pointer"
-            >
-              <Save className="h-4 w-4" />
-              {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
-            </Button>
-            {nodeConfigSaved && (
-              <span className="text-sm text-green-600 flex items-center gap-1">
-                <CheckCircle className="h-4 w-4" />
-                保存成功
-              </span>
-            )}
           </div>
         </div>
       </div>
