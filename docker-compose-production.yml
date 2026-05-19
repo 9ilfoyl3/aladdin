@@ -46,8 +46,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
-    ports:
-      - "19530:19530"
+    expose:
+      - "19530"
     depends_on:
       - etcd
       - minio
@@ -64,8 +64,8 @@ services:
       POSTGRES_DB: aladdin
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -79,8 +79,8 @@ services:
 
   backend:
     image: aladdin-backend:latest
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
