@@ -107,7 +107,7 @@ services:
   frontend:
     image: aladdin-frontend:latest
     ports:
-      - "80:80"
+      - "8888:80"
     depends_on:
       - backend
     restart: unless-stopped
