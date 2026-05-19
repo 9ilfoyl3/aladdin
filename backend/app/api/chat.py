@@ -179,17 +179,26 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
         for row in result:
             doc_filenames[row.id] = row.filename
 
-    return [
-        ReferenceItem(
-            doc_id=chunk.doc_id,
-            chunk_id=chunk.chunk_id,
-            filename=doc_filenames.get(chunk.doc_id, ""),
-            content=chunk.content[:500],
-            child_content=chunk.child_content[:500] if chunk.child_content else chunk.content[:500],
-            score=round(chunk.score, 4),
+    refs = []
+    for chunk in chunks:
+        child = chunk.child_content[:500] if chunk.child_content else ""
+        parent = chunk.content[:1500] if chunk.content else ""
+
+        # 如果截断后 child 和 parent 相同（子块就是父块本身），清空 child 避免前端误判
+        if child and parent and child == parent:
+            child = ""
+
+        refs.append(
+            ReferenceItem(
+                doc_id=chunk.doc_id,
+                chunk_id=chunk.chunk_id,
+                filename=doc_filenames.get(chunk.doc_id, ""),
+                content=parent,
+                child_content=child,
+                score=round(chunk.score, 4),
+            )
         )
-        for chunk in chunks
-    ]
+    return refs
 
 
 def _get_milvus_client() -> MilvusClient:

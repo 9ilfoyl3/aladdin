@@ -323,4 +323,58 @@ Docker Desktop:
 
 线上服务:
   └─ LLM API (DeepSeek/通义/火山等) ← 对话生成
+
+可选外部服务:
+  └─ OCR 服务 (如 http://10.30.1.2:8909/parse) ← 图片/扫描件识别
 ```
+
+## 支持的文件格式
+
+| 格式 | 处理方式 |
+|------|---------|
+| pdf | PyMuPDF 提取文本，空文本自动走 OCR |
+| docx | python-docx |
+| xlsx | openpyxl |
+| pptx | python-pptx |
+| txt/md | 直接读取 |
+| jpg/jpeg/png | OCR 服务识别（需配置 OCR 服务） |
+
+## 检索模式
+
+对话时由用户选择，不绑定知识库：
+
+| 前端显示 | 实际模式 | 说明 |
+|---------|---------|------|
+| 智能检索（默认） | agent | Router 自动判断复杂度，简单走 hybrid，复杂走迭代 |
+| 快速检索 | hybrid | 直接混合检索，跳过 Router |
+
+## Agent 节点模型配置
+
+可在前端"模型管理"页面为 Agent 各节点配置独立 LLM：
+
+| 节点 | 推荐模型 | 作用 |
+|------|---------|------|
+| Router | 轻量模型 | 判断 simple/complex |
+| Rewriter | 轻量模型 | 查询改写 |
+| Reflector | 轻量模型 | 评估检索质量 |
+| 最终回答 | 强模型（对话选择的模型） | 生成回答 |
+
+不配置时，所有节点使用对话选择的模型。
+
+## 内网全 Docker 化部署
+
+在有网机器上执行打包脚本：
+
+```powershell
+cd C:\newHLSWorkspace\aladdin
+.\scripts\prepare-offline.ps1
+```
+
+生成 `deploy-package/` 目录，拷贝到内网服务器后执行：
+
+```bash
+chmod +x deploy-intranet.sh
+./deploy-intranet.sh
+```
+
+生产环境默认使用 `flag-embedding` provider + `cuda` 设备。
