@@ -172,12 +172,19 @@ async def _perform_ocr_test(provider_type: str, api_url: str, api_key: Optional[
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.head(api_url, headers=headers)
+                # 先尝试 GET（健康检查），失败则尝试 HEAD，再失败用 OPTIONS
+                # 某些 OCR 服务只接受 POST，GET/HEAD 可能返回 405，视为服务可达
+                try:
+                    response = await client.get(api_url, headers=headers)
+                except Exception:
+                    response = await client.head(api_url, headers=headers)
             elapsed_ms = (time.time() - start) * 1000
-            if 200 <= response.status_code < 400:
-                return OCRTestResponse(success=True, message=f"连接成功，状态码 {response.status_code}", elapsed_ms=elapsed_ms)
+            status = response.status_code
+            if 200 <= status < 400 or status == 405:
+                # 405 表示服务可达但不支持该 HTTP 方法（如只接受 POST），视为连通
+                return OCRTestResponse(success=True, message=f"服务可达，状态码 {status}", elapsed_ms=elapsed_ms)
             else:
-                return OCRTestResponse(success=False, message=f"服务异常，状态码 {response.status_code}", elapsed_ms=elapsed_ms)
+                return OCRTestResponse(success=False, message=f"服务异常，状态码 {status}", elapsed_ms=elapsed_ms)
         else:
             return OCRTestResponse(success=False, message="不支持的 provider 类型", elapsed_ms=None)
     except httpx.TimeoutException:
