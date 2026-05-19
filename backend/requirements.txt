@@ -36,3 +36,4 @@ numpy>=2.0.0
 # 测试
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
+nest-asyncio>=1.6.0

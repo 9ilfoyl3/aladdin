@@ -2,8 +2,11 @@
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from app.pipeline.loader import BaseLoader, LoadResult
+
+_executor = ThreadPoolExecutor(max_workers=1)
 
 
 class ImageLoader(BaseLoader):
@@ -27,8 +30,12 @@ class ImageLoader(BaseLoader):
 
         file_size = os.path.getsize(file_path)
 
-        # 调用 OCR 服务识别图片
-        content = asyncio.run(self._ocr_recognize(file_path))
+        # 在当前事件循环中调用异步 OCR
+        import nest_asyncio
+        nest_asyncio.apply()
+        
+        loop = asyncio.get_event_loop()
+        content = loop.run_until_complete(self._ocr_recognize(file_path))
 
         if not content or len(content.strip()) < 5:
             raise ValueError("图片 OCR 识别结果为空，请检查图片是否包含可识别的文字")
