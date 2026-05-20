@@ -26,26 +26,30 @@
 
 ### 快速打包脚本
 
+**Windows (PowerShell)：**
 ```powershell
 cd C:\newHLSWorkspace\aladdin
 
-# AMD64 首次部署（远程模式）
-.\scripts\package-amd64.ps1
+.\scripts\package-amd64.ps1              # AMD64 首次部署（远程模式）
+.\scripts\package-amd64.ps1 -SkipInfra   # AMD64 更新应用
+.\scripts\package-amd64.ps1 -WithML      # AMD64 挂载模型模式
 
-# AMD64 更新应用（跳过中间件）
-.\scripts\package-amd64.ps1 -SkipInfra
+.\scripts\package-arm64.ps1              # ARM64 首次部署
+.\scripts\package-arm64.ps1 -SkipInfra   # ARM64 更新应用
+.\scripts\package-arm64.ps1 -WithML      # ARM64 挂载模型模式
+```
 
-# AMD64 挂载模型模式（含 ML 依赖）
-.\scripts\package-amd64.ps1 -WithML
+**macOS / Linux (Shell)：**
+```bash
+cd /path/to/aladdin
 
-# ARM64 首次部署（远程模式）
-.\scripts\package-arm64.ps1
+./scripts/package-amd64.sh              # AMD64 首次部署（远程模式）
+./scripts/package-amd64.sh --skip-infra # AMD64 更新应用
+./scripts/package-amd64.sh --with-ml    # AMD64 挂载模型模式
 
-# ARM64 更新应用
-.\scripts\package-arm64.ps1 -SkipInfra
-
-# ARM64 挂载模型模式
-.\scripts\package-arm64.ps1 -WithML
+./scripts/package-arm64.sh              # ARM64 首次部署
+./scripts/package-arm64.sh --skip-infra # ARM64 更新应用
+./scripts/package-arm64.sh --with-ml    # ARM64 挂载模型模式
 ```
 
 输出目录：`deploy-amd64/` 或 `deploy-arm64/`，整个拷贝到服务器。
