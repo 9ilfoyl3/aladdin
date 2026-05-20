@@ -375,6 +375,30 @@ Docker Desktop:
 
 ## 内网全 Docker 化部署
 
+### 部署模式选择
+
+根据服务器环境选择合适的模式：
+
+| 场景 | 构建命令 | 镜像大小 | Embedding/Rerank | 适用 |
+|------|---------|---------|-----------------|------|
+| **远程模式** | `docker build -t aladdin-backend:latest backend/` | ~500MB | 调用已有的模型服务 API | 服务器上已有 Embedding 服务，或 ARM 无 GPU |
+| **本地模型模式（CPU）** | `docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/` | ~1.5GB | 容器内跑 sentence-transformers (CPU) | 无独立模型服务，无 GPU |
+| **本地模型模式（GPU）** | `docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/` | ~5GB | 容器内跑 FlagEmbedding (CUDA) | x86 服务器有 NVIDIA GPU，追求最佳性能 |
+
+**如何选择：**
+
+```
+服务器上已有 Embedding/Rerank 模型服务？
+  ├─ 是 → 远程模式（最轻量，任何架构都行）
+  └─ 否 → 服务器有 NVIDIA GPU？
+              ├─ 是 → 本地模型模式（GPU）
+              └─ 否 → 本地模型模式（CPU）
+```
+
+**远程模式说明：** Aladdin 本身不跑模型，通过 HTTP API 调用外部的 Embedding/Rerank 服务。LLM 同理。这样 Aladdin 容器极轻量，所有 AI 推理都由专门的模型服务承担。部署后在前端"Embedding 配置"页面填写 API 地址即可。
+
+---
+
 ### 方式一：使用 PowerShell 打包脚本（旧方式）
 
 在有网机器上执行打包脚本：

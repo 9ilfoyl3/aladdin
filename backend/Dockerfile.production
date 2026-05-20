@@ -7,7 +7,7 @@ FROM python:3.12-slim AS builder
 WORKDIR /app
 
 # 安装系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     build-essential \
     libglib2.0-0 \
     libsm6 \
@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 安装 Python 依赖（包含 FlagEmbedding，生产环境使用）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir FlagEmbedding>=1.3.0
 
 # ============ 阶段二：最终镜像 ============
@@ -26,7 +27,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 安装运行时系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
