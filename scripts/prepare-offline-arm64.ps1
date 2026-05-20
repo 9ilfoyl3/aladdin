@@ -15,39 +15,16 @@ New-Item -ItemType Directory -Force -Path $DEPLOY_DIR | Out-Null
 # 0. 确保 buildx 支持 ARM64
 # ============================================================
 Write-Host "`n[0/5] 检查 Docker buildx 多架构支持..." -ForegroundColor Cyan
-$null = docker buildx create --name arm-builder --use 2>&1
-$null = docker buildx inspect --bootstrap 2>&1
+try { docker buildx create --name arm-builder --use 2>&1 | Out-Null } catch {}
+try { docker buildx use arm-builder 2>&1 | Out-Null } catch {}
+try { docker buildx inspect --bootstrap 2>&1 | Out-Null } catch {}
 Write-Host "  buildx 就绪"
 
 # ============================================================
-# 1. 准备模型文件
+# 1. 准备模型文件（跳过，使用服务器上已有的模型）
 # ============================================================
-Write-Host "`n[1/5] 准备模型文件..." -ForegroundColor Cyan
-
-$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
-$MODEL_DIR = "backend\models"
-
-New-Item -ItemType Directory -Force -Path $MODEL_DIR | Out-Null
-
-# 复制 bge-m3
-$BGE_M3 = "$HF_CACHE\models--BAAI--bge-m3"
-if (Test-Path $BGE_M3) {
-    Write-Host "  复制 bge-m3 模型..."
-    Copy-Item -Recurse -Force $BGE_M3 "$MODEL_DIR\models--BAAI--bge-m3"
-} else {
-    Write-Host "  错误: bge-m3 模型未找到，请先运行后端下载模型" -ForegroundColor Red
-    exit 1
-}
-
-# 复制 bge-reranker
-$BGE_RERANKER = "$HF_CACHE\models--BAAI--bge-reranker-v2-m3"
-if (Test-Path $BGE_RERANKER) {
-    Write-Host "  复制 bge-reranker 模型..."
-    Copy-Item -Recurse -Force $BGE_RERANKER "$MODEL_DIR\models--BAAI--bge-reranker-v2-m3"
-} else {
-    Write-Host "  错误: bge-reranker 模型未找到，请先运行后端下载模型" -ForegroundColor Red
-    exit 1
-}
+Write-Host "`n[1/5] 模型文件..." -ForegroundColor Cyan
+Write-Host "  跳过（运行时从服务器本地挂载）"
 
 # ============================================================
 # 2. 构建后端 Docker 镜像 (ARM64)

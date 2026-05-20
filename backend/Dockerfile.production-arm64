@@ -1,21 +1,19 @@
-# 生产用 Dockerfile - ARM64 架构（华为鲲鹏/飞腾/Apple Silicon）
-# 使用 CPU 版 PyTorch（ARM 通常无 NVIDIA GPU）
+# 生产用 Dockerfile - ARM64 架构（不含模型，运行时挂载）
 
 # ============ 阶段一：安装依赖 ============
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     build-essential \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖（CPU 版 PyTorch + FlagEmbedding）
 COPY requirements.txt .
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt && \
@@ -26,7 +24,6 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 安装运行时系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     libglib2.0-0 \
     libsm6 \
@@ -35,25 +32,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 从 builder 复制已安装的 Python 包
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# 创建数据目录
 RUN mkdir -p /app/data
 
-# 复制模型文件
-COPY models/ /root/.cache/huggingface/hub/
-
-# 复制应用源码
+# 只复制源码，不复制模型（运行时通过 volume 挂载）
 COPY app/ ./app/
 
-# 设置离线模式环境变量
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
 
-# 暴露服务端口
 EXPOSE 8000
-
-# 启动 FastAPI 服务
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

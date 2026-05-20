@@ -78,17 +78,19 @@ services:
   # ============ 应用服务 ============
 
   backend:
-    image: aladdin-backend:latest
+    image: aladdin-backend:latest-arm64
     expose:
       - "8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_DEVICE=${EMBED_DEVICE:-cuda}
-      - RERANK_DEVICE=${RERANK_DEVICE:-cuda}
+      - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
+      - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-flag-embedding}
       - RERANK_PROVIDER=${RERANK_PROVIDER:-flag-embedding}
+      - EMBED_MODEL=${EMBED_MODEL:-/models/bge-m3}
+      - RERANK_MODEL=${RERANK_MODEL:-/models/bge-reranker-v2-m3}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
       - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
@@ -97,6 +99,7 @@ services:
       - TRANSFORMERS_OFFLINE=1
     volumes:
       - upload_data:/app/data
+      - ${MODEL_DIR:-./models}:/models
     depends_on:
       postgres:
         condition: service_healthy
@@ -105,7 +108,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: aladdin-frontend:latest
+    image: aladdin-frontend:latest-arm64
     ports:
       - "8888:80"
     depends_on:
