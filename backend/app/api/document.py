@@ -114,16 +114,20 @@ async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
 
 
 @router.get("/api/knowledge-bases/{kb_id}/documents", response_model=list[DocumentResponse])
-async def list_documents(kb_id: str, db: AsyncSession = Depends(get_db)):
-    """获取知识库下的文档列表"""
+async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSession = Depends(get_db)):
+    """获取知识库下的文档列表（支持按文件夹过滤）"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     if kb_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    result = await db.execute(
-        select(Document).where(Document.kb_id == kb_id).order_by(Document.created_at.desc())
-    )
+    # 按文件夹过滤
+    if folder_id:
+        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id == folder_id)
+    else:
+        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id.is_(None))
+
+    result = await db.execute(query.order_by(Document.created_at.desc()))
     docs = result.scalars().all()
     return [
         DocumentResponse(
@@ -145,9 +149,10 @@ async def list_documents(kb_id: str, db: AsyncSession = Depends(get_db)):
 async def upload_document(
     kb_id: str,
     file: UploadFile = File(...),
+    folder_id: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """上传文档（multipart/form-data）"""
+    """上传文档（multipart/form-data），支持指定文件夹"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = kb_result.scalar_one_or_none()
@@ -178,6 +183,7 @@ async def upload_document(
     doc = Document(
         id=doc_id,
         kb_id=kb_id,
+        folder_id=folder_id,
         filename=filename,
         file_type=ext,
         file_size=file_size,

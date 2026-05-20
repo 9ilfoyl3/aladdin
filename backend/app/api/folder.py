@@ -1,0 +1,278 @@
+"""文件夹 CRUD 接口"""
+
+import logging
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.schema.db import Document, Folder, KnowledgeBase
+from app.storage.database import get_db
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["Folder"])
+
+
+# ============================================================
+# 请求/响应模型
+# ============================================================
+
+
+class FolderCreate(BaseModel):
+    """创建文件夹请求"""
+    name: str = Field(..., min_length=1, max_length=200, description="文件夹名称")
+    parent_id: str | None = Field(default=None, description="父文件夹 ID，为空表示根目录")
+
+
+class FolderUpdate(BaseModel):
+    """更新文件夹请求"""
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    parent_id: str | None = None
+
+
+class FolderResponse(BaseModel):
+    """文件夹响应"""
+    model_config = {"from_attributes": True}
+
+    id: str
+    kb_id: str
+    parent_id: str | None
+    name: str
+    doc_count: int = 0
+    subfolder_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class FolderMoveRequest(BaseModel):
+    """移动文件/文件夹请求"""
+    item_ids: list[str] = Field(..., description="要移动的项目 ID 列表")
+    item_type: str = Field(..., description="项目类型: folder | document")
+    target_folder_id: str | None = Field(default=None, description="目标文件夹 ID，为空表示根目录")
+
+
+class BreadcrumbItem(BaseModel):
+    """面包屑项"""
+    id: str | None
+    name: str
+
+
+# ============================================================
+# 接口实现
+# ============================================================
+
+
+@router.get("/api/knowledge-bases/{kb_id}/folders", response_model=list[FolderResponse])
+async def list_folders(
+    kb_id: str,
+    parent_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取指定目录下的文件夹列表"""
+    # 验证知识库存在
+    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+    if kb_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # 查询文件夹
+    if parent_id:
+        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id == parent_id)
+    else:
+        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id.is_(None))
+
+    result = await db.execute(query.order_by(Folder.name))
+    folders = result.scalars().all()
+
+    # 统计每个文件夹的子文件夹数和文档数
+    responses = []
+    for folder in folders:
+        # 子文件夹数
+        sub_result = await db.execute(
+            select(Folder).where(Folder.parent_id == folder.id)
+        )
+        subfolder_count = len(sub_result.scalars().all())
+
+        # 文档数
+        doc_result = await db.execute(
+            select(Document).where(Document.folder_id == folder.id)
+        )
+        doc_count = len(doc_result.scalars().all())
+
+        responses.append(FolderResponse(
+            id=folder.id,
+            kb_id=folder.kb_id,
+            parent_id=folder.parent_id,
+            name=folder.name,
+            doc_count=doc_count,
+            subfolder_count=subfolder_count,
+            created_at=folder.created_at,
+            updated_at=folder.updated_at,
+        ))
+
+    return responses
+
+
+@router.post("/api/knowledge-bases/{kb_id}/folders", response_model=FolderResponse, status_code=201)
+async def create_folder(
+    kb_id: str,
+    body: FolderCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """创建文件夹"""
+    # 验证知识库存在
+    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+    if kb_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # 验证父文件夹存在（如果指定了）
+    if body.parent_id:
+        parent_result = await db.execute(
+            select(Folder).where(Folder.id == body.parent_id, Folder.kb_id == kb_id)
+        )
+        if parent_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="父文件夹不存在")
+
+    folder = Folder(
+        id=str(uuid.uuid4()),
+        kb_id=kb_id,
+        parent_id=body.parent_id,
+        name=body.name,
+    )
+    db.add(folder)
+    await db.flush()
+    await db.refresh(folder)
+
+    return FolderResponse(
+        id=folder.id,
+        kb_id=folder.kb_id,
+        parent_id=folder.parent_id,
+        name=folder.name,
+        doc_count=0,
+        subfolder_count=0,
+        created_at=folder.created_at,
+        updated_at=folder.updated_at,
+    )
+
+
+@router.put("/api/folders/{folder_id}", response_model=FolderResponse)
+async def update_folder(
+    folder_id: str,
+    body: FolderUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """更新文件夹（重命名/移动）"""
+    result = await db.execute(select(Folder).where(Folder.id == folder_id))
+    folder = result.scalar_one_or_none()
+    if folder is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    if body.name is not None:
+        folder.name = body.name
+    if body.parent_id is not None:
+        # 防止循环引用：不能移动到自己或自己的子文件夹下
+        if body.parent_id == folder_id:
+            raise HTTPException(status_code=400, detail="不能将文件夹移动到自身")
+        # 检查是否移动到子文件夹
+        if body.parent_id:
+            if await _is_descendant(db, body.parent_id, folder_id):
+                raise HTTPException(status_code=400, detail="不能将文件夹移动到其子文件夹中")
+        folder.parent_id = body.parent_id if body.parent_id else None
+
+    folder.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.refresh(folder)
+
+    return FolderResponse(
+        id=folder.id,
+        kb_id=folder.kb_id,
+        parent_id=folder.parent_id,
+        name=folder.name,
+        doc_count=0,
+        subfolder_count=0,
+        created_at=folder.created_at,
+        updated_at=folder.updated_at,
+    )
+
+
+@router.delete("/api/folders/{folder_id}", status_code=204)
+async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
+    """删除文件夹（级联删除子文件夹和文档）"""
+    result = await db.execute(select(Folder).where(Folder.id == folder_id))
+    folder = result.scalar_one_or_none()
+    if folder is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    await db.delete(folder)
+    await db.flush()
+
+
+@router.post("/api/knowledge-bases/{kb_id}/move", status_code=200)
+async def move_items(
+    kb_id: str,
+    body: FolderMoveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """移动文件或文件夹到目标目录"""
+    # 验证目标文件夹存在
+    if body.target_folder_id:
+        target_result = await db.execute(
+            select(Folder).where(Folder.id == body.target_folder_id, Folder.kb_id == kb_id)
+        )
+        if target_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="目标文件夹不存在")
+
+    if body.item_type == "folder":
+        for item_id in body.item_ids:
+            result = await db.execute(select(Folder).where(Folder.id == item_id))
+            folder = result.scalar_one_or_none()
+            if folder:
+                folder.parent_id = body.target_folder_id
+    elif body.item_type == "document":
+        for item_id in body.item_ids:
+            result = await db.execute(select(Document).where(Document.id == item_id))
+            doc = result.scalar_one_or_none()
+            if doc:
+                doc.folder_id = body.target_folder_id
+
+    await db.flush()
+    return {"message": "移动成功"}
+
+
+@router.get("/api/knowledge-bases/{kb_id}/folders/{folder_id}/breadcrumb", response_model=list[BreadcrumbItem])
+async def get_breadcrumb(
+    kb_id: str,
+    folder_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取文件夹的面包屑路径"""
+    breadcrumb = []
+    current_id: str | None = folder_id
+
+    while current_id:
+        result = await db.execute(select(Folder).where(Folder.id == current_id))
+        folder = result.scalar_one_or_none()
+        if folder is None:
+            break
+        breadcrumb.append(BreadcrumbItem(id=folder.id, name=folder.name))
+        current_id = folder.parent_id
+
+    breadcrumb.reverse()
+    return breadcrumb
+
+
+async def _is_descendant(db: AsyncSession, folder_id: str, ancestor_id: str) -> bool:
+    """检查 folder_id 是否是 ancestor_id 的后代"""
+    current_id: str | None = folder_id
+    while current_id:
+        if current_id == ancestor_id:
+            return True
+        result = await db.execute(select(Folder).where(Folder.id == current_id))
+        folder = result.scalar_one_or_none()
+        if folder is None:
+            break
+        current_id = folder.parent_id
+    return False

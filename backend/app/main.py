@@ -10,6 +10,7 @@ from app.api.api_key import router as api_key_router
 from app.api.chat import router as chat_router
 from app.api.document import router as document_router
 from app.api.embed_config import router as embed_config_router
+from app.api.folder import router as folder_router
 from app.api.knowledge_base import router as kb_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
@@ -158,6 +159,7 @@ app.add_middleware(ApiKeyAuthMiddleware)
 # 注册路由
 app.include_router(chat_router, tags=["Chat"])
 app.include_router(kb_router)
+app.include_router(folder_router)
 app.include_router(document_router)
 app.include_router(retrieval_router)
 app.include_router(system_router)
