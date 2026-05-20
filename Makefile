@@ -8,7 +8,7 @@ PYTHON ?= python3
 # 启动基础设施（Milvus 向量数据库）
 infra:
 	@echo "启动 Milvus 向量数据库..."
-	docker compose up -d
+	docker compose up -d etcd minio milvus postgres
 	@echo "等待 Milvus 就绪..."
 	@sleep 5
 	@echo "Milvus 已启动 (localhost:19530)"
