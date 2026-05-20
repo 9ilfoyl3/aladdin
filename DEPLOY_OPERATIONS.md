@@ -185,12 +185,8 @@ npm run dev
 
 ### 本地 .env 配置
 
+**Windows：**
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-
-# 本地模型
 EMBED_PROVIDER=sentence-transformers
 EMBED_MODEL=BAAI/bge-m3
 EMBED_DEVICE=cpu
@@ -198,13 +194,21 @@ EMBED_DEVICE=cpu
 RERANK_PROVIDER=sentence-transformers
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
-
-# LLM（线上 API）
-LLM_PROVIDER=vllm
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
-LLM_API_KEY=sk-你的key
 ```
+
+**macOS：**
+```env
+EMBED_PROVIDER=flag-embedding
+EMBED_MODEL=BAAI/bge-m3
+EMBED_DEVICE=mps
+
+RERANK_PROVIDER=flag-embedding
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_DEVICE=mps
+```
+
+> Windows 使用 `sentence-transformers`（FlagEmbedding 在 Windows 上有兼容问题）。
+> macOS 使用 `flag-embedding`（原生支持，稀疏向量质量更好）。`mps` 为 Apple GPU 加速，也可用 `cpu`。
 
 ### 与服务器部署的区别
 
