@@ -1,89 +1,96 @@
-# Aladdin 打包与部署手册
-
-Aladdin 采用远程模式部署——应用本身不跑模型，通过 API 调用外部的 Embedding/Rerank/LLM 服务。
-
-所有打包在 Windows 机器上执行（`C:\newHLSWorkspace\aladdin`）。
+# Aladdin 部署手册
 
 ---
 
-## 打包产物
+## 架构概览
 
-| 包 | 内容 | 大小 | 区分架构 | 什么时候需要 |
-|---|---|---|---|---|
-| `app.tar` | 后端 + 前端镜像 | ~500MB | ✅ | 每次更新 |
-| `infra.tar` | PostgreSQL + Milvus + etcd + MinIO | ~700MB | ✅ | 首次部署 |
-
-另需：`docker-compose.yml` + `.env`
-
----
-
-## 一、应用打包（app.tar）
-
-### AMD64 服务器
-
-```powershell
-docker build -t aladdin-backend:latest backend/
-docker build -t aladdin-frontend:latest frontend/
-docker save aladdin-backend:latest aladdin-frontend:latest -o app-amd64.tar
 ```
-
-### ARM64 服务器
-
-```powershell
-docker build --platform linux/arm64 -t aladdin-backend:latest backend/
-docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
-docker save aladdin-backend:latest aladdin-frontend:latest -o app-arm64.tar
+┌─────────────────────────────────────────────────┐
+│              Aladdin 应用容器（轻量）              │
+│  后端 FastAPI + 前端 nginx                       │
+│  通过 API 调用外部服务：                          │
+│    → Embedding API                              │
+│    → Rerank API                                 │
+│    → LLM API                                    │
+└────────────────────┬────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────┐
+│              中间件容器                           │
+│  PostgreSQL │ Milvus │ etcd │ MinIO             │
+└─────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 二、中间件打包（infra.tar）
+## 一、打包（Windows 机器上执行）
 
-首次部署打一次，以后不用重复。
+### 1. 应用镜像
 
-### AMD64 服务器
+| 目标 | 命令 |
+|------|------|
+| AMD64 远程模式 | `docker build -t aladdin-backend:latest backend/` |
+| AMD64 挂载模型 | `docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/` |
+| ARM64 远程模式 | `docker build --platform linux/arm64 -t aladdin-backend:latest backend/` |
+| ARM64 挂载模型 | `docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/` |
+| 前端（通用） | `docker build -t aladdin-frontend:latest frontend/` |
+| 前端（ARM64） | `docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/` |
 
+导出：
+```powershell
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+```
+
+### 2. 中间件镜像（首次部署打一次）
+
+**AMD64：**
 ```powershell
 docker pull postgres:16-alpine
 docker pull milvusdb/milvus:v2.4.6
 docker pull quay.io/coreos/etcd:v3.5.18
 docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra-amd64.tar
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
 ```
 
-### ARM64 服务器
-
+**ARM64：**
 ```powershell
 docker pull --platform linux/arm64 postgres:16-alpine
 docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
 docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
 docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra-arm64.tar
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+```
+
+### 3. 模型文件（挂载模型模式才需要）
+
+不区分架构，打一次通用：
+```powershell
+$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
+tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reranker-v2-m3
 ```
 
 ---
 
-## 三、服务器部署
+## 二、部署（服务器上执行）
 
 ### 首次部署
 
 ```bash
 mkdir -p /opt/aladdin && cd /opt/aladdin
 
-# 1. 加载镜像
+# 加载镜像
 docker load -i infra.tar
 docker load -i app.tar
 
-# 2. 放入 docker-compose.yml 和 .env
-
-# 3. 编辑 .env
+# 放入 docker-compose.yml 和 .env
+# 编辑 .env（见下方配置说明）
 vim .env
 
-# 4. 启动
-docker compose up -d
+# 如果是挂载模型模式，解压模型
+mkdir -p /opt/models
+tar -xzf models.tar.gz -C /opt/models
 
-# 5. 验证
-docker compose ps
+# 启动
+docker compose up -d
 ```
 
 ### 更新应用
@@ -96,63 +103,39 @@ docker compose up -d --force-recreate backend frontend
 
 ---
 
-## 四、.env 配置
+## 三、.env 配置
 
-### 远程模式（Embedding/Rerank 调外部 API）
+### 镜像配置（使用公司镜像库时填写）
 
 ```env
-# Embedding（远程 API）
+IMAGE_POSTGRES=registry.company.com/aladdin/postgres:16-alpine-arm64
+IMAGE_MILVUS=registry.company.com/aladdin/milvus:v2.4.6-arm64
+IMAGE_ETCD=registry.company.com/aladdin/etcd:v3.5.18-arm64
+IMAGE_MINIO=registry.company.com/aladdin/minio:2023-03-20-arm64
+IMAGE_BACKEND=registry.company.com/aladdin/aladdin-backend:latest-arm64
+IMAGE_FRONTEND=registry.company.com/aladdin/aladdin-frontend:latest-arm64
+```
+
+> 不配置时使用 docker-compose.yml 中的默认镜像名。
+
+### Embedding / Rerank 配置
+
+**方式 A：远程模式（推荐，调外部 API）**
+
+```env
 EMBED_PROVIDER=remote
 EMBED_BASE_URL=http://模型服务地址/v1
 EMBED_MODEL=模型名
 EMBED_API_KEY=
 
-# Rerank（远程 API）
 RERANK_PROVIDER=remote
 RERANK_BASE_URL=http://模型服务地址/v1
 RERANK_MODEL=模型名
 RERANK_API_KEY=
-
-# LLM（启动后也可在前端"模型管理"配置）
-LLM_PROVIDER=vllm
-LLM_BASE_URL=http://LLM服务地址/v1
-LLM_MODEL=模型名
-LLM_API_KEY=密钥
-
-# 数据库密码
-POSTGRES_PASSWORD=postgres
 ```
 
-### 挂载模型目录模式（服务器无独立模型服务时）
+**方式 B：挂载模型目录（服务器无独立模型服务时）**
 
-当服务器上没有独立的 Embedding/Rerank API 服务时，可以把模型文件放在服务器上，由 Aladdin 容器加载。
-
-**额外要求：**
-1. 应用镜像构建时加 `INSTALL_ML=true`（安装 PyTorch + FlagEmbedding + sentence-transformers，镜像约 1.5GB）
-2. 服务器上需要模型文件
-
-**打包应用镜像（替代远程模式的构建命令）：**
-```powershell
-# AMD64
-docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
-
-# ARM64
-docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
-```
-
-**打包模型文件（通用，不区分架构，打一次即可）：**
-```powershell
-$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
-tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reranker-v2-m3
-```
-
-**服务器上解压模型：**
-```bash
-mkdir -p /opt/models
-tar -xzf models.tar.gz -C /opt/models
-```
-
-**.env 配置（Linux 服务器推荐 flag-embedding，稀疏向量质量更好）：**
 ```env
 EMBED_PROVIDER=flag-embedding
 EMBED_MODEL=BAAI/bge-m3
@@ -162,23 +145,33 @@ RERANK_PROVIDER=flag-embedding
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
 
-# 模型目录（宿主机路径，挂载到容器）
 MODEL_DIR=/opt/models
+```
 
-# LLM + 数据库同上
+> 需要用 `INSTALL_ML=true` 构建的镜像。
+> Linux 服务器推荐 `flag-embedding`，Windows 本地开发用 `sentence-transformers`。
+
+### LLM 配置
+
+```env
 LLM_PROVIDER=vllm
 LLM_BASE_URL=http://LLM服务地址/v1
 LLM_MODEL=模型名
 LLM_API_KEY=密钥
-POSTGRES_PASSWORD=postgres
 ```
 
-> Windows 本地开发用 `sentence-transformers`（FlagEmbedding 在 Windows 有兼容问题）。
-> Linux/macOS 服务器用 `flag-embedding`（稀疏向量质量更好）。
+> 也可启动后在前端"模型管理"页面配置。
+
+### 其他
+
+```env
+POSTGRES_PASSWORD=postgres
+FRONTEND_PORT=8888
+```
 
 ---
 
-## 五、访问
+## 四、访问
 
 | 地址 | 用途 |
 |------|------|
@@ -187,90 +180,63 @@ POSTGRES_PASSWORD=postgres
 
 ---
 
-## 六、常用命令
+## 五、运维命令
 
 ```bash
-docker compose ps                    # 查看状态
-docker compose logs backend -f       # 查看后端日志
-docker compose restart backend       # 重启后端
-docker compose down                  # 停止（数据保留）
-docker compose down -v               # 停止并清除数据（慎用）
+docker compose ps                                    # 查看状态
+docker compose logs backend -f                       # 后端日志
+docker compose logs frontend -f                      # 前端日志
+docker compose restart backend                       # 重启后端
+docker compose down                                  # 停止（数据保留）
+docker compose down -v                               # 清除所有数据（慎用）
+docker compose up -d --force-recreate backend frontend  # 更新后重启应用
 ```
 
 ---
 
-## 七、本地开发模式
+## 六、本地开发
 
-本地开发时 Embedding/Rerank 在本机跑（不依赖外部模型服务），需要安装 ML 依赖。
-
-### 前提
-
-- Python 3.12（通过 conda 管理）
-- Docker Desktop（跑 PostgreSQL + Milvus）
-- 线上 LLM API Key
-
-### 步骤
+本地开发时 Embedding/Rerank 在本机 Python 进程跑，不依赖外部服务。
 
 ```powershell
 cd C:\newHLSWorkspace\aladdin
 
-# 1. 启动中间件
+# 启动中间件
 docker compose up -d
 
-# 2. 激活 Python 环境
+# 激活环境
 conda activate aladdin
 
-# 3. 安装依赖（含 ML）
-pip install -r backend/requirements.txt
-
-# 4. 首次需要下载模型（约 3GB，需联网）
+# 首次下载模型
 $env:HF_HUB_OFFLINE="0"
+cd backend
 python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('OK')"
 python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3'); print('OK')"
 
-# 5. 启动后端
-cd backend
+# 启动后端
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 6. 启动前端（新终端）
+# 启动前端（新终端）
 cd C:\newHLSWorkspace\aladdin\frontend
-npm install
 npm run dev
 ```
 
-### 本地 .env 配置
+**本地 .env：**
 
-**Windows：**
+Windows：
 ```env
 EMBED_PROVIDER=sentence-transformers
-EMBED_MODEL=BAAI/bge-m3
 EMBED_DEVICE=cpu
-
 RERANK_PROVIDER=sentence-transformers
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
 ```
 
-**macOS：**
+macOS：
 ```env
 EMBED_PROVIDER=flag-embedding
-EMBED_MODEL=BAAI/bge-m3
 EMBED_DEVICE=mps
-
 RERANK_PROVIDER=flag-embedding
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=mps
 ```
 
-> Windows 使用 `sentence-transformers`（FlagEmbedding 在 Windows 上有兼容问题）。
-> macOS 使用 `flag-embedding`（原生支持，稀疏向量质量更好）。`mps` 为 Apple GPU 加速，也可用 `cpu`。
-
-### 与服务器部署的区别
-
-| | 本地开发 | 服务器部署 |
-|---|---|---|
-| Embedding/Rerank | 本机 Python 进程跑模型 | 调远程 API |
-| 后端 | `uvicorn` 直接运行 | Docker 容器 |
-| 前端 | `npm run dev`（端口 3000） | nginx 容器（端口 8888） |
-| 中间件 | Docker（暴露端口到 localhost） | Docker（仅容器间通信） |
-| Python 版本 | 必须 3.12（3.13+ 有兼容问题） | 不需要装 Python（容器内自带） |
+> Python 版本必须 3.12（3.13+ 有兼容问题）。
