@@ -99,6 +99,7 @@ services:
       - TRANSFORMERS_OFFLINE=1
     volumes:
       - upload_data:/app/data
+      - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
     depends_on:
       postgres:
         condition: service_healthy
