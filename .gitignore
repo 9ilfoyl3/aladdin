@@ -55,6 +55,9 @@ deploy-package-arm/
 deploy-package-arm64/
 deploy-package-amd64/
 deploy-package/
+deploy-arm64/
+deploy-amd64/
+deploy-package.zip
 backend/models/
 *.tar
 
