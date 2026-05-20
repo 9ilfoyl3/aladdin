@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.api.validators import NameValidationError, validate_filename, validate_folder_name
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
@@ -160,13 +161,19 @@ async def upload_document(
     if kb is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    # 验证文件类型
+    # 校验文件名
     filename = file.filename or "unknown"
+    try:
+        filename = validate_filename(filename)
+    except NameValidationError as e:
+        raise HTTPException(status_code=422, detail=e.message)
+
+    # 验证文件类型
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件类型: {ext}，支持: {', '.join(_ALLOWED_EXTENSIONS)}",
+            detail=f"不支持的文件类型: {ext}，支持: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
         )
 
     # 保存文件到 data/uploads 目录
@@ -343,6 +350,19 @@ async def validate_folder_upload(
             folder_path = "/".join(parts[:i])
             folder_paths.add(folder_path)
 
+        # 校验文件名
+        try:
+            validate_filename(filename)
+        except NameValidationError as e:
+            unsupported_files.append(FolderUploadFileInfo(
+                relative_path=rel_path,
+                filename=filename,
+                file_type="",
+                supported=False,
+                reason=f"文件名校验失败: {e.message}",
+            ))
+            continue
+
         # 检查文件扩展名
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext in _ALLOWED_EXTENSIONS:
@@ -419,6 +439,15 @@ async def upload_folder(
         parts = folder_path.split("/")
         folder_name = parts[-1]
 
+        # 校验文件夹名称
+        try:
+            folder_name = validate_folder_name(folder_name)
+        except NameValidationError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"文件夹 '{folder_path}' 名称校验失败: {e.message}",
+            )
+
         # 确定父文件夹 ID
         if len(parts) == 1:
             parent_id = parent_folder_id
@@ -471,6 +500,19 @@ async def upload_folder(
                 filename=filename,
                 status="skipped",
                 message=f"不支持的文件类型: {ext}",
+            ))
+            continue
+
+        # 校验文件名
+        try:
+            filename = validate_filename(filename)
+        except NameValidationError as e:
+            skipped_count += 1
+            results.append(FolderUploadResultItem(
+                relative_path=rel_path,
+                filename=filename,
+                status="skipped",
+                message=f"文件名校验失败: {e.message}",
             ))
             continue
 

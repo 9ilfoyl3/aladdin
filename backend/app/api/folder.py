@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.validators import NameValidationError, validate_folder_name
 from app.schema.db import Document, Folder, KnowledgeBase
 from app.storage.database import get_db
 
@@ -123,6 +124,12 @@ async def create_folder(
     db: AsyncSession = Depends(get_db),
 ):
     """创建文件夹"""
+    # 校验文件夹名称
+    try:
+        cleaned_name = validate_folder_name(body.name)
+    except NameValidationError as e:
+        raise HTTPException(status_code=422, detail=e.message)
+
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     if kb_result.scalar_one_or_none() is None:
@@ -140,7 +147,7 @@ async def create_folder(
         id=str(uuid.uuid4()),
         kb_id=kb_id,
         parent_id=body.parent_id,
-        name=body.name,
+        name=cleaned_name,
     )
     db.add(folder)
     await db.flush()
@@ -171,7 +178,11 @@ async def update_folder(
         raise HTTPException(status_code=404, detail="文件夹不存在")
 
     if body.name is not None:
-        folder.name = body.name
+        try:
+            cleaned_name = validate_folder_name(body.name)
+        except NameValidationError as e:
+            raise HTTPException(status_code=422, detail=e.message)
+        folder.name = cleaned_name
     if body.parent_id is not None:
         # 防止循环引用：不能移动到自己或自己的子文件夹下
         if body.parent_id == folder_id:

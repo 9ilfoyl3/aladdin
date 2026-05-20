@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Pencil } from 'lucide-react'
+import { validateName } from '@/lib/utils'
 
 interface RenameDialogProps {
   open: boolean
@@ -20,10 +21,12 @@ function RenameDialog({ open, onOpenChange, currentName, onConfirm, isLoading }:
     if (open) setName(currentName)
   }, [open, currentName])
 
+  const error = name.trim() ? validateName(name, '名称') : null
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const trimmed = name.trim()
-    if (!trimmed || trimmed === currentName) return
+    if (!trimmed || trimmed === currentName || error) return
     onConfirm(trimmed)
   }
 
@@ -37,27 +40,33 @@ function RenameDialog({ open, onOpenChange, currentName, onConfirm, isLoading }:
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4 mt-2">
-          <Input
-            autoFocus
-            placeholder="输入新名称"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={200}
-            onFocus={(e) => {
-              // 选中文件名（不含扩展名）
-              const dotIdx = e.target.value.lastIndexOf('.')
-              if (dotIdx > 0) {
-                e.target.setSelectionRange(0, dotIdx)
-              } else {
-                e.target.select()
-              }
-            }}
-          />
+          <div>
+            <Input
+              autoFocus
+              placeholder="输入新名称"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={200}
+              className={error ? 'border-destructive' : ''}
+              onFocus={(e) => {
+                // 选中文件名（不含扩展名）
+                const dotIdx = e.target.value.lastIndexOf('.')
+                if (dotIdx > 0) {
+                  e.target.setSelectionRange(0, dotIdx)
+                } else {
+                  e.target.select()
+                }
+              }}
+            />
+            {error && (
+              <p className="text-xs text-destructive mt-1.5">{error}</p>
+            )}
+          </div>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="cursor-pointer">
               取消
             </Button>
-            <Button type="submit" disabled={!name.trim() || name.trim() === currentName || isLoading} className="cursor-pointer">
+            <Button type="submit" disabled={!name.trim() || name.trim() === currentName || !!error || isLoading} className="cursor-pointer">
               {isLoading ? '保存中...' : '确定'}
             </Button>
           </div>
