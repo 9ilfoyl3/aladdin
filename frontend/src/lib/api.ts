@@ -49,20 +49,81 @@ export const knowledgeBaseApi = {
 
 // 文档相关接口
 export const documentApi = {
-  list: (kbId: string) =>
-    request<unknown[]>(`/knowledge-bases/${kbId}/documents`),
-  upload: (kbId: string, file: File) => {
+  list: (kbId: string, folderId?: string | null) =>
+    request<unknown[]>(`/knowledge-bases/${kbId}/documents${folderId ? `?folder_id=${folderId}` : ''}`),
+  upload: (kbId: string, file: File, folderId?: string | null) => {
     const formData = new FormData()
     formData.append('file', file)
-    return fetch(`${BASE_URL}/knowledge-bases/${kbId}/documents/upload`, {
+    const url = folderId
+      ? `${BASE_URL}/knowledge-bases/${kbId}/documents/upload?folder_id=${folderId}`
+      : `${BASE_URL}/knowledge-bases/${kbId}/documents/upload`
+    return fetch(url, {
       method: 'POST',
       body: formData,
     }).then((res) => res.json())
+  },
+  validateFolder: (kbId: string, paths: string[]) =>
+    request<{
+      supported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]
+      unsupported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]
+      folder_structure: string[]
+    }>(`/knowledge-bases/${kbId}/documents/validate-folder`, {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+  uploadFolder: (kbId: string, files: File[], paths: string[], parentFolderId?: string | null) => {
+    const formData = new FormData()
+    files.forEach((file) => formData.append('files', file))
+    formData.append('paths', JSON.stringify(paths))
+    if (parentFolderId) {
+      formData.append('parent_folder_id', parentFolderId)
+    }
+    return fetch(`${BASE_URL}/knowledge-bases/${kbId}/documents/upload-folder`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}))
+        throw new Error(error.detail || `请求失败: ${res.status}`)
+      }
+      return res.json()
+    }) as Promise<{
+      total_files: number
+      uploaded_count: number
+      skipped_count: number
+      created_folders: string[]
+      results: { relative_path: string; filename: string; doc_id?: string; folder_id?: string; status: string; message?: string }[]
+    }>
   },
   get: (id: string) => request<unknown>(`/documents/${id}`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
   chunks: (id: string) => request<unknown[]>(`/documents/${id}/chunks`),
+}
+
+// 文件夹相关接口
+export const folderApi = {
+  list: (kbId: string, parentId?: string | null) =>
+    request<unknown[]>(`/knowledge-bases/${kbId}/folders${parentId ? `?parent_id=${parentId}` : ''}`),
+  create: (kbId: string, data: { name: string; parent_id?: string | null }) =>
+    request<unknown>(`/knowledge-bases/${kbId}/folders`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (folderId: string, data: { name?: string; parent_id?: string | null }) =>
+    request<unknown>(`/folders/${folderId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (folderId: string) =>
+    request<void>(`/folders/${folderId}`, { method: 'DELETE' }),
+  breadcrumb: (kbId: string, folderId: string) =>
+    request<{ id: string | null; name: string }[]>(`/knowledge-bases/${kbId}/folders/${folderId}/breadcrumb`),
+  move: (kbId: string, data: { item_ids: string[]; item_type: string; target_folder_id: string | null }) =>
+    request<unknown>(`/knowledge-bases/${kbId}/move`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 }
 
 // 检索测试接口

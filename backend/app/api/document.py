@@ -5,17 +5,19 @@ import logging
 import os
 import uuid
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.api.validators import NameValidationError, validate_filename, validate_folder_name
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
-from app.schema.db import Chunk, Document, KnowledgeBase, OCRConfig
+from app.schema.db import Chunk, Document, Folder, KnowledgeBase, OCRConfig
 from app.storage.database import async_session, get_db
 from app.storage.milvus import MilvusClient
 
@@ -114,16 +116,20 @@ async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
 
 
 @router.get("/api/knowledge-bases/{kb_id}/documents", response_model=list[DocumentResponse])
-async def list_documents(kb_id: str, db: AsyncSession = Depends(get_db)):
-    """获取知识库下的文档列表"""
+async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSession = Depends(get_db)):
+    """获取知识库下的文档列表（支持按文件夹过滤）"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     if kb_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    result = await db.execute(
-        select(Document).where(Document.kb_id == kb_id).order_by(Document.created_at.desc())
-    )
+    # 按文件夹过滤
+    if folder_id:
+        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id == folder_id)
+    else:
+        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id.is_(None))
+
+    result = await db.execute(query.order_by(Document.created_at.desc()))
     docs = result.scalars().all()
     return [
         DocumentResponse(
@@ -145,22 +151,29 @@ async def list_documents(kb_id: str, db: AsyncSession = Depends(get_db)):
 async def upload_document(
     kb_id: str,
     file: UploadFile = File(...),
+    folder_id: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """上传文档（multipart/form-data）"""
+    """上传文档（multipart/form-data），支持指定文件夹"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = kb_result.scalar_one_or_none()
     if kb is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    # 验证文件类型
+    # 校验文件名
     filename = file.filename or "unknown"
+    try:
+        filename = validate_filename(filename)
+    except NameValidationError as e:
+        raise HTTPException(status_code=422, detail=e.message)
+
+    # 验证文件类型
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件类型: {ext}，支持: {', '.join(_ALLOWED_EXTENSIONS)}",
+            detail=f"不支持的文件类型: {ext}，支持: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
         )
 
     # 保存文件到 data/uploads 目录
@@ -178,6 +191,7 @@ async def upload_document(
     doc = Document(
         id=doc_id,
         kb_id=kb_id,
+        folder_id=folder_id,
         filename=filename,
         file_type=ext,
         file_size=file_size,
@@ -263,6 +277,307 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
     if file_path.exists():
         os.remove(file_path)
+
+
+# ============================================================
+# 文件夹批量上传
+# ============================================================
+
+
+class FolderUploadFileInfo(BaseModel):
+    """文件夹上传中单个文件的信息"""
+    relative_path: str
+    filename: str
+    file_type: str
+    supported: bool
+    reason: str | None = None
+
+
+class FolderUploadValidateRequest(BaseModel):
+    """文件夹上传校验请求"""
+    paths: list[str]  # 文件相对路径列表（含目录结构）
+
+
+class FolderUploadValidateResponse(BaseModel):
+    """文件夹上传校验响应"""
+    supported_files: list[FolderUploadFileInfo]
+    unsupported_files: list[FolderUploadFileInfo]
+    folder_structure: list[str]  # 需要创建的文件夹路径列表
+
+
+class FolderUploadResultItem(BaseModel):
+    """文件夹上传结果中的单个文件"""
+    relative_path: str
+    filename: str
+    doc_id: str | None = None
+    folder_id: str | None = None
+    status: str  # uploaded | skipped | error
+    message: str | None = None
+
+
+class FolderUploadResponse(BaseModel):
+    """文件夹批量上传响应"""
+    total_files: int
+    uploaded_count: int
+    skipped_count: int
+    created_folders: list[str]
+    results: list[FolderUploadResultItem]
+
+
+@router.post("/api/knowledge-bases/{kb_id}/documents/validate-folder", response_model=FolderUploadValidateResponse)
+async def validate_folder_upload(
+    kb_id: str,
+    body: FolderUploadValidateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """校验文件夹上传：解析目录结构，区分支持和不支持的文件"""
+    # 验证知识库存在
+    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+    if kb_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    supported_files: list[FolderUploadFileInfo] = []
+    unsupported_files: list[FolderUploadFileInfo] = []
+    folder_paths: set[str] = set()
+
+    for rel_path in body.paths:
+        # 提取目录部分
+        parts = rel_path.replace("\\", "/").split("/")
+        filename = parts[-1]
+
+        # 收集所有中间目录
+        for i in range(1, len(parts)):
+            folder_path = "/".join(parts[:i])
+            folder_paths.add(folder_path)
+
+        # 校验文件名
+        try:
+            validate_filename(filename)
+        except NameValidationError as e:
+            unsupported_files.append(FolderUploadFileInfo(
+                relative_path=rel_path,
+                filename=filename,
+                file_type="",
+                supported=False,
+                reason=f"文件名校验失败: {e.message}",
+            ))
+            continue
+
+        # 检查文件扩展名
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext in _ALLOWED_EXTENSIONS:
+            supported_files.append(FolderUploadFileInfo(
+                relative_path=rel_path,
+                filename=filename,
+                file_type=ext,
+                supported=True,
+            ))
+        else:
+            unsupported_files.append(FolderUploadFileInfo(
+                relative_path=rel_path,
+                filename=filename,
+                file_type=ext or "(无扩展名)",
+                supported=False,
+                reason=f"不支持的文件类型: {ext or '无扩展名'}，支持: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+            ))
+
+    # 排序文件夹路径（确保父目录在前）
+    sorted_folders = sorted(folder_paths)
+
+    return FolderUploadValidateResponse(
+        supported_files=supported_files,
+        unsupported_files=unsupported_files,
+        folder_structure=sorted_folders,
+    )
+
+
+@router.post("/api/knowledge-bases/{kb_id}/documents/upload-folder", response_model=FolderUploadResponse, status_code=201)
+async def upload_folder(
+    kb_id: str,
+    files: list[UploadFile] = File(...),
+    paths: Annotated[str, Form(...)] = "",
+    parent_folder_id: Annotated[str | None, Form()] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """批量上传文件夹
+
+    - files: 多个文件（multipart）
+    - paths: JSON 字符串，文件相对路径列表，与 files 一一对应
+    - parent_folder_id: 上传到的父文件夹 ID（可选，为空表示当前目录）
+    """
+    import json
+
+    # 验证知识库存在
+    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+    kb = kb_result.scalar_one_or_none()
+    if kb is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # 解析路径列表
+    try:
+        path_list: list[str] = json.loads(paths)
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(status_code=400, detail="paths 参数格式错误，需要 JSON 数组字符串")
+
+    if len(path_list) != len(files):
+        raise HTTPException(status_code=400, detail="文件数量与路径数量不匹配")
+
+    # 1. 收集需要创建的文件夹结构
+    folder_paths: set[str] = set()
+    for rel_path in path_list:
+        parts = rel_path.replace("\\", "/").split("/")
+        for i in range(1, len(parts)):
+            folder_path = "/".join(parts[:i])
+            folder_paths.add(folder_path)
+
+    # 2. 按层级排序并创建文件夹
+    sorted_folders = sorted(folder_paths)
+    folder_id_map: dict[str, str] = {}  # path -> folder_id
+    created_folders: list[str] = []
+
+    for folder_path in sorted_folders:
+        parts = folder_path.split("/")
+        folder_name = parts[-1]
+
+        # 校验文件夹名称
+        try:
+            folder_name = validate_folder_name(folder_name)
+        except NameValidationError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"文件夹 '{folder_path}' 名称校验失败: {e.message}",
+            )
+
+        # 确定父文件夹 ID
+        if len(parts) == 1:
+            parent_id = parent_folder_id
+        else:
+            parent_path = "/".join(parts[:-1])
+            parent_id = folder_id_map.get(parent_path, parent_folder_id)
+
+        # 检查同名文件夹是否已存在
+        existing_query = select(Folder).where(
+            Folder.kb_id == kb_id,
+            Folder.name == folder_name,
+            Folder.parent_id == parent_id if parent_id else Folder.parent_id.is_(None),
+        )
+        existing_result = await db.execute(existing_query)
+        existing_folder = existing_result.scalar_one_or_none()
+
+        if existing_folder:
+            folder_id_map[folder_path] = existing_folder.id
+        else:
+            folder_id = str(uuid.uuid4())
+            new_folder = Folder(
+                id=folder_id,
+                kb_id=kb_id,
+                parent_id=parent_id,
+                name=folder_name,
+            )
+            db.add(new_folder)
+            folder_id_map[folder_path] = folder_id
+            created_folders.append(folder_path)
+
+    await db.flush()
+
+    # 3. 逐个处理文件
+    results: list[FolderUploadResultItem] = []
+    uploaded_count = 0
+    skipped_count = 0
+
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    for file, rel_path in zip(files, path_list):
+        parts = rel_path.replace("\\", "/").split("/")
+        filename = parts[-1]
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        # 跳过不支持的文件
+        if ext not in _ALLOWED_EXTENSIONS:
+            skipped_count += 1
+            results.append(FolderUploadResultItem(
+                relative_path=rel_path,
+                filename=filename,
+                status="skipped",
+                message=f"不支持的文件类型: {ext}",
+            ))
+            continue
+
+        # 校验文件名
+        try:
+            filename = validate_filename(filename)
+        except NameValidationError as e:
+            skipped_count += 1
+            results.append(FolderUploadResultItem(
+                relative_path=rel_path,
+                filename=filename,
+                status="skipped",
+                message=f"文件名校验失败: {e.message}",
+            ))
+            continue
+
+        # 确定文件所属文件夹
+        if len(parts) > 1:
+            folder_path = "/".join(parts[:-1])
+            target_folder_id = folder_id_map.get(folder_path, parent_folder_id)
+        else:
+            target_folder_id = parent_folder_id
+
+        try:
+            # 保存文件
+            doc_id = str(uuid.uuid4())
+            save_filename = f"{doc_id}.{ext}"
+            file_path = _UPLOAD_DIR / save_filename
+
+            content = await file.read()
+            file_size = len(content)
+            with open(file_path, "wb") as f:
+                f.write(content)
+
+            # 创建文档记录
+            doc = Document(
+                id=doc_id,
+                kb_id=kb_id,
+                folder_id=target_folder_id,
+                filename=filename,
+                file_type=ext,
+                file_size=file_size,
+                status="pending",
+            )
+            db.add(doc)
+
+            # 更新知识库文档计数
+            kb.doc_count = (kb.doc_count or 0) + 1
+
+            # 后台触发管道处理
+            asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, kb_id))
+
+            uploaded_count += 1
+            results.append(FolderUploadResultItem(
+                relative_path=rel_path,
+                filename=filename,
+                doc_id=doc_id,
+                folder_id=target_folder_id,
+                status="uploaded",
+            ))
+        except Exception as e:
+            logger.error("文件 %s 上传失败: %s", rel_path, e)
+            results.append(FolderUploadResultItem(
+                relative_path=rel_path,
+                filename=filename,
+                status="error",
+                message=str(e),
+            ))
+
+    await db.flush()
+
+    return FolderUploadResponse(
+        total_files=len(files),
+        uploaded_count=uploaded_count,
+        skipped_count=skipped_count,
+        created_folders=created_folders,
+        results=results,
+    )
 
 
 @router.get("/api/documents/{doc_id}/chunks", response_model=list[ChunkResponse])

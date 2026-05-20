@@ -52,6 +52,19 @@ logs/
 
 # Deploy packages
 deploy-package-arm/
+deploy-package-arm64/
 deploy-package-amd64/
 deploy-package/
+deploy-arm64/
+deploy-amd64/
+deploy-package.zip
 backend/models/
+*.tar
+
+# Conda / venv
+.venv/
+venv/
+env/
+
+# Docker build cache
+.docker/

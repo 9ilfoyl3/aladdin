@@ -26,8 +26,27 @@ class KnowledgeBase(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     # 关联
+    folders: Mapped[list["Folder"]] = relationship(back_populates="knowledge_base", cascade="all, delete-orphan")
     documents: Mapped[list["Document"]] = relationship(back_populates="knowledge_base", cascade="all, delete-orphan")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="knowledge_base", cascade="all, delete-orphan")
+
+
+class Folder(Base):
+    """文件夹表（支持嵌套目录）"""
+    __tablename__ = "folders"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    kb_id: Mapped[str] = mapped_column(String, ForeignKey("knowledge_bases.id"), nullable=False)
+    parent_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("folders.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # 关联
+    knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="folders")
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent", cascade="all, delete-orphan")
+    parent: Mapped[Optional["Folder"]] = relationship(back_populates="children", remote_side=[id])
+    documents: Mapped[list["Document"]] = relationship(back_populates="folder", cascade="all, delete-orphan")
 
 
 class Document(Base):
@@ -36,6 +55,7 @@ class Document(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     kb_id: Mapped[str] = mapped_column(String, ForeignKey("knowledge_bases.id"), nullable=False)
+    folder_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("folders.id"), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     file_type: Mapped[str] = mapped_column(String, nullable=False)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -46,6 +66,7 @@ class Document(Base):
 
     # 关联
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="documents")
+    folder: Mapped[Optional["Folder"]] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
