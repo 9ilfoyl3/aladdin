@@ -106,20 +106,45 @@ docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.1
 
 ## 三、传输到服务器
 
-将以下文件拷贝到服务器（U盘/scp/内网传输）：
+三个独立包，按需组合：
 
-**首次部署：**
-```
-app.tar                       ← 应用镜像
-infra.tar                     ← 中间件镜像（首次需要）
-docker-compose-production.yml ← 重命名为 docker-compose.yml
-backend/.env.example          ← 重命名为 .env
+| 包 | 内容 | 大小 | 什么时候需要 |
+|---|---|---|---|
+| `app.tar` | 后端 + 前端镜像 | ~500MB | **每次更新** |
+| `infra.tar` | PostgreSQL + Milvus + etcd + MinIO | ~700MB | **首次部署** |
+| `models.tar.gz` | bge-m3 + bge-reranker 模型文件 | ~3GB | **本地模式才需要**（远程模式不需要） |
+
+### 打包命令
+
+```powershell
+cd C:\newHLSWorkspace\aladdin
+
+# ===== 应用包（每次更新都要重新打） =====
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+
+# ===== 中间件包（首次打一次，以后不用） =====
+# AMD64 服务器：
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+# ARM64 服务器（需要先 pull ARM 版）：
+docker pull --platform linux/arm64 postgres:16-alpine
+docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
+docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
+docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+
+# ===== 模型包（通用，不区分架构，打一次就行） =====
+$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
+tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reranker-v2-m3
 ```
 
-**后续更新：**
-```
-app.tar                       ← 只需要这一个文件
-```
+### 按场景选择传输哪些文件
+
+| 场景 | 需要传的文件 |
+|------|------------|
+| 首次部署（远程模式） | `app.tar` + `infra.tar` + `docker-compose.yml` + `.env` |
+| 首次部署（本地模式） | `app.tar` + `infra.tar` + `models.tar.gz` + `docker-compose.yml` + `.env` |
+| 后续更新应用 | `app.tar` |
+| 补装模型（远程改本地） | `models.tar.gz` |
 
 ---
 
@@ -134,6 +159,10 @@ mkdir -p /opt/aladdin && cd /opt/aladdin
 # 加载镜像
 docker load -i infra.tar
 docker load -i app.tar
+
+# 如果是本地模式，解压模型
+mkdir -p /opt/models
+tar -xzf models.tar.gz -C /opt/models
 
 # 配置环境变量
 cp .env.example .env
@@ -156,6 +185,13 @@ EMBED_PROVIDER=sentence-transformers
 EMBED_DEVICE=cpu    # 有 GPU 改 cuda
 RERANK_PROVIDER=sentence-transformers
 RERANK_DEVICE=cpu   # 有 GPU 改 cuda
+```
+
+本地模式还需要在 `docker-compose.yml` 的 backend volumes 中加模型挂载：
+```yaml
+volumes:
+  - upload_data:/app/data
+  - /opt/models:/root/.cache/huggingface/hub
 ```
 
 LLM（启动后也可在前端配置）：
