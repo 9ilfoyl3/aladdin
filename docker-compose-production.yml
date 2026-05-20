@@ -1,6 +1,4 @@
-version: '3.8'
-
-# 生产部署用 docker-compose（内网全 Docker 化）
+# Aladdin 生产部署 docker-compose
 # 使用方式：docker compose -f docker-compose-production.yml up -d
 
 services:
@@ -78,22 +76,26 @@ services:
   # ============ 应用服务 ============
 
   backend:
-    image: aladdin-backend:latest-arm64
-    expose:
-      - "8000"
+    image: aladdin-backend:latest
+    ports:
+      - "8000:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
       - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-flag-embedding}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-flag-embedding}
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
       - EMBED_MODEL=${EMBED_MODEL:-/models/bge-m3}
       - RERANK_MODEL=${RERANK_MODEL:-/models/bge-reranker-v2-m3}
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
+      - EMBED_API_KEY=${EMBED_API_KEY:-}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
-      - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
-      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
@@ -108,9 +110,9 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: aladdin-frontend:latest-arm64
+    image: aladdin-frontend:latest
     ports:
-      - "8888:80"
+      - "${FRONTEND_PORT:-8888}:80"
     depends_on:
       - backend
     restart: unless-stopped
