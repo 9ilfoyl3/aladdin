@@ -24,14 +24,18 @@ class Settings(BaseSettings):
     llm_api_key: str = ""  # 远端 API 的密钥（vllm provider 使用）
 
     # Embedding
-    embed_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding
+    embed_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding | remote
     embed_model: str = "BAAI/bge-m3"
     embed_device: str = "cpu"  # cuda | cpu | mps
+    embed_base_url: str = ""  # remote provider 使用
+    embed_api_key: str = ""  # remote provider 使用
 
     # Rerank
-    rerank_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding
+    rerank_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding | remote
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_device: str = "cpu"  # cuda | cpu | mps
+    rerank_base_url: str = ""  # remote provider 使用
+    rerank_api_key: str = ""  # remote provider 使用
 
     # Agent
     agent_max_iterations: int = 3

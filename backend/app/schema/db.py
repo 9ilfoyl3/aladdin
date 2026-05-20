@@ -115,6 +115,28 @@ class OCRConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class EmbedConfig(Base):
+    """Embedding/Rerank 模型配置表"""
+    __tablename__ = "embed_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    config_type: Mapped[str] = mapped_column(String(20), nullable=False)  # embedding | rerank
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # local | remote
+    # local provider 字段
+    local_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # sentence-transformers | flag-embedding
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)  # BAAI/bge-m3 等
+    device: Mapped[str] = mapped_column(String(10), default="cpu")  # cpu | cuda | mps
+    # remote provider 字段
+    base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timeout: Mapped[float] = mapped_column(Float, default=60.0)
+    # 状态
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)  # 当前是否启用
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class AgentNodeConfig(Base):
     """Agent 节点模型配置表"""
     __tablename__ = "agent_node_config"
