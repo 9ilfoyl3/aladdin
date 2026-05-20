@@ -1,150 +1,96 @@
-# Aladdin 打包与部署操作手册
+# Aladdin 打包与部署手册
 
-所有打包操作在你的 Windows 机器上执行（`C:\newHLSWorkspace\aladdin`）。
-
----
-
-## 一、模式说明
-
-| 模式 | Embedding/Rerank | 镜像大小 | 适用场景 |
-|------|-----------------|---------|---------|
-| **远程模式** | 调外部 API | ~500MB | 服务器上已有模型服务 |
-| **本地模式** | 容器内跑模型 | ~1.5GB (CPU) / ~5GB (GPU) | 无独立模型服务 |
+所有打包在 Windows 机器上执行（`C:\newHLSWorkspace\aladdin`）。
+三个包独立打包，按需组合部署。
 
 ---
 
-## 二、打包命令
+## 打包产物
 
-### 远程模式 — AMD64 服务器
-
-```powershell
-cd C:\newHLSWorkspace\aladdin
-
-# 构建应用镜像
-docker build -t aladdin-backend:latest backend/
-docker build -t aladdin-frontend:latest frontend/
-
-# 首次部署：导出全量（应用 + 中间件）
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
-
-# 后续更新：只导出应用
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-```
-
-### 远程模式 — ARM64 服务器
-
-```powershell
-cd C:\newHLSWorkspace\aladdin
-
-# 构建应用镜像（交叉编译）
-docker build --platform linux/arm64 -t aladdin-backend:latest backend/
-docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
-
-# 首次部署：拉取 ARM64 中间件 + 导出全量
-docker pull --platform linux/arm64 postgres:16-alpine
-docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
-docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
-docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
-
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
-
-# 后续更新：只导出应用
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-```
-
-### 本地模式（CPU）— AMD64 服务器
-
-```powershell
-cd C:\newHLSWorkspace\aladdin
-
-# 构建（含 sentence-transformers + CPU PyTorch）
-docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
-docker build -t aladdin-frontend:latest frontend/
-
-# 导出（同上）
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
-```
-
-### 本地模式（CPU）— ARM64 服务器
-
-```powershell
-cd C:\newHLSWorkspace\aladdin
-
-# 构建（交叉编译 + ML 依赖）
-docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
-docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
-
-# 导出（同上）
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-# 中间件同 ARM64 远程模式
-```
-
-### 本地模式（GPU）— AMD64 + NVIDIA 服务器
-
-```powershell
-cd C:\newHLSWorkspace\aladdin
-
-# 准备模型文件
-$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
-New-Item -ItemType Directory -Force -Path backend/models
-Copy-Item -Recurse -Force "$HF_CACHE\models--BAAI--bge-m3" backend/models/
-Copy-Item -Recurse -Force "$HF_CACHE\models--BAAI--bge-reranker-v2-m3" backend/models/
-
-# 构建（CUDA PyTorch + FlagEmbedding + 模型打包进镜像）
-docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
-docker build -t aladdin-frontend:latest frontend/
-
-# 导出
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
-```
-
----
-
-## 三、传输到服务器
-
-三个独立包，按需组合：
-
-| 包 | 内容 | 大小 | 什么时候需要 |
+| 包 | 内容 | 大小 | 区分架构 |
 |---|---|---|---|
-| `app.tar` | 后端 + 前端镜像 | ~500MB | **每次更新** |
-| `infra.tar` | PostgreSQL + Milvus + etcd + MinIO | ~700MB | **首次部署** |
-| `models.tar.gz` | bge-m3 + bge-reranker 模型文件 | ~3GB | **本地模式才需要**（远程模式不需要） |
+| `infra.tar` | PostgreSQL + Milvus + etcd + MinIO | ~700MB | ✅ 区分 |
+| `models.tar.gz` | bge-m3 + bge-reranker 模型文件 | ~3GB | ❌ 通用 |
+| `app.tar` | 后端 + 前端应用镜像 | ~500MB | ✅ 区分 |
 
-### 打包命令
+另需配置文件：`docker-compose.yml` + `.env`
+
+---
+
+## 一、中间件打包（infra.tar）
+
+首次部署时打一次，以后不用重复。
+
+### AMD64
 
 ```powershell
-cd C:\newHLSWorkspace\aladdin
+docker pull postgres:16-alpine
+docker pull milvusdb/milvus:v2.4.6
+docker pull quay.io/coreos/etcd:v3.5.18
+docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z
 
-# ===== 应用包（每次更新都要重新打） =====
-docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
-
-# ===== 中间件包（首次打一次，以后不用） =====
-# AMD64 服务器：
 docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
-# ARM64 服务器（需要先 pull ARM 版）：
+```
+
+### ARM64
+
+```powershell
 docker pull --platform linux/arm64 postgres:16-alpine
 docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
 docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
 docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
 
-# ===== 模型包（通用，不区分架构，打一次就行） =====
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+```
+
+---
+
+## 二、模型打包（models.tar.gz）
+
+不区分架构，打一次通用。本地模式才需要，远程模式跳过。
+
+```powershell
 $HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
 tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reranker-v2-m3
 ```
 
-### 按场景选择传输哪些文件
+---
 
-| 场景 | 需要传的文件 |
-|------|------------|
-| 首次部署（远程模式） | `app.tar` + `infra.tar` + `docker-compose.yml` + `.env` |
-| 首次部署（本地模式） | `app.tar` + `infra.tar` + `models.tar.gz` + `docker-compose.yml` + `.env` |
-| 后续更新应用 | `app.tar` |
-| 补装模型（远程改本地） | `models.tar.gz` |
+## 三、应用打包（app.tar）
+
+每次代码更新后重新打包。
+
+### AMD64 — 远程模式（不含 ML 依赖）
+
+```powershell
+docker build -t aladdin-backend:latest backend/
+docker build -t aladdin-frontend:latest frontend/
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+```
+
+### AMD64 — 本地模式（含 ML 依赖）
+
+```powershell
+docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+docker build -t aladdin-frontend:latest frontend/
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+```
+
+### ARM64 — 远程模式
+
+```powershell
+docker build --platform linux/arm64 -t aladdin-backend:latest backend/
+docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+```
+
+### ARM64 — 本地模式
+
+```powershell
+docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
+docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
+```
 
 ---
 
@@ -153,113 +99,86 @@ tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reran
 ### 首次部署
 
 ```bash
-# 创建部署目录
 mkdir -p /opt/aladdin && cd /opt/aladdin
 
-# 加载镜像
+# 1. 加载中间件镜像
 docker load -i infra.tar
+
+# 2. 加载应用镜像
 docker load -i app.tar
 
-# 如果是本地模式，解压模型
+# 3. 如果是本地模式，解压模型
 mkdir -p /opt/models
 tar -xzf models.tar.gz -C /opt/models
 
-# 配置环境变量
-cp .env.example .env
+# 4. 放入配置文件（docker-compose.yml + .env）
+# 5. 编辑 .env
 vim .env
+
+# 6. 启动
+docker compose up -d
 ```
 
-**`.env` 必须配置的项：**
+### 更新应用
 
-远程模式：
+```bash
+cd /opt/aladdin
+docker load -i app.tar
+docker compose up -d --force-recreate backend frontend
+```
+
+---
+
+## 五、.env 配置
+
+### 远程模式（Embedding/Rerank 调外部 API）
+
 ```env
 EMBED_PROVIDER=remote
-EMBED_BASE_URL=http://你的Embedding服务地址/v1
+EMBED_BASE_URL=http://模型服务地址/v1
+EMBED_MODEL=模型名
+EMBED_API_KEY=
+
 RERANK_PROVIDER=remote
-RERANK_BASE_URL=http://你的Rerank服务地址/v1
+RERANK_BASE_URL=http://模型服务地址/v1
+RERANK_MODEL=模型名
+RERANK_API_KEY=
 ```
 
-本地模式：
+### 本地模式（容器内跑模型）
+
 ```env
 EMBED_PROVIDER=sentence-transformers
-EMBED_DEVICE=cpu    # 有 GPU 改 cuda
+EMBED_MODEL=BAAI/bge-m3
+EMBED_DEVICE=cpu
+
 RERANK_PROVIDER=sentence-transformers
-RERANK_DEVICE=cpu   # 有 GPU 改 cuda
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_DEVICE=cpu
 ```
 
-本地模式还需要在 `docker-compose.yml` 的 backend volumes 中加模型挂载：
+docker-compose.yml 的 backend volumes 加模型挂载：
 ```yaml
 volumes:
-  - upload_data:/app/data
   - /opt/models:/root/.cache/huggingface/hub
 ```
 
-LLM（启动后也可在前端配置）：
+### LLM（启动后也可在前端配置）
+
 ```env
 LLM_PROVIDER=vllm
-LLM_BASE_URL=http://你的LLM服务地址/v1
+LLM_BASE_URL=http://LLM服务地址/v1
 LLM_MODEL=模型名
 LLM_API_KEY=密钥
 ```
 
-**启动：**
-```bash
-docker compose up -d
-
-# 验证
-docker compose ps          # 全部 Up
-docker compose logs backend --tail 20  # 无报错
-```
-
-**访问：** `http://服务器IP:8888`
-
 ---
 
-### 后续更新
+## 六、组合速查
 
-```bash
-cd /opt/aladdin
-
-# 加载新镜像
-docker load -i app.tar
-
-# 重启应用（不影响数据库和向量库）
-docker compose up -d --force-recreate backend frontend
-
-# 验证
-docker compose logs backend --tail 20
-```
-
----
-
-## 五、常用运维命令
-
-```bash
-# 查看状态
-docker compose ps
-
-# 查看日志
-docker compose logs backend -f
-docker compose logs frontend -f
-
-# 重启单个服务
-docker compose restart backend
-
-# 停止（数据保留）
-docker compose down
-
-# 停止并清除所有数据（慎用！）
-docker compose down -v
-```
-
----
-
-## 六、快速参考
-
-| 我要... | 命令 |
-|---------|------|
-| ARM + 远程模式打包 | `docker build --platform linux/arm64 -t aladdin-backend:latest backend/` |
-| AMD + 远程模式打包 | `docker build -t aladdin-backend:latest backend/` |
-| AMD + GPU 本地模式打包 | `docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/` |
-| 只更新应用 | `docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar` |
-| 服务器加载更新 | `docker load -i app.tar && docker compose up -d --force-recreate backend frontend` |
+| 我要部署... | 需要的包 |
+|---|---|
+| 远程模式（首次） | `infra.tar` + `app.tar` + 配置文件 |
+| 本地模式（首次） | `infra.tar` + `app.tar` + `models.tar.gz` + 配置文件 |
+| 更新应用 | `app.tar` |
+| 从远程切换到本地 | `models.tar.gz` + 改 `.env` + 加 volume 挂载 |
