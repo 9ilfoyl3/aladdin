@@ -442,9 +442,9 @@ function Documents() {
           </div>
         ) : (
           /* 列表视图 */
-          <div className="border border-border rounded-xl">
+          <div className="border border-border rounded-xl overflow-hidden">
             <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
+              <thead className="bg-muted/80 border-b border-border">
                 <tr>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">名称</th>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden md:table-cell">大小</th>
