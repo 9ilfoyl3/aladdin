@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, RefreshCw, Cpu, Brain, Bot, Layers } from 'lucide-react'
+import { Save, RefreshCw, Bot, Layers } from 'lucide-react'
 import { systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,10 +10,6 @@ import { Label } from '@/components/ui/label'
 
 // 配置数据类型
 interface SystemConfig {
-  embed_model: string
-  embed_device: string
-  rerank_model: string
-  rerank_device: string
   agent_max_iterations: number
   agent_timeout: number
   parent_chunk_size: number
@@ -49,24 +45,6 @@ function Settings() {
 
   const configGroups: ConfigGroup[] = [
     {
-      title: 'Embedding 配置',
-      icon: <Cpu className="h-5 w-5 text-primary" />,
-      description: '向量化模型配置，用于文档和查询的语义编码',
-      fields: [
-        { key: 'embed_model', label: 'Embedding 模型', type: 'text', hint: '如 BAAI/bge-m3' },
-        { key: 'embed_device', label: '运行设备', type: 'select', options: ['cuda', 'cpu'] },
-      ],
-    },
-    {
-      title: 'Rerank 配置',
-      icon: <Brain className="h-5 w-5 text-primary" />,
-      description: '重排序模型配置，用于对检索结果进行精排',
-      fields: [
-        { key: 'rerank_model', label: 'Rerank 模型', type: 'text', hint: '如 BAAI/bge-reranker-v2-m3' },
-        { key: 'rerank_device', label: '运行设备', type: 'select', options: ['cuda', 'cpu'] },
-      ],
-    },
-    {
       title: 'Agent 配置',
       icon: <Bot className="h-5 w-5 text-primary" />,
       description: 'Agent 编排参数，控制迭代检索的深度和超时',
@@ -85,7 +63,6 @@ function Settings() {
         { key: 'chunk_overlap', label: '重叠大小', type: 'number' },
       ],
     },
-
   ]
 
   const { data: config, isLoading } = useQuery({

@@ -1,4 +1,6 @@
-# Aladdin 生产部署 docker-compose
+version: '3.8'
+
+# 生产部署用 docker-compose（内网全 Docker 化）
 # 使用方式：docker compose -f docker-compose-production.yml up -d
 
 services:
@@ -44,8 +46,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
-    expose:
-      - "19530"
+    ports:
+      - "19530:19530"
     depends_on:
       - etcd
       - minio
@@ -62,8 +64,8 @@ services:
       POSTGRES_DB: aladdin
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    expose:
-      - "5432"
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -87,21 +89,21 @@ services:
       - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
       - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
-      - EMBED_MODEL=${EMBED_MODEL:-/models/bge-m3}
-      - RERANK_MODEL=${RERANK_MODEL:-/models/bge-reranker-v2-m3}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
       - EMBED_API_KEY=${EMBED_API_KEY:-}
       - RERANK_BASE_URL=${RERANK_BASE_URL:-}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
-      - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
     volumes:
       - upload_data:/app/data
-      - ${MODEL_DIR:-./models}:/models
+      - model_data:/root/.cache/huggingface/hub
     depends_on:
       postgres:
         condition: service_healthy
@@ -112,7 +114,7 @@ services:
   frontend:
     image: aladdin-frontend:latest
     ports:
-      - "${FRONTEND_PORT:-8888}:80"
+      - "80:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -123,3 +125,4 @@ volumes:
   milvus_data:
   postgres_data:
   upload_data:
+  model_data:

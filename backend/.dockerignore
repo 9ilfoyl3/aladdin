@@ -1,0 +1,14 @@
+# 排除不需要进入 Docker 构建上下文的文件
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+models/
+data/
+tests/
+*.md
+.DS_Store
+.git/
+.venv/

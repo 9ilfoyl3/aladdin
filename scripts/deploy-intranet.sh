@@ -10,35 +10,70 @@ echo "=== Aladdin 内网部署 ==="
 
 # 1. 加载 Docker 镜像
 echo ""
-echo "[1/3] 加载 Docker 镜像..."
+echo "[1/4] 加载 Docker 镜像..."
 for f in *.tar; do
-    echo "  加载 $f ..."
-    docker load -i "$f"
+    if [ -f "$f" ]; then
+        echo "  加载 $f ..."
+        docker load -i "$f"
+    fi
 done
 
-# 2. 配置环境变量
+# 2. 加载模型文件（如果存在）
 echo ""
-echo "[2/3] 配置环境变量..."
+echo "[2/4] 加载模型文件..."
+MODEL_DIR="/var/lib/aladdin/models"
+if [ -f "models.tar.gz" ]; then
+    echo "  解压模型到 $MODEL_DIR ..."
+    mkdir -p "$MODEL_DIR"
+    tar -xzf models.tar.gz -C "$MODEL_DIR"
+    echo "  模型加载完成"
+    echo ""
+    echo "  提示：如果使用本地模型，需要在 docker-compose.yml 中将 model_data volume 改为绑定挂载："
+    echo "    volumes:"
+    echo "      - $MODEL_DIR:/root/.cache/huggingface/hub"
+else
+    echo "  未找到 models.tar.gz，跳过模型加载"
+    echo "  如果使用远程 Embedding 服务，可在 .env 中配置 EMBED_PROVIDER=remote"
+fi
+
+# 3. 配置环境变量
+echo ""
+echo "[3/4] 配置环境变量..."
 if [ ! -f .env ]; then
     cp .env.example .env
-    echo "  已创建 .env 文件，请编辑配置 LLM 地址和密钥："
+    echo "  已创建 .env 文件，请编辑配置："
     echo "  vim .env"
     echo ""
     echo "  必须配置的项："
-    echo "    LLM_BASE_URL=你的内网LLM服务地址"
+    echo "    LLM_BASE_URL=你的LLM服务地址"
     echo "    LLM_MODEL=模型名称"
     echo "    LLM_API_KEY=密钥（如需要）"
     echo ""
-    echo "  有 GPU 时设置："
-    echo "    EMBED_DEVICE=cuda"
-    echo "    RERANK_DEVICE=cuda"
+    echo "  Embedding 配置（二选一）："
+    echo "    方式A - 本地模型（需要 models.tar.gz）："
+    echo "      EMBED_PROVIDER=sentence-transformers"
+    echo "      EMBED_DEVICE=cpu  # 有 GPU 改为 cuda"
+    echo ""
+    echo "    方式B - 远程服务："
+    echo "      EMBED_PROVIDER=remote"
+    echo "      EMBED_BASE_URL=http://embedding-server:8080/v1"
     echo ""
     read -p "  编辑完成后按回车继续..."
 fi
 
-# 3. 启动服务
+# 4. 启动服务
 echo ""
-echo "[3/3] 启动服务..."
+echo "[4/4] 启动服务..."
+
+# 如果有本地模型，修改 docker-compose 使用绑定挂载
+if [ -d "$MODEL_DIR" ] && [ "$(ls -A $MODEL_DIR 2>/dev/null)" ]; then
+    # 使用 sed 替换 model_data volume 为绑定挂载
+    if grep -q "model_data:/root/.cache/huggingface/hub" docker-compose.yml; then
+        sed -i "s|model_data:/root/.cache/huggingface/hub|${MODEL_DIR}:/root/.cache/huggingface/hub|g" docker-compose.yml
+        echo "  已配置模型目录挂载: $MODEL_DIR"
+    fi
+fi
+
 docker compose up -d
 
 echo ""
@@ -47,5 +82,7 @@ echo "前端: http://$(hostname -I | awk '{print $1}'):8888"
 echo "后端: http://$(hostname -I | awk '{print $1}'):8000"
 echo "API 文档: http://$(hostname -I | awk '{print $1}'):8000/docs"
 echo ""
-echo "查看日志: docker compose logs -f"
-echo "停止服务: docker compose down"
+echo "提示："
+echo "  - 可在前端 Embedding 页面动态切换本地/远程 Embedding 服务"
+echo "  - 查看日志: docker compose logs -f"
+echo "  - 停止服务: docker compose down"
