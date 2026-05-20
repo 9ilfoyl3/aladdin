@@ -128,7 +128,7 @@ POSTGRES_PASSWORD=postgres
 当服务器上没有独立的 Embedding/Rerank API 服务时，可以把模型文件放在服务器上，由 Aladdin 容器加载。
 
 **额外要求：**
-1. 应用镜像构建时加 `INSTALL_ML=true`（安装 PyTorch + sentence-transformers，镜像约 1.5GB）
+1. 应用镜像构建时加 `INSTALL_ML=true`（安装 PyTorch + FlagEmbedding + sentence-transformers，镜像约 1.5GB）
 2. 服务器上需要模型文件
 
 **打包应用镜像（替代远程模式的构建命令）：**
@@ -152,13 +152,13 @@ mkdir -p /opt/models
 tar -xzf models.tar.gz -C /opt/models
 ```
 
-**.env 配置：**
+**.env 配置（Linux 服务器推荐 flag-embedding，稀疏向量质量更好）：**
 ```env
-EMBED_PROVIDER=sentence-transformers
+EMBED_PROVIDER=flag-embedding
 EMBED_MODEL=BAAI/bge-m3
 EMBED_DEVICE=cpu
 
-RERANK_PROVIDER=sentence-transformers
+RERANK_PROVIDER=flag-embedding
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
 
@@ -173,8 +173,8 @@ LLM_API_KEY=密钥
 POSTGRES_PASSWORD=postgres
 ```
 
-> `MODEL_DIR` 挂载到容器的 `/root/.cache/huggingface/hub`，模型从此目录加载。
-> 远程模式时此目录为空不影响运行。
+> Windows 本地开发用 `sentence-transformers`（FlagEmbedding 在 Windows 有兼容问题）。
+> Linux/macOS 服务器用 `flag-embedding`（稀疏向量质量更好）。
 
 ---
 
