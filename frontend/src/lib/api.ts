@@ -148,7 +148,85 @@ export const agentNodeConfigApi = {
     }),
 }
 
-// OCR 服务配置接口类型
+// Embedding/Rerank 配置接口类型
+export interface EmbedConfigItem {
+  id: string
+  name: string
+  config_type: string  // embedding | rerank
+  provider: string  // local | remote
+  local_provider: string | null
+  model_name: string
+  device: string
+  base_url: string | null
+  api_key_set: boolean
+  timeout: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface EmbedTestResult {
+  success: boolean
+  message: string
+}
+
+export interface EmbedCurrentConfig {
+  embed_provider: string
+  embed_model: string
+  embed_device: string
+  embed_base_url: string
+  rerank_provider: string
+  rerank_model: string
+  rerank_device: string
+  rerank_base_url: string
+}
+
+// Embedding/Rerank 配置接口
+export const embedConfigApi = {
+  list: (configType?: string) =>
+    request<EmbedConfigItem[]>(configType ? `/embed-configs?config_type=${configType}` : '/embed-configs'),
+  current: () => request<EmbedCurrentConfig>('/embed-configs/current'),
+  create: (data: {
+    name: string
+    config_type: string
+    provider: string
+    local_provider?: string
+    model_name?: string
+    device?: string
+    base_url?: string
+    api_key?: string
+    timeout?: number
+    is_active?: boolean
+  }) =>
+    request<EmbedConfigItem>('/embed-configs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Record<string, unknown>) =>
+    request<EmbedConfigItem>(`/embed-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/embed-configs/${id}`, { method: 'DELETE' }),
+  test: (data: {
+    provider: string
+    config_type: string
+    local_provider?: string
+    model_name?: string
+    device?: string
+    base_url?: string
+    api_key?: string
+    timeout?: number
+  }) =>
+    request<EmbedTestResult>('/embed-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testSaved: (id: string) =>
+    request<EmbedTestResult>(`/embed-configs/${id}/test`, { method: 'POST' }),
+}
+
 export interface OCRConfigItem {
   id: string
   name: string

@@ -49,3 +49,9 @@ backend/data/*.db-wal
 # Logs
 *.log
 logs/
+
+# Deploy packages
+deploy-package-arm/
+deploy-package-amd64/
+deploy-package/
+backend/models/
