@@ -127,9 +127,11 @@ RERANK_PROVIDER=sentence-transformers  # 或 flag-embedding
 RERANK_DEVICE=cuda
 ```
 
-### 3. 下载模型（必须）
+### 3. 下载模型（本地模式必须，远程模式跳过）
 
-项目运行在 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），不会自动联网下载模型。启动前必须将模型下载到本地缓存目录。
+如果使用 `EMBED_PROVIDER=remote` 和 `RERANK_PROVIDER=remote`，无需下载模型，跳过此步。
+
+本地模式下，项目运行在 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），不会自动联网下载模型。启动前必须将模型下载到本地缓存目录。
 
 ```bash
 # 方式一：使用 Makefile 命令（推荐）
@@ -169,13 +171,27 @@ LLM_BASE_URL=https://your-api-endpoint
 LLM_MODEL=your-model-name
 LLM_API_KEY=your-api-key
 
-# Embedding Provider（根据平台选择）
-EMBED_PROVIDER=sentence-transformers   # 跨平台兼容，推荐本地开发
-# EMBED_PROVIDER=flag-embedding        # 支持稀疏向量，macOS/Linux 可用，Windows 不推荐
+# Embedding Provider（三选一）
+EMBED_PROVIDER=sentence-transformers   # 本地模型，跨平台兼容
+# EMBED_PROVIDER=flag-embedding        # 本地模型，支持稀疏向量
+# EMBED_PROVIDER=remote                # 远程服务，无需本地模型
 
-# Rerank Provider（根据平台选择）
-RERANK_PROVIDER=sentence-transformers  # 跨平台兼容，推荐本地开发
-# RERANK_PROVIDER=flag-embedding       # FlagReranker，macOS/Linux 可用，Windows 不推荐
+# 远程 Embedding 示例：
+# EMBED_PROVIDER=remote
+# EMBED_BASE_URL=http://10.30.1.4:8902/v1
+# EMBED_MODEL=Qwen3-Embedding-0.6B
+# EMBED_API_KEY=your-token
+
+# Rerank Provider（三选一）
+RERANK_PROVIDER=sentence-transformers  # 本地模型，跨平台兼容
+# RERANK_PROVIDER=flag-embedding       # 本地模型
+# RERANK_PROVIDER=remote               # 远程服务
+
+# 远程 Rerank 示例（自定义接口填完整端点）：
+# RERANK_PROVIDER=remote
+# RERANK_BASE_URL=http://10.30.1.3:8001/ranking_score
+# RERANK_MODEL=
+# RERANK_API_KEY=
 ```
 
 ### 5. 启动基础设施
@@ -212,17 +228,22 @@ make dev-frontend
 
 ### Embedding / Rerank Provider 选择指南
 
-| 配置项 | `sentence-transformers` | `flag-embedding` |
-|--------|------------------------|------------------|
-| 跨平台 | ✅ Mac / Windows / Linux | ⚠️ Mac / Linux 可用，Windows 困难 |
-| Embedding 稠密向量 | ✅ 支持 | ✅ 支持 |
-| Embedding 稀疏向量 | ❌ 占位值（不影响运行） | ✅ 原生 lexical weights |
-| Rerank 精排 | ✅ CrossEncoder | ✅ FlagReranker |
-| 混合检索效果 | 仅稠密检索生效，稀疏部分不贡献召回 | 稠密+稀疏双路召回，效果最佳 |
-| 安装难度 | 低，pip install 即可 | 中，依赖 peft/accelerate 等 |
-| 推荐场景 | 本地开发、Windows 环境、快速验证 | 生产部署、追求最佳检索效果 |
+| 配置项 | `sentence-transformers` | `flag-embedding` | `remote` |
+|--------|------------------------|------------------|----------|
+| 跨平台 | ✅ Mac / Windows / Linux | ⚠️ Mac / Linux 可用，Windows 困难 | ✅ 任意平台 |
+| 需要本地模型 | ✅ 需要下载 | ✅ 需要下载 | ❌ 不需要 |
+| Embedding 稠密向量 | ✅ 支持 | ✅ 支持 | ✅ 支持 |
+| Embedding 稀疏向量 | ❌ 占位值 | ✅ 原生 lexical weights | ❌ 占位值 |
+| Rerank 精排 | ✅ CrossEncoder | ✅ FlagReranker | ✅ 调用远程服务 |
+| 安装难度 | 低 | 中 | 无（HTTP 调用） |
+| 推荐场景 | 本地开发、Windows | 生产部署、追求最佳效果 | 有独立 Embedding/Rerank 服务 |
 
-两种 provider 使用相同的模型文件（`BAAI/bge-m3` 和 `BAAI/bge-reranker-v2-m3`），切换时无需重新下载模型，只需修改 `EMBED_PROVIDER` 和 `RERANK_PROVIDER` 配置即可。
+环境变量决定首次启动时的默认配置。启动后可在前端 **Embedding** 页面动态添加多个配置（本地/远程），一键切换启用，无需重启。
+
+#### 远程服务地址填写规则
+
+- **OpenAI 兼容接口**（TEI、Infinity、vLLM 等）：填到 `/v1`，系统自动拼接 `/embeddings` 或 `/rerank`
+- **自定义接口**：填完整端点路径，如 `http://server:8001/ranking_score`
 
 ### 常用命令
 
@@ -412,6 +433,7 @@ A: 稠密检索正常工作，稀疏检索部分返回占位值不贡献实际�
 - **迭代反思**：两级评估（分数快判 + LLM 深度评估），覆盖度增幅不足时提前终止
 - **结构性碎片惩罚**：Rerank 阶段对标题/目录等无实质信息的短文本施加分数惩罚
 - **多模型管理**：数据库持久化多个 LLM 配置，支持创建/编辑/删除/设为默认/连通性测试，对话时动态切换
+- **Embedding/Rerank 可配置**：支持本地模型和远程服务两种模式，前端页面动态切换，无需重启；兼容 OpenAI 标准接口和自定义接口
 - **OCR 服务管理**：可视化管理多个 OCR 服务（PaddleOCR/TextIn/通用API），支持默认+Fallback 自动切换，抽象基类+工厂模式易于扩展
 - **Markdown 切片优化**：VL 模型返回的 Markdown 内容（含表格、标题）智能切分，表格整块保护不切断；切片预览支持 Markdown 渲染（标题、表格、列表等正确展示）
 - **上下文窗口管理**：可配置每个模型的最大上下文 token 数，按 chunk 相关性智能截断，适配不同窗口大小的模型
@@ -485,6 +507,7 @@ aladdin/
 │   │   │   ├── document.py
 │   │   │   ├── retrieval.py     # 检索测试
 │   │   │   ├── llm_config.py    # 多模型配置管理（CRUD + 连通性测试）
+│   │   │   ├── embed_config.py  # Embedding/Rerank 配置管理（CRUD + 连通性测试 + 动态切换）
 │   │   │   ├── ocr_config.py   # OCR 服务配置管理（CRUD + 连通性测试）
 │   │   │   ├── api_key.py
 │   │   │   ├── auth.py          # API Key 验证逻辑
@@ -515,10 +538,10 @@ aladdin/
 │   │   │       └── external_api_provider.py # 通用外部 API
 │   │   ├── models/              # 模型抽象层
 │   │   │   ├── provider.py      # Provider 接口定义
-│   │   │   ├── manager.py       # 模型统一管理器（单例）
+│   │   │   ├── manager.py       # 模型统一管理器（单例，支持动态重载）
 │   │   │   ├── llm/             # Ollama / vLLM 实现
-│   │   │   ├── embedding/       # bge-m3 本地推理
-│   │   │   └── rerank/          # bge-reranker 本地推理
+│   │   │   ├── embedding/       # bge-m3 本地推理 + 远程 API
+│   │   │   └── rerank/          # bge-reranker 本地推理 + 远程 API
 │   │   ├── storage/             # 存储层
 │   │   │   ├── milvus.py        # Milvus 操作封装
 │   │   │   └── database.py      # SQLite 异步会话
@@ -544,12 +567,16 @@ aladdin/
 | `LLM_BASE_URL` | http://localhost:11434 | LLM 服务地址 |
 | `LLM_MODEL` | qwen2.5:7b | LLM 模型名称 |
 | `LLM_API_KEY` | - | API 密钥（远端服务需要） |
-| `EMBED_PROVIDER` | sentence-transformers | Embedding 后端（sentence-transformers / flag-embedding） |
+| `EMBED_PROVIDER` | sentence-transformers | Embedding 后端（sentence-transformers / flag-embedding / remote） |
 | `EMBED_MODEL` | BAAI/bge-m3 | Embedding 模型名称或本地路径 |
-| `EMBED_DEVICE` | cuda | 推理设备（cuda / cpu / mps） |
-| `RERANK_PROVIDER` | sentence-transformers | Rerank 后端（sentence-transformers / flag-embedding） |
+| `EMBED_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
+| `EMBED_BASE_URL` | - | 远程 Embedding 服务地址（remote provider 使用） |
+| `EMBED_API_KEY` | - | 远程 Embedding 服务密钥（remote provider 使用） |
+| `RERANK_PROVIDER` | sentence-transformers | Rerank 后端（sentence-transformers / flag-embedding / remote） |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型 |
-| `RERANK_DEVICE` | cuda | 推理设备（cuda / cpu / mps） |
+| `RERANK_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
+| `RERANK_BASE_URL` | - | 远程 Rerank 服务地址（remote provider 使用） |
+| `RERANK_API_KEY` | - | 远程 Rerank 服务密钥（remote provider 使用） |
 | `MILVUS_HOST` | localhost | Milvus 地址 |
 | `MILVUS_PORT` | 19530 | Milvus 端口 |
 | `AGENT_MAX_ITERATIONS` | 3 | Agent 最大迭代次数 |
@@ -557,6 +584,18 @@ aladdin/
 | `PARENT_CHUNK_SIZE` | 1500 | 父块大小（字符） |
 | `CHILD_CHUNK_SIZE` | 300 | 子块大小（字符） |
 | `CHUNK_OVERLAP` | 50 | 子块重叠（字符） |
+
+## 生产部署
+
+详见 [DEPLOYMENT_GUIDE_MAC.md](./DEPLOYMENT_GUIDE_MAC.md)，包含：
+
+- macOS 开发环境打包 Docker 镜像（ARM64 / AMD64）
+- 模型和服务分离打包策略
+- 远程 Embedding/Rerank 服务配置
+- 内网离线部署流程
+- Makefile 命令速查
+
+Windows 部署详见 [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)。
 
 ## 未来扩展方向
 

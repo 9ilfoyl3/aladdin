@@ -128,10 +128,22 @@ LLM_API_KEY=sk-你的key
 
 # Embedding 和 Rerank → 本地模型
 # 没有 NVIDIA 显卡或未装驱动用 cpu，有显卡用 cuda
+EMBED_PROVIDER=sentence-transformers
 EMBED_MODEL=BAAI/bge-m3
 EMBED_DEVICE=cpu
+RERANK_PROVIDER=sentence-transformers
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
+
+# 或使用远程 Embedding/Rerank 服务（无需本地模型）：
+# EMBED_PROVIDER=remote
+# EMBED_BASE_URL=http://embedding-server:8080/v1
+# EMBED_MODEL=model-name
+# EMBED_API_KEY=your-token
+# RERANK_PROVIDER=remote
+# RERANK_BASE_URL=http://rerank-server:8001/ranking_score
+# RERANK_MODEL=
+# RERANK_API_KEY=
 
 # Agent 参数
 AGENT_MAX_ITERATIONS=3
@@ -363,6 +375,8 @@ Docker Desktop:
 
 ## 内网全 Docker 化部署
 
+### 方式一：使用 PowerShell 打包脚本（旧方式）
+
 在有网机器上执行打包脚本：
 
 ```powershell
@@ -377,4 +391,79 @@ chmod +x deploy-intranet.sh
 ./deploy-intranet.sh
 ```
 
-生产环境默认使用 `flag-embedding` provider + `cuda` 设备。
+### 方式二：使用 Makefile 打包（推荐）
+
+Windows 上需要安装 Make（通过 `choco install make` 或 WSL2），然后使用与 macOS 相同的命令：
+
+```powershell
+# 远程 Embedding 模式（不含 ML 依赖，镜像约 500MB）
+make docker-package-arm-update      # ARM64 目标服务器
+make docker-package-amd64-update    # AMD64 目标服务器
+
+# 本地模型模式（含 CPU 版 PyTorch，镜像约 1.5GB）
+make docker-build-arm-ml            # ARM64
+make docker-build-amd64-ml          # AMD64
+
+# 首次完整部署（服务 + 模型 + 基础设施镜像）
+make docker-package-arm             # ARM64
+make docker-package-amd64           # AMD64
+```
+
+### Dockerfile 构建参数
+
+后端 Dockerfile 通过 `INSTALL_ML` 参数控制是否安装 ML 依赖：
+
+```powershell
+# 远程模式（轻量，约 500MB，适用于有独立 Embedding/Rerank 服务的环境）
+docker build -t aladdin-backend:latest -f backend/Dockerfile backend/
+
+# 本地模型模式（含 CPU 版 PyTorch，约 1.5GB）
+docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest -f backend/Dockerfile backend/
+```
+
+### Embedding/Rerank 配置
+
+系统支持本地模型和远程服务两种模式，可通过环境变量设置初始默认值，也可在前端 **Embedding** 页面动态切换。
+
+**远程服务示例（`.env`）：**
+```env
+# Embedding：OpenAI 兼容接口，地址填到 /v1
+EMBED_PROVIDER=remote
+EMBED_BASE_URL=http://10.30.1.4:8902/v1
+EMBED_MODEL=Qwen3-Embedding-0.6B
+EMBED_API_KEY=your-token
+
+# Rerank：自定义接口，地址填完整端点
+RERANK_PROVIDER=remote
+RERANK_BASE_URL=http://10.30.1.3:8001/ranking_score
+RERANK_MODEL=
+RERANK_API_KEY=
+```
+
+**本地模型（`.env`）：**
+```env
+EMBED_PROVIDER=sentence-transformers
+EMBED_MODEL=BAAI/bge-m3
+EMBED_DEVICE=cpu                    # 有 GPU 改为 cuda
+
+RERANK_PROVIDER=sentence-transformers
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_DEVICE=cpu
+```
+
+#### 远程服务地址填写规则
+
+| 接口类型 | 地址填写方式 | 示例 |
+|---------|-------------|------|
+| OpenAI 兼容（TEI/Infinity/vLLM） | 填到 `/v1`，系统自动拼接 `/embeddings` 或 `/rerank` | `http://server:8080/v1` |
+| 自定义接口 | 填完整端点路径 | `http://server:8001/ranking_score` |
+
+#### Provider 选择
+
+| Provider | 特点 | 推荐场景 |
+|----------|------|---------|
+| `sentence-transformers` | 跨平台兼容，稀疏向量为 BM25 近似 | 本地开发、Windows |
+| `flag-embedding` | 原生稠密+稀疏向量，检索质量更高 | 生产环境、有 GPU |
+| `remote` | 调用外部 API，不加载本地模型 | 有独立 Embedding/Rerank 服务 |
+
+生产环境默认使用 `flag-embedding` provider + `cuda` 设备（本地模型模式），或 `remote` provider（远程服务模式）。

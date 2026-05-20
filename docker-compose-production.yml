@@ -85,10 +85,16 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_DEVICE=${EMBED_DEVICE:-cuda}
-      - RERANK_DEVICE=${RERANK_DEVICE:-cuda}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-flag-embedding}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-flag-embedding}
+      - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
+      - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
+      - EMBED_API_KEY=${EMBED_API_KEY:-}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
       - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
@@ -97,6 +103,7 @@ services:
       - TRANSFORMERS_OFFLINE=1
     volumes:
       - upload_data:/app/data
+      - model_data:/root/.cache/huggingface/hub
     depends_on:
       postgres:
         condition: service_healthy
@@ -118,3 +125,4 @@ volumes:
   milvus_data:
   postgres_data:
   upload_data:
+  model_data:
