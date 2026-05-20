@@ -5,7 +5,7 @@ services:
   # ============ 基础设施 ============
 
   etcd:
-    image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.18}
+    image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.25}
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: ${IMAGE_MINIO:-minio/minio:RELEASE.2023-03-20T20-16-18Z}
+    image: ${IMAGE_MINIO:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin

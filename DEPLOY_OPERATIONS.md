@@ -85,18 +85,18 @@ docker save aladdin-backend:latest aladdin-frontend:latest -o app.tar
 ```powershell
 docker pull postgres:16-alpine
 docker pull milvusdb/milvus:v2.4.6
-docker pull quay.io/coreos/etcd:v3.5.18
-docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+docker pull quay.io/coreos/etcd:v3.5.25
+docker pull minio/minio:RELEASE.2024-05-28T17-19-04Z
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z -o infra.tar
 ```
 
 **ARM64：**
 ```powershell
 docker pull --platform linux/arm64 postgres:16-alpine
 docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
-docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
-docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o infra.tar
+docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.25
+docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
+docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z -o infra.tar
 ```
 
 ### 3. 模型文件（挂载模型模式才需要）
@@ -149,7 +149,7 @@ docker compose up -d --force-recreate backend frontend
 ```env
 IMAGE_POSTGRES=registry.company.com/aladdin/postgres:16-alpine-arm64
 IMAGE_MILVUS=registry.company.com/aladdin/milvus:v2.4.6-arm64
-IMAGE_ETCD=registry.company.com/aladdin/etcd:v3.5.18-arm64
+IMAGE_ETCD=registry.company.com/aladdin/etcd:v3.5.25-arm64
 IMAGE_MINIO=registry.company.com/aladdin/minio:2023-03-20-arm64
 IMAGE_BACKEND=registry.company.com/aladdin/aladdin-backend:latest-arm64
 IMAGE_FRONTEND=registry.company.com/aladdin/aladdin-frontend:latest-arm64
@@ -279,3 +279,4 @@ RERANK_DEVICE=mps
 ```
 
 > Python 版本必须 3.12（3.13+ 有兼容问题）。
+
