@@ -62,6 +62,39 @@ export const documentApi = {
       body: formData,
     }).then((res) => res.json())
   },
+  validateFolder: (kbId: string, paths: string[]) =>
+    request<{
+      supported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]
+      unsupported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]
+      folder_structure: string[]
+    }>(`/knowledge-bases/${kbId}/documents/validate-folder`, {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+  uploadFolder: (kbId: string, files: File[], paths: string[], parentFolderId?: string | null) => {
+    const formData = new FormData()
+    files.forEach((file) => formData.append('files', file))
+    formData.append('paths', JSON.stringify(paths))
+    if (parentFolderId) {
+      formData.append('parent_folder_id', parentFolderId)
+    }
+    return fetch(`${BASE_URL}/knowledge-bases/${kbId}/documents/upload-folder`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}))
+        throw new Error(error.detail || `请求失败: ${res.status}`)
+      }
+      return res.json()
+    }) as Promise<{
+      total_files: number
+      uploaded_count: number
+      skipped_count: number
+      created_folders: string[]
+      results: { relative_path: string; filename: string; doc_id?: string; folder_id?: string; status: string; message?: string }[]
+    }>
+  },
   get: (id: string) => request<unknown>(`/documents/${id}`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
