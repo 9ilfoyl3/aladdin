@@ -98,6 +98,8 @@ docker compose up -d --force-recreate backend frontend
 
 ## 四、.env 配置
 
+### 远程模式（Embedding/Rerank 调外部 API）
+
 ```env
 # Embedding（远程 API）
 EMBED_PROVIDER=remote
@@ -120,6 +122,59 @@ LLM_API_KEY=密钥
 # 数据库密码
 POSTGRES_PASSWORD=postgres
 ```
+
+### 挂载模型目录模式（服务器无独立模型服务时）
+
+当服务器上没有独立的 Embedding/Rerank API 服务时，可以把模型文件放在服务器上，由 Aladdin 容器加载。
+
+**额外要求：**
+1. 应用镜像构建时加 `INSTALL_ML=true`（安装 PyTorch + sentence-transformers，镜像约 1.5GB）
+2. 服务器上需要模型文件
+
+**打包应用镜像（替代远程模式的构建命令）：**
+```powershell
+# AMD64
+docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+
+# ARM64
+docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+```
+
+**打包模型文件（通用，不区分架构，打一次即可）：**
+```powershell
+$HF_CACHE = "$env:USERPROFILE\.cache\huggingface\hub"
+tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reranker-v2-m3
+```
+
+**服务器上解压模型：**
+```bash
+mkdir -p /opt/models
+tar -xzf models.tar.gz -C /opt/models
+```
+
+**.env 配置：**
+```env
+EMBED_PROVIDER=sentence-transformers
+EMBED_MODEL=BAAI/bge-m3
+EMBED_DEVICE=cpu
+
+RERANK_PROVIDER=sentence-transformers
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_DEVICE=cpu
+
+# 模型目录（宿主机路径，挂载到容器）
+MODEL_DIR=/opt/models
+
+# LLM + 数据库同上
+LLM_PROVIDER=vllm
+LLM_BASE_URL=http://LLM服务地址/v1
+LLM_MODEL=模型名
+LLM_API_KEY=密钥
+POSTGRES_PASSWORD=postgres
+```
+
+> `MODEL_DIR` 挂载到容器的 `/root/.cache/huggingface/hub`，模型从此目录加载。
+> 远程模式时此目录为空不影响运行。
 
 ---
 
