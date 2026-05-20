@@ -24,6 +24,41 @@
 
 ## 一、打包（Windows 机器上执行）
 
+### 快速打包脚本
+
+```powershell
+cd C:\newHLSWorkspace\aladdin
+
+# AMD64 首次部署（远程模式）
+.\scripts\package-amd64.ps1
+
+# AMD64 更新应用（跳过中间件）
+.\scripts\package-amd64.ps1 -SkipInfra
+
+# AMD64 挂载模型模式（含 ML 依赖）
+.\scripts\package-amd64.ps1 -WithML
+
+# ARM64 首次部署（远程模式）
+.\scripts\package-arm64.ps1
+
+# ARM64 更新应用
+.\scripts\package-arm64.ps1 -SkipInfra
+
+# ARM64 挂载模型模式
+.\scripts\package-arm64.ps1 -WithML
+```
+
+输出目录：`deploy-amd64/` 或 `deploy-arm64/`，整个拷贝到服务器。
+
+| 参数 | 作用 |
+|------|------|
+| 无参数 | 远程模式 + 含中间件（首次部署） |
+| `-SkipInfra` | 只打应用镜像（更新时用） |
+| `-WithML` | 含 ML 依赖（挂载模型模式） |
+| `-WithML -SkipInfra` | 含 ML + 跳过中间件 |
+
+### 手动打包（如需自定义）
+
 ### 1. 应用镜像
 
 | 目标 | 命令 |
