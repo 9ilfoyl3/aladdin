@@ -141,3 +141,77 @@ docker compose restart backend       # 重启后端
 docker compose down                  # 停止（数据保留）
 docker compose down -v               # 停止并清除数据（慎用）
 ```
+
+---
+
+## 七、本地开发模式
+
+本地开发时 Embedding/Rerank 在本机跑（不依赖外部模型服务），需要安装 ML 依赖。
+
+### 前提
+
+- Python 3.12（通过 conda 管理）
+- Docker Desktop（跑 PostgreSQL + Milvus）
+- 线上 LLM API Key
+
+### 步骤
+
+```powershell
+cd C:\newHLSWorkspace\aladdin
+
+# 1. 启动中间件
+docker compose up -d
+
+# 2. 激活 Python 环境
+conda activate aladdin
+
+# 3. 安装依赖（含 ML）
+pip install -r backend/requirements.txt
+
+# 4. 首次需要下载模型（约 3GB，需联网）
+$env:HF_HUB_OFFLINE="0"
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('OK')"
+python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3'); print('OK')"
+
+# 5. 启动后端
+cd backend
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 6. 启动前端（新终端）
+cd C:\newHLSWorkspace\aladdin\frontend
+npm install
+npm run dev
+```
+
+### 本地 .env 配置
+
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+
+# 本地模型
+EMBED_PROVIDER=sentence-transformers
+EMBED_MODEL=BAAI/bge-m3
+EMBED_DEVICE=cpu
+
+RERANK_PROVIDER=sentence-transformers
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_DEVICE=cpu
+
+# LLM（线上 API）
+LLM_PROVIDER=vllm
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_MODEL=deepseek-chat
+LLM_API_KEY=sk-你的key
+```
+
+### 与服务器部署的区别
+
+| | 本地开发 | 服务器部署 |
+|---|---|---|
+| Embedding/Rerank | 本机 Python 进程跑模型 | 调远程 API |
+| 后端 | `uvicorn` 直接运行 | Docker 容器 |
+| 前端 | `npm run dev`（端口 3000） | nginx 容器（端口 8888） |
+| 中间件 | Docker（暴露端口到 localhost） | Docker（仅容器间通信） |
+| Python 版本 | 必须 3.12（3.13+ 有兼容问题） | 不需要装 Python（容器内自带） |
