@@ -197,6 +197,19 @@ async def upload_document(
 
     content = await file.read()
     file_size = len(content)
+
+    # 计算文件哈希，检测重复
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.execute(
+        select(Document).where(
+            Document.kb_id == kb_id,
+            Document.file_hash == file_hash,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail=f"文件已存在（内容重复）: {filename}")
+
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -208,6 +221,7 @@ async def upload_document(
         filename=filename,
         file_type=ext,
         file_size=file_size,
+        file_hash=file_hash,
         status="pending",
     )
     db.add(doc)
