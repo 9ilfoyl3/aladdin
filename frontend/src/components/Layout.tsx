@@ -30,7 +30,7 @@ function Layout() {
       {/* 侧边栏 */}
       <aside className="w-60 border-r border-sidebar-border bg-sidebar flex flex-col">
         <div className="p-4 border-b border-sidebar-border">
-          <h1 className="text-lg font-semibold text-sidebar-foreground">Agentic RAG</h1>
+          <h1 className="text-lg font-semibold text-sidebar-foreground">Aladdin</h1>
         </div>
         <nav className="flex-1 p-2 space-y-1">
           {navItems.map((item) => (
