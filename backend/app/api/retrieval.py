@@ -1,4 +1,12 @@
-"""检索测试接口"""
+"""检索测试接口
+
+TODO: [准度风险] 当知识库中大量表格 chunk（如 CSV 5万+条）与少量文档 chunk 共存时，
+  表格 chunk 可能在检索时"淹没"其他文档结果。后续可通过：
+  1. 检索时加 doc_id / file_type 过滤
+  2. 按文档类型加权评分
+  3. 调整 top_k 策略
+  来缓解。
+"""
 
 import asyncio
 import json
