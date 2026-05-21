@@ -137,6 +137,7 @@ class RetrievalCache:
                 await self._redis.delete(key)
                 count += 1
             if count > 0:
+                print(f"[Cache] 清除: kb={kb_id}, 清除 {count} 条缓存")
                 logger.info("清除知识库缓存: kb=%s, 清除 %d 条", kb_id, count)
             return count
 
