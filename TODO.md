@@ -76,12 +76,15 @@
 
 ## 三、准度优化
 
-### 8. 检索结果文档类型均衡
-- **文件**: `backend/app/api/retrieval.py`
-- **现状**: 大量表格 chunk 可能在检索时"淹没"其他文档结果
-- **目标**: 检索时支持 doc_id/file_type 过滤、按文档类型加权、调整 top_k 策略
+### 8. 检索结果文档类型均衡 + 元数据过滤
+- **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/storage/milvus.py`、`backend/app/api/retrieval.py`
+- **现状**: 大量表格 chunk 可能在检索时"淹没"其他文档结果；全库搜索无法按条件过滤
+- **目标**: 
+  - 检索时支持 doc_id/file_type/date_range 过滤
+  - 按文档类型加权、调整 top_k 策略
+  - Milvus 查询加 filter 表达式
 - **优先级**: 中
-- **预估工作量**: 1-2 天
+- **预估工作量**: 2-3 天
 
 ### 9. 超长记录拆分 embedding
 - **文件**: `backend/app/pipeline/embedder.py`
@@ -102,15 +105,17 @@
 
 ## 四、架构优化
 
-### 11. 多 Chunker 策略路由
-- **文件**: `backend/app/pipeline/chunker.py`
-- **现状**: 通用 HierarchicalChunker + CSV/XLSX loader 预切分
-- **目标**: 实现多 chunker 策略模式，根据文件类型 + 内容特征自动选择：
-  - `TableChunker`: CSV/XLSX（已通过 pre_chunked 实现）
-  - `LawsChunker`: 法律文书（按条款、判决结构切分）
-  - `PaperChunker`: 学术论文（按 Abstract/Section/References 切分）
-  - `QAChunker`: 问答对格式
-  - `NaiveChunker`: 通用文本（当前实现）
+### 11. 多 Chunker 策略路由 + Chunk 元数据增强
+- **文件**: `backend/app/pipeline/chunker.py`、`backend/app/schema/db.py`、`backend/app/storage/milvus.py`
+- **现状**: 通用 HierarchicalChunker + CSV/XLSX loader 预切分；chunk 只记录 chunk_index 和 parent_id
+- **目标**: 
+  - 实现多 chunker 策略模式，根据文件类型 + 内容特征自动选择：
+    - `TableChunker`: CSV/XLSX（已通过 pre_chunked 实现）
+    - `LawsChunker`: 法律文书（按条款、判决结构切分）
+    - `PaperChunker`: 学术论文（按 Abstract/Section/References 切分）
+    - `QAChunker`: 问答对格式
+    - `NaiveChunker`: 通用文本（当前实现）
+  - chunk 记录标题路径、页码、所属章节、文件来源等 metadata
 - **参考**: RAGFlow 的 FACTORY 模式
 - **优先级**: 高
 - **预估工作量**: 5-7 天
@@ -129,14 +134,16 @@
 5. #6 可观测性
 
 **P2（质量提升）**:
-6. #8 检索均衡
+6. #8 检索均衡 + 元数据过滤
 7. #10 评估体系
-8. #1 流式读取
-9. #7 数据库迁移
+8. #12 检索结果缓存
+9. #15 多知识库联合检索
+10. #1 流式读取
+11. #7 数据库迁移
 
 **P3（锦上添花）**:
-10. #9 超长记录拆分
-11. #3 Embedding 配置化
+12. #9 超长记录拆分
+13. #3 Embedding 配置化
 
 
 ---
@@ -150,22 +157,6 @@
 - **冲突风险**: ✅ 无（新建文件，不改现有代码）
 - **优先级**: 中
 - **预估工作量**: 0.5-1 天
-
-### 13. Chunk 元数据增强
-- **文件**: `backend/app/pipeline/chunker.py`、`backend/app/schema/db.py`、`backend/app/storage/milvus.py`
-- **现状**: chunk 只记录 chunk_index 和 parent_id
-- **目标**: 记录标题路径、页码、所属章节、文件来源等 metadata
-- **冲突风险**: ⚠️ chunker.py 正在被 P0/P1 任务改动，建议等 #11 完成后再做
-- **优先级**: 中
-- **预估工作量**: 2-3 天
-
-### 14. 元数据过滤检索
-- **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/storage/milvus.py`、`backend/app/api/retrieval.py`
-- **现状**: 全库搜索，无法按文件名/日期/标签过滤
-- **目标**: 检索时支持传入 filter 条件（doc_id、file_type、date_range）
-- **冲突风险**: ⚠️ retrieval.py 被 #8 涉及，但改动位置不同（#8 改权重，这里改查询参数）
-- **优先级**: 中
-- **预估工作量**: 1-2 天
 
 ### 15. 多知识库联合检索
 - **文件**: `backend/app/api/chat.py`、`backend/app/schema/api.py`、前端 Chat.tsx
