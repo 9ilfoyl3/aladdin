@@ -108,9 +108,14 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
 
 
 async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
-    """安全包装，捕获异常避免 task 崩溃"""
+    """安全包装，捕获异常避免 task 崩溃。处理成功后清除该知识库的检索缓存。"""
     try:
         await _run_pipeline(file_path, doc_id, kb_id)
+        # 文档处理成功，清除该知识库的检索缓存
+        from app.retrieval.cache import get_retrieval_cache
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
     except Exception as e:
         import traceback
         print(f"[Pipeline] 文档 {doc_id} 管道处理异常: {type(e).__name__}: {e}")
@@ -285,6 +290,12 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
     if file_path.exists():
         os.remove(file_path)
+
+    # 清除该知识库的检索缓存
+    from app.retrieval.cache import get_retrieval_cache
+    cache = await get_retrieval_cache()
+    if cache:
+        await cache.invalidate_kb(doc.kb_id)
 
 
 # ============================================================
