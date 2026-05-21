@@ -5,10 +5,20 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class EmbeddedImage:
+    """文档中嵌入的图片"""
+    data: bytes                  # 图片二进制数据
+    format: str                  # 图片格式（png/jpeg 等）
+    page_or_index: int = 0       # 所在页码或位置索引（从1开始）
+    description: str = ""        # 可选描述（如 shape name）
+
+
+@dataclass
 class LoadResult:
     """文档加载结果"""
     content: str          # 文档文本内容
     metadata: dict = field(default_factory=dict)  # 元数据（文件名、页码等）
+    images: list[EmbeddedImage] = field(default_factory=list)  # 文档中嵌入的图片
 
 
 class BaseLoader(ABC):
