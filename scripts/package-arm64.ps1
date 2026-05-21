@@ -1,6 +1,6 @@
 # Aladdin ARM64 部署打包
 param(
-    [switch]$WithML,       # 加 -WithML 含 ML 依赖（挂载模型模式，CPU）
+    [switch]$GPU,          # 加 -GPU 含 ML 依赖（挂载模型模式，CPU PyTorch）
     [switch]$SkipInfra     # 加 -SkipInfra 跳过中间件（非首次部署）
 )
 
@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
 # 后端镜像
 Write-Host "`n[1] 构建后端镜像（ARM64）..." -ForegroundColor Cyan
-if ($WithML) {
+if ($GPU) {
     Write-Host "  模式: 含 ML 依赖（FlagEmbedding + CPU PyTorch）"
     docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
 } else {
@@ -49,6 +49,6 @@ Write-Host "输出: $OUT\ ($size GB)"
 Write-Host ""
 Write-Host "用法:" -ForegroundColor Yellow
 Write-Host "  远程模式首次:  .\scripts\package-arm64.ps1"
-Write-Host "  挂载模型首次:  .\scripts\package-arm64.ps1 -WithML"
+Write-Host "  本地模型首次:  .\scripts\package-arm64.ps1 -GPU"
 Write-Host "  更新应用:      .\scripts\package-arm64.ps1 -SkipInfra"
-Write-Host "  ML更新:        .\scripts\package-arm64.ps1 -WithML -SkipInfra"
+Write-Host "  本地模型更新:  .\scripts\package-arm64.ps1 -GPU -SkipInfra"
