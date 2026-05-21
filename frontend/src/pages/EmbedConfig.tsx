@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, CheckCircle, XCircle, Zap, Globe, Server } from 'lucide-react'
+import { Plus, Pencil, Trash2, CheckCircle, XCircle, Zap, Globe, Server, Power } from 'lucide-react'
 import { embedConfigApi } from '@/lib/api'
 import type { EmbedConfigItem } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -95,30 +95,47 @@ function EmbedConfig() {
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [testing, setTesting] = useState(false)
 
+  // 卡片列表中的测试状态：key 为 config id
+  const [cardTestingId, setCardTestingId] = useState<string | null>(null)
+  const [cardTestResults, setCardTestResults] = useState<Record<string, { success: boolean; message: string }>>({})
+
   async function handleTest() {
     setTesting(true)
     setTestResult(null)
     try {
-      if (editingItem && editingItem.id) {
-        const result = await embedConfigApi.testSaved(editingItem.id)
-        setTestResult(result)
-      } else {
-        const result = await embedConfigApi.test({
-          provider: form.provider,
-          config_type: form.config_type,
-          local_provider: form.provider === 'local' ? form.local_provider : undefined,
-          model_name: form.model_name,
-          device: form.device,
-          base_url: form.provider === 'remote' ? form.base_url : undefined,
-          api_key: form.provider === 'remote' ? form.api_key : undefined,
-          timeout: parseFloat(form.timeout) || 60,
-        })
-        setTestResult(result)
-      }
+      const result = await embedConfigApi.test({
+        provider: form.provider,
+        config_type: form.config_type,
+        local_provider: form.provider === 'local' ? form.local_provider : undefined,
+        model_name: form.model_name,
+        device: form.device,
+        base_url: form.provider === 'remote' ? form.base_url : undefined,
+        api_key: form.provider === 'remote' ? form.api_key : undefined,
+        timeout: parseFloat(form.timeout) || 60,
+        config_id: editingItem?.id,
+      })
+      setTestResult(result)
     } catch {
       setTestResult({ success: false, message: '请求失败' })
     } finally {
       setTesting(false)
+    }
+  }
+
+  async function handleCardTest(item: EmbedConfigItem) {
+    setCardTestingId(item.id)
+    setCardTestResults((prev) => {
+      const next = { ...prev }
+      delete next[item.id]
+      return next
+    })
+    try {
+      const result = await embedConfigApi.testSaved(item.id)
+      setCardTestResults((prev) => ({ ...prev, [item.id]: result }))
+    } catch {
+      setCardTestResults((prev) => ({ ...prev, [item.id]: { success: false, message: '请求失败' } }))
+    } finally {
+      setCardTestingId(null)
     }
   }
 
@@ -230,10 +247,20 @@ function EmbedConfig() {
               onClick={() => activateMutation.mutate(item.id)}
               disabled={activateMutation.isPending}
             >
-              <Zap className="h-3 w-3" />
+              <Power className="h-3 w-3" />
               启用
             </Button>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs gap-1 cursor-pointer"
+            onClick={() => handleCardTest(item)}
+            disabled={cardTestingId === item.id}
+          >
+            <Zap className="h-3 w-3" />
+            {cardTestingId === item.id ? '测试中...' : '测试'}
+          </Button>
           <Button
             size="sm"
             variant="ghost"
@@ -252,6 +279,14 @@ function EmbedConfig() {
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
+
+        {/* 卡片测试结果 */}
+        {cardTestResults[item.id] && (
+          <div className={`flex items-center gap-2 text-xs mt-2 p-1.5 rounded ${cardTestResults[item.id].success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+            {cardTestResults[item.id].success ? <CheckCircle className="h-3 w-3 shrink-0" /> : <XCircle className="h-3 w-3 shrink-0" />}
+            <span className="truncate">{cardTestResults[item.id].message}</span>
+          </div>
+        )}
       </div>
     )
   }

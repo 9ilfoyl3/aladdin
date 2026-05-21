@@ -5,10 +5,22 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class EmbeddedImage:
+    """文档中嵌入的图片（存储为临时文件路径，避免内存压力）"""
+    file_path: str               # 图片临时文件路径
+    format: str                  # 图片格式（png/jpeg 等）
+    page_or_index: int = 0       # 所在页码或位置索引（从1开始）
+    content_hash: str = ""       # 图片内容 hash（用于去重）
+    description: str = ""        # 可选描述
+
+
+@dataclass
 class LoadResult:
     """文档加载结果"""
     content: str          # 文档文本内容
     metadata: dict = field(default_factory=dict)  # 元数据（文件名、页码等）
+    images: list[EmbeddedImage] = field(default_factory=list)  # 文档中嵌入的图片
+    page_texts: list[str] = field(default_factory=list)  # 按页文本（用于图片文本按页插入）
 
 
 class BaseLoader(ABC):
@@ -21,7 +33,7 @@ class BaseLoader(ABC):
 
 
 # 支持的文件类型
-SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "jpg", "jpeg", "png"}
+SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png"}
 
 
 def get_loader(file_type: str) -> BaseLoader:
@@ -54,6 +66,9 @@ def get_loader(file_type: str) -> BaseLoader:
     elif file_type == "docx":
         from app.pipeline.loaders.docx_loader import DocxLoader
         return DocxLoader()
+    elif file_type == "csv":
+        from app.pipeline.loaders.csv_loader import CsvLoader
+        return CsvLoader()
     elif file_type == "xlsx":
         from app.pipeline.loaders.xlsx_loader import XlsxLoader
         return XlsxLoader()

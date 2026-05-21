@@ -279,6 +279,7 @@ export const embedConfigApi = {
     base_url?: string
     api_key?: string
     timeout?: number
+    config_id?: string
   }) =>
     request<EmbedTestResult>('/embed-configs/test', {
       method: 'POST',
