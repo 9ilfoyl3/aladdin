@@ -207,8 +207,19 @@ async def upload_document(
             Document.file_hash == file_hash,
         )
     )
-    if existing.scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail=f"文件已存在（内容重复）: {filename}")
+    existing_doc = existing.scalar_one_or_none()
+    if existing_doc is not None:
+        return DocumentResponse(
+            id=existing_doc.id,
+            kb_id=existing_doc.kb_id,
+            filename=existing_doc.filename,
+            file_type=existing_doc.file_type,
+            file_size=existing_doc.file_size,
+            status="duplicate",
+            error_message=f"文件已存在（与 {existing_doc.filename} 内容相同）",
+            chunk_count=existing_doc.chunk_count,
+            created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
+        )
 
     with open(file_path, "wb") as f:
         f.write(content)
