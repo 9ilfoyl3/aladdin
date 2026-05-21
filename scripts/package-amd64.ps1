@@ -1,24 +1,18 @@
-# Aladdin AMD64 部署打包
+# Aladdin AMD64 + GPU 部署打包
+# 使用 Dockerfile.production（CUDA PyTorch + FlagEmbedding）
 param(
-    [switch]$WithML,       # 加 -WithML 构建含 ML 依赖的镜像
     [switch]$SkipInfra     # 加 -SkipInfra 跳过中间件（非首次部署）
 )
 
 $ErrorActionPreference = "Stop"
 $OUT = "deploy-amd64"
 
-Write-Host "=== Aladdin AMD64 打包 ===" -ForegroundColor Green
+Write-Host "=== Aladdin AMD64 + GPU 打包 ===" -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
-# 应用镜像
-Write-Host "`n[1] 构建后端镜像..." -ForegroundColor Cyan
-if ($WithML) {
-    Write-Host "  模式: 含 ML 依赖（flag-embedding + sentence-transformers）"
-    docker build --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
-} else {
-    Write-Host "  模式: 远程（轻量）"
-    docker build -t aladdin-backend:latest backend/
-}
+# 后端镜像（CUDA + FlagEmbedding，不含 sentence-transformers）
+Write-Host "`n[1] 构建后端镜像（Dockerfile.production: CUDA + FlagEmbedding）..." -ForegroundColor Cyan
+docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
 if ($LASTEXITCODE -ne 0) { Write-Host "后端构建失败！" -ForegroundColor Red; exit 1 }
 
 Write-Host "`n[2] 构建前端镜像..." -ForegroundColor Cyan
@@ -33,9 +27,9 @@ if (-not $SkipInfra) {
     Write-Host "`n[4] 拉取并导出中间件..." -ForegroundColor Cyan
     docker pull postgres:16-alpine
     docker pull milvusdb/milvus:v2.4.6
-    docker pull quay.io/coreos/etcd:v3.5.18
-    docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z
-    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o "$OUT\infra.tar"
+    docker pull quay.io/coreos/etcd:v3.5.25
+    docker pull minio/minio:RELEASE.2024-05-28T17-19-04Z
+    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z -o "$OUT\infra.tar"
 }
 
 # 配置文件
@@ -50,4 +44,10 @@ Write-Host ""
 Write-Host "用法:" -ForegroundColor Yellow
 Write-Host "  首次部署:  .\scripts\package-amd64.ps1"
 Write-Host "  更新应用:  .\scripts\package-amd64.ps1 -SkipInfra"
-Write-Host "  含ML依赖:  .\scripts\package-amd64.ps1 -WithML"
+Write-Host ""
+Write-Host "服务器 .env 配置:" -ForegroundColor Yellow
+Write-Host "  EMBED_PROVIDER=flag-embedding"
+Write-Host "  EMBED_DEVICE=cuda"
+Write-Host "  RERANK_PROVIDER=flag-embedding"
+Write-Host "  RERANK_DEVICE=cuda"
+Write-Host "  MODEL_DIR=/opt/models"
