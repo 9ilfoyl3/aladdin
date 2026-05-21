@@ -21,6 +21,7 @@ class LoadResult:
     metadata: dict = field(default_factory=dict)  # 元数据（文件名、页码等）
     images: list[EmbeddedImage] = field(default_factory=list)  # 文档中嵌入的图片
     page_texts: list[str] = field(default_factory=list)  # 按页文本（用于图片文本按页插入）
+    pre_chunked: list[str] = field(default_factory=list)  # loader 预切分的 chunk（跳过 chunker）
 
 
 class BaseLoader(ABC):

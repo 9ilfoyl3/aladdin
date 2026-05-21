@@ -379,7 +379,7 @@ function Documents() {
             type="file"
             className="hidden"
             multiple
-            accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.jpg,.jpeg,.png"
+            accept=".pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png"
             onChange={(e) => handleFileSelect(e.target.files)}
           />
           <input

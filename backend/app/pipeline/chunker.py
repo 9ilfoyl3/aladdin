@@ -10,6 +10,14 @@
 - 先按结构/段落边界切分为父块（~parent_size 字符）
 - 再将每个父块细分为子块（~child_size 字符，带 overlap）
 - 子块用于精准检索，父块用于上下文返回
+
+TODO: [架构] 实现多 chunker 策略路由，根据文件类型 + 内容特征自动选择最优切分策略：
+  - TableChunker: CSV/XLSX 表格数据（已通过 loader pre_chunked 实现）
+  - LawsChunker: 法律文书（按条款、判决结构切分）
+  - PaperChunker: 学术论文（按 Abstract/Section/References 切分）
+  - QAChunker: 问答对格式
+  - NaiveChunker: 通用文本（当前 HierarchicalChunker）
+  参考 RAGFlow 的 FACTORY 模式，支持基于规则的自动识别或用户手动选择。
 """
 
 import re
@@ -38,6 +46,9 @@ _STRUCTURE_RE = re.compile('|'.join(f'(?:{p})' for p in _STRUCTURE_PATTERNS), re
 
 # HTML 表格块正则（匹配完整的 <table>...</table>）
 _TABLE_BLOCK_RE = re.compile(r'<table>.*?</table>', re.DOTALL)
+
+# Markdown 表格块正则（匹配以 | 开头的连续行，至少包含表头+分隔行+数据行）
+_MD_TABLE_LINE_RE = re.compile(r'^\|.*\|$')
 
 
 @dataclass
@@ -98,13 +109,13 @@ class HierarchicalChunker:
 
         优先级：表格整块保护 > 结构标记 > 双换行段落 > 句子边界 > 强制切分
         """
-        # 先将 <table>...</table> 块提取为独立段落，避免被切断
+        # 先将表格块（HTML 和 Markdown）提取为独立段落，避免被切断
         segments = self._split_preserving_tables(text)
 
         result: list[str] = []
         for segment in segments:
-            if segment.startswith("<table>"):
-                # 表格块直接作为独立段落
+            if segment.startswith("<table>") or self._is_md_table(segment):
+                # 表格块直接作为独立段落，不再细分
                 result.append(segment)
             else:
                 # 非表格部分按原有逻辑切分
@@ -114,30 +125,84 @@ class HierarchicalChunker:
                 else:
                     result.extend(self._split_by_paragraphs(segment))
 
-        # 合并过短的 section，拆分过长的 section
+        # 合并过短的 section，拆分过长的 section（表格块跳过拆分）
         return self._normalize_chunks(result)
 
     def _split_preserving_tables(self, text: str) -> list[str]:
-        """将文本按 <table>...</table> 块拆分，保持表格完整性
+        """将文本按表格块拆分（HTML <table> 和 Markdown 表格），保持表格完整性
 
         返回交替的 [普通文本, 表格块, 普通文本, ...] 列表
+        表格块以 "<table>" 或 "|" 开头，可通过前缀判断类型
         """
+        # 先处理 HTML 表格
+        if "<table>" in text:
+            segments: list[str] = []
+            last_end = 0
+
+            for match in _TABLE_BLOCK_RE.finditer(text):
+                before = text[last_end:match.start()].strip()
+                if before:
+                    segments.append(before)
+                segments.append(match.group())
+                last_end = match.end()
+
+            after = text[last_end:].strip()
+            if after:
+                segments.append(after)
+
+            # 对非 HTML 表格的段落，再检查是否包含 Markdown 表格
+            result = []
+            for seg in segments:
+                if seg.startswith("<table>"):
+                    result.append(seg)
+                else:
+                    result.extend(self._split_preserving_md_tables(seg))
+            return result if result else [text]
+
+        # 没有 HTML 表格，检查 Markdown 表格
+        return self._split_preserving_md_tables(text)
+
+    def _split_preserving_md_tables(self, text: str) -> list[str]:
+        """识别并保护 Markdown 表格块
+
+        Markdown 表格特征：连续的以 | 开头且以 | 结尾的行
+        """
+        lines = text.split('\n')
         segments: list[str] = []
-        last_end = 0
+        current_normal: list[str] = []
+        current_table: list[str] = []
 
-        for match in _TABLE_BLOCK_RE.finditer(text):
-            # 表格前的普通文本
-            before = text[last_end:match.start()].strip()
-            if before:
-                segments.append(before)
-            # 表格块本身
-            segments.append(match.group())
-            last_end = match.end()
+        for line in lines:
+            stripped = line.strip()
+            is_table_line = bool(stripped and _MD_TABLE_LINE_RE.match(stripped))
 
-        # 最后一段普通文本
-        after = text[last_end:].strip()
-        if after:
-            segments.append(after)
+            if is_table_line:
+                # 进入或继续表格
+                if current_normal:
+                    normal_text = '\n'.join(current_normal).strip()
+                    if normal_text:
+                        segments.append(normal_text)
+                    current_normal = []
+                current_table.append(line)
+            else:
+                # 非表格行
+                if current_table:
+                    # 表格结束，保存表格块
+                    table_text = '\n'.join(current_table).strip()
+                    if table_text:
+                        segments.append(table_text)
+                    current_table = []
+                current_normal.append(line)
+
+        # 处理末尾
+        if current_table:
+            table_text = '\n'.join(current_table).strip()
+            if table_text:
+                segments.append(table_text)
+        if current_normal:
+            normal_text = '\n'.join(current_normal).strip()
+            if normal_text:
+                segments.append(normal_text)
 
         return segments if segments else [text]
 
@@ -173,13 +238,34 @@ class HierarchicalChunker:
         paragraphs = re.split(r'\n\n+', text)
         return [p.strip() for p in paragraphs if p.strip()]
 
+    @staticmethod
+    def _is_md_table(text: str) -> bool:
+        """判断文本是否为 Markdown 表格块"""
+        lines = text.strip().split('\n')
+        if len(lines) < 2:
+            return False
+        # 至少前两行都是 | 开头 | 结尾
+        return all(_MD_TABLE_LINE_RE.match(line.strip()) for line in lines[:3] if line.strip())
+
     def _normalize_chunks(self, sections: list[str]) -> list[str]:
-        """合并过短的段落，拆分过长的段落，确保每个父块在合理范围内"""
+        """合并过短的段落，拆分过长的段落，确保每个父块在合理范围内
+
+        表格块（HTML 和 Markdown）不会被拆分，保持完整性。
+        """
         chunks: list[str] = []
         current = ""
 
         for section in sections:
             if not section:
+                continue
+
+            # 表格块不拆分，直接作为独立 chunk
+            is_table = section.startswith("<table>") or self._is_md_table(section)
+            if is_table:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.append(section)
                 continue
 
             # 当前段落本身超过 parent_size，需要拆分
@@ -239,12 +325,16 @@ class HierarchicalChunker:
         if len(text) <= self.child_size:
             return [text]
 
-        # 如果包含表格，先按表格拆分保护
+        # 如果整个父块是 Markdown 表格，不再细分（loader 已按行分组）
+        if self._is_md_table(text):
+            return [text]
+
+        # 如果包含 HTML 表格，先按表格拆分保护
         if "<table>" in text:
             segments = self._split_preserving_tables(text)
             chunks: list[str] = []
             for segment in segments:
-                if segment.startswith("<table>"):
+                if segment.startswith("<table>") or self._is_md_table(segment):
                     # 表格块作为独立子块（即使超过 child_size 也不切断）
                     chunks.append(segment)
                 elif len(segment) <= self.child_size:
@@ -254,6 +344,10 @@ class HierarchicalChunker:
             chunks = self._merge_short_chunks(chunks)
             return chunks if chunks else [text]
 
+        # 如果包含 Markdown 表格，按表格拆分保护
+        if _MD_TABLE_LINE_RE.match(text.strip().split('\n')[0].strip()):
+            return [text]
+
         # 如果父块内有结构标记，先按结构切分
         has_structure = bool(_STRUCTURE_RE.search(text))
         if has_structure:
@@ -262,6 +356,8 @@ class HierarchicalChunker:
             chunks: list[str] = []
             for section in sections:
                 if len(section) <= self.child_size:
+                    chunks.append(section)
+                elif self._is_md_table(section):
                     chunks.append(section)
                 else:
                     chunks.extend(self._split_child_by_size(section))

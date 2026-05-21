@@ -70,8 +70,10 @@ class DocumentPipeline:
                 # 1. Load：根据文件扩展名选择 loader
                 ext = Path(file_path).suffix.lstrip(".")
                 loader = get_loader(ext)
+                print(f"[Pipeline] 文档 {doc_id} 开始加载，类型: {ext}")
                 load_result = loader.load(file_path)
                 images_to_cleanup = load_result.images
+                print(f"[Pipeline] 文档 {doc_id} 加载完成，内容长度: {len(load_result.content)}")
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
 
                 # 2. 处理文本为空的情况（纯扫描件/纯图片文件）
@@ -109,15 +111,40 @@ class DocumentPipeline:
                     )
 
                 # 4. Chunk：父子 chunk 切分
-                chunk_result = self.chunker.chunk(final_content, load_result.metadata)
+                print(f"[Pipeline] 文档 {doc_id} 开始分块，文本长度: {len(final_content)}")
+
+                # 如果 loader 已经预切分（表格类文件），直接使用，跳过 chunker
+                if load_result.pre_chunked:
+                    pre_chunks = load_result.pre_chunked
+                    from app.pipeline.chunker import ChunkResult
+                    chunk_result = ChunkResult(
+                        parent_chunks=pre_chunks,
+                        child_chunks=pre_chunks,
+                        parent_child_map={i: [i] for i in range(len(pre_chunks))},
+                    )
+                    print(f"[Pipeline] 文档 {doc_id} 使用 loader 预切分，共 {len(pre_chunks)} 个 chunk")
+                else:
+                    chunk_result = self.chunker.chunk(final_content, load_result.metadata)
+                    print(f"[Pipeline] 文档 {doc_id} 分块完成，父块: {len(chunk_result.parent_chunks)}，子块: {len(chunk_result.child_chunks)}")
+
+                # 大文件提示：chunk 数量较多时打印警告（不截断）
+                if len(chunk_result.child_chunks) > 50000:
+                    print(f"[Pipeline] ⚠️ 文档 {doc_id} 子块数量较多: {len(chunk_result.child_chunks)}，处理时间可能较长")
+                    logger.warning(
+                        "文档 %s 子块数量 %d，处理时间可能较长",
+                        doc_id, len(chunk_result.child_chunks),
+                    )
 
                 # 5. Enrich：富化（当前为 pass-through）
                 enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
 
                 # 6. Embed：对子 chunk 生成稠密+稀疏向量
+                print(f"[Pipeline] 文档 {doc_id} 开始 embedding，共 {len(enriched_children)} 个子块")
                 embed_result = await self.embedder.embed(enriched_children)
+                print(f"[Pipeline] 文档 {doc_id} embedding 完成")
 
                 # 7. Index：写入 Milvus + SQLite
+                print(f"[Pipeline] 文档 {doc_id} 开始写入索引，父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}")
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
                     parent_ids.append(str(uuid.uuid4()))
@@ -171,23 +198,40 @@ class DocumentPipeline:
                     await self.milvus.create_collection(kb_id)
 
                 # 批量写入 Milvus
+                # TODO: [性能] 对于超大文件（chunk 数 > 10000），应分批写入（每批 1000 条），避免单次请求过大
                 if milvus_data:
-                    await self.milvus.insert(kb_id, milvus_data)
+                    batch_size = 1000
+                    total = len(milvus_data)
+                    if total <= batch_size:
+                        print(f"[Pipeline] 文档 {doc_id} 写入 Milvus，共 {total} 条向量")
+                        await self.milvus.insert(kb_id, milvus_data)
+                    else:
+                        print(f"[Pipeline] 文档 {doc_id} 分批写入 Milvus，共 {total} 条向量，每批 {batch_size} 条")
+                        for i in range(0, total, batch_size):
+                            batch = milvus_data[i:i + batch_size]
+                            await self.milvus.insert(kb_id, batch)
+                            if (i // batch_size + 1) % 10 == 0:
+                                print(f"[Pipeline] Milvus 写入进度: {min(i + batch_size, total)}/{total}")
+                        print(f"[Pipeline] Milvus 写入完成")
 
                 # 8. 更新文档状态为 completed
                 await self._update_status(session, doc_id, "completed", chunk_count=child_count)
                 await session.commit()
 
+                print(f"[Pipeline] 文档 {doc_id} 全部处理完成 ✓ 父块: {len(chunk_result.parent_chunks)}，子块: {child_count}")
                 logger.info(
                     "文档 %s 处理完成，父块: %d，子块: %d",
                     doc_id, len(chunk_result.parent_chunks), child_count,
                 )
 
             except Exception as e:
+                import traceback
+                print(f"[Pipeline] 文档 {doc_id} 处理失败: {type(e).__name__}: {e}")
+                traceback.print_exc()
                 await session.rollback()
                 async with self.db_session_factory() as err_session:
                     await self._update_status(
-                        err_session, doc_id, "failed", error_message=str(e)
+                        err_session, doc_id, "failed", error_message=f"{type(e).__name__}: {e}"
                     )
                     await err_session.commit()
                 logger.error("文档 %s 处理失败: %s", doc_id, e)

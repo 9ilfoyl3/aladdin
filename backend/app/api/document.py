@@ -80,6 +80,7 @@ def _get_milvus() -> MilvusClient:
 async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
     """后台执行文档处理管道"""
     try:
+        print(f"[Pipeline] 文档 {doc_id} 开始处理，文件: {file_path}")
         manager = get_model_manager()
         milvus = _get_milvus()
 
@@ -98,7 +99,11 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
             ocr_manager=ocr_manager,
         )
         await pipeline.process(file_path, doc_id, kb_id)
+        print(f"[Pipeline] 文档 {doc_id} 处理完成")
     except Exception as e:
+        import traceback
+        print(f"[Pipeline] 文档 {doc_id} 管道处理失败: {type(e).__name__}: {e}")
+        traceback.print_exc()
         logger.error("文档 %s 管道处理失败: %s", doc_id, e)
 
 
@@ -107,6 +112,9 @@ async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
     try:
         await _run_pipeline(file_path, doc_id, kb_id)
     except Exception as e:
+        import traceback
+        print(f"[Pipeline] 文档 {doc_id} 管道处理异常: {type(e).__name__}: {e}")
+        traceback.print_exc()
         logger.error("文档 %s 管道处理异常: %s", doc_id, e)
 
 

@@ -57,7 +57,7 @@ function FileIcon({ filename, className }: { filename: string; className?: strin
   if (['doc', 'docx'].includes(ext)) {
     return <FileText className={`${iconClass} text-blue-400`} />
   }
-  if (['xls', 'xlsx'].includes(ext)) {
+  if (['xls', 'xlsx', 'csv'].includes(ext)) {
     return <FileSpreadsheet className={`${iconClass} text-green-500`} />
   }
   if (['ppt', 'pptx'].includes(ext)) {
