@@ -44,6 +44,7 @@ interface FileItemProps {
   doc: MergedFile
   isSelected: boolean
   onSelect: (id: string) => void
+  onRetry?: (id: string) => void
 }
 
 // 根据文件类型返回对应图标
@@ -145,7 +146,7 @@ function FileThumbnail({ filename, status }: { filename: string; status: string 
 }
 
 // Finder 风格文件项
-function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
+function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
   const ext = getFileExt(doc.filename)
 
   return (
@@ -193,6 +194,16 @@ function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
       <p className="text-[9px] text-muted-foreground mt-0.5">
         {formatSize(doc.file_size)}
       </p>
+
+      {/* 失败时显示点击重试 */}
+      {doc.status === 'failed' && onRetry && (
+        <button
+          className="text-[9px] text-red-500 hover:text-red-700 mt-1 cursor-pointer underline"
+          onClick={(e) => { e.stopPropagation(); onRetry(doc.id) }}
+        >
+          点击重试
+        </button>
+      )}
     </div>
   )
 }

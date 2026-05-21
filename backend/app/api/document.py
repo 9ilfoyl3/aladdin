@@ -254,6 +254,58 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
+@router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
+async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """重新识别文档（清除旧数据后重新处理）"""
+    result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if doc.status == "processing":
+        raise HTTPException(status_code=400, detail="文档正在处理中")
+
+    # 清除旧的 chunk 数据
+    chunk_result = await db.execute(select(Chunk.id).where(Chunk.doc_id == doc_id))
+    chunk_ids = [row[0] for row in chunk_result.all()]
+    if chunk_ids:
+        try:
+            milvus = _get_milvus()
+            await milvus.delete(doc.kb_id, chunk_ids)
+        except Exception as e:
+            logger.warning("清除旧向量失败（可忽略）: %s", e)
+        # 删除 SQLite 中的 chunks
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(Chunk).where(Chunk.doc_id == doc_id))
+
+    # 重置状态
+    doc.status = "pending"
+    doc.error_message = None
+    doc.chunk_count = 0
+    await db.flush()
+
+    # 重新触发管道
+    file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+    if not file_path.exists():
+        doc.status = "failed"
+        doc.error_message = "原始文件已丢失，无法重新识别"
+        await db.flush()
+        raise HTTPException(status_code=400, detail="原始文件已丢失")
+
+    asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+
+    return DocumentResponse(
+        id=doc.id,
+        kb_id=doc.kb_id,
+        filename=doc.filename,
+        file_type=doc.file_type,
+        file_size=doc.file_size,
+        status="pending",
+        error_message=None,
+        chunk_count=0,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+    )
+
+
 @router.delete("/api/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     """删除文档（级联清理 chunks + Milvus 向量）"""

@@ -98,6 +98,8 @@ export const documentApi = {
   get: (id: string) => request<unknown>(`/documents/${id}`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
+  retry: (id: string) =>
+    request<unknown>(`/documents/${id}/retry`, { method: 'POST' }),
   chunks: (id: string) => request<unknown[]>(`/documents/${id}/chunks`),
 }
 

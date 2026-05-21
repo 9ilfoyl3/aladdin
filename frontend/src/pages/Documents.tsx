@@ -14,6 +14,7 @@ import {
   FolderUp,
   LayoutGrid,
   List,
+  RotateCcw,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -168,6 +169,14 @@ function Documents() {
   // 删除文档
   const deleteMutation = useMutation({
     mutationFn: (id: string) => documentApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+    },
+  })
+
+  // 重试失败文档
+  const retryMutation = useMutation({
+    mutationFn: (id: string) => documentApi.retry(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
     },
@@ -491,6 +500,7 @@ function Documents() {
                       doc={doc}
                       isSelected={selectedId === doc.id}
                       onSelect={handleSelectFile}
+                      onRetry={(id) => retryMutation.mutate(id)}
                     />
                   </div>
                 )
@@ -503,6 +513,7 @@ function Documents() {
                       doc={doc}
                       isSelected={selectedId === doc.id}
                       onSelect={handleSelectFile}
+                      onRetry={(id) => retryMutation.mutate(id)}
                     />
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
@@ -520,6 +531,14 @@ function Documents() {
                       复制文件名
                     </ContextMenuItem>
                     <ContextMenuSeparator />
+                    {doc.status !== 'processing' && (
+                      <ContextMenuItem
+                        onClick={() => retryMutation.mutate(doc.id)}
+                      >
+                        <RotateCcw className="h-4 w-4 mr-2" />
+                        重新识别
+                      </ContextMenuItem>
+                    )}
                     <ContextMenuItem
                       destructive
                       onClick={() => deleteMutation.mutate(doc.id)}
