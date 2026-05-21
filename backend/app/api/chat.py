@@ -227,6 +227,16 @@ async def _retrieve_chunks(
     Args:
         progress_queue: 可选的异步队列，用于推送 Agent 进度事件
     """
+    from app.retrieval.cache import get_retrieval_cache
+
+    # 检查缓存（agent 模式不缓存，因为有迭代反思逻辑）
+    cache = await get_retrieval_cache()
+    if cache and mode != "agent":
+        cached = await cache.get(kb_id, query, mode)
+        if cached is not None:
+            print(f"[Cache] 命中: query={query!r}, mode={mode}, 结果数={len(cached)}")
+            return cached, False
+
     manager = get_model_manager()
     milvus = _get_milvus_client()
     settings = get_settings()
@@ -235,6 +245,9 @@ async def _retrieve_chunks(
         # 直检索：仅稠密向量
         retriever = VectorRetriever(manager.embedder, milvus)
         results = await retriever.search(query, kb_id, top_k=30)
+        # 写入缓存
+        if cache:
+            await cache.set(kb_id, query, mode, results)
         return results, False
 
     elif mode == "agent":
@@ -280,6 +293,9 @@ async def _retrieve_chunks(
             db_session_factory=async_session,
         )
         results = await hybrid_retriever.search(query, kb_id, top_k=30)
+        # 写入缓存
+        if cache:
+            await cache.set(kb_id, query, mode, results)
         return results, False
 
 

@@ -48,11 +48,12 @@ async def _migrate_db() -> None:
             "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
             "ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE llm_configs ADD COLUMN thinking_enabled BOOLEAN DEFAULT FALSE",
-            # 文档表新增 folder_id 字段
+            # 文档表新增字段
             "ALTER TABLE documents ADD COLUMN folder_id VARCHAR REFERENCES folders(id)",
             # 文档表新增进度追踪字段
             "ALTER TABLE documents ADD COLUMN progress INTEGER DEFAULT 0",
             "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
+            "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
         ]
         for sql in migrations:
             try:

@@ -44,6 +44,7 @@ interface FileItemProps {
   doc: MergedFile
   isSelected: boolean
   onSelect: (id: string) => void
+  onRetry?: (id: string) => void
 }
 
 // 根据文件类型返回对应图标
@@ -145,7 +146,7 @@ function FileThumbnail({ filename, status }: { filename: string; status: string 
 }
 
 // Finder 风格文件项
-function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
+function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
   const ext = getFileExt(doc.filename)
 
   return (
@@ -169,12 +170,27 @@ function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
         )}
 
         {/* 非完成状态指示器 - 底部居中 */}
-        {doc.status !== 'completed' && doc.status !== 'uploading' && (
+        {doc.status !== 'completed' && doc.status !== 'uploading' && doc.status !== 'failed' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
             <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
               {doc.status === 'processing' && <Loader2 className="h-2 w-2 mr-0.5 animate-spin" />}
               {statusLabel(doc.status)}
             </Badge>
+          </div>
+        )}
+
+        {/* 失败状态 - 图标中间显示失败+重试 */}
+        {doc.status === 'failed' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded">
+            <span className="text-[9px] text-red-500 font-medium">失败</span>
+            {onRetry && (
+              <button
+                className="text-[9px] text-red-500 hover:text-red-700 cursor-pointer underline mt-0.5"
+                onClick={(e) => { e.stopPropagation(); onRetry(doc.id) }}
+              >
+                点击重试
+              </button>
+            )}
           </div>
         )}
       </div>

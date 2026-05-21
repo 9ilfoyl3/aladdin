@@ -114,18 +114,18 @@ function Models() {
     },
   })
 
-  const [testResult, setTestResult] = useState<{ id: string; success: boolean; message: string; reply?: string } | null>(null)
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string; reply?: string }>>({})
   const [testingId, setTestingId] = useState<string | null>(null)
 
   const testMutation = useMutation({
     mutationFn: (id: string) => llmConfigApi.test(id),
-    onMutate: (id) => { setTestingId(id); setTestResult(null) },
+    onMutate: (id) => { setTestingId(id) },
     onSuccess: (data, id) => {
-      setTestResult({ id, ...data })
+      setTestResults(prev => ({ ...prev, [id]: data }))
       setTestingId(null)
     },
     onError: (_err, id) => {
-      setTestResult({ id, success: false, message: '请求失败' })
+      setTestResults(prev => ({ ...prev, [id]: { success: false, message: '请求失败' } }))
       setTestingId(null)
     },
   })
@@ -176,18 +176,14 @@ function Models() {
     setDialogTesting(true)
     setDialogTestResult(null)
     try {
-      let result
-      // 编辑模式下，如果用户没有重新输入 API Key，使用已保存配置测试
-      if (editingItem && !form.api_key && editingItem.api_key_set) {
-        result = await llmConfigApi.test(editingItem.id)
-      } else {
-        result = await llmConfigApi.testConnection({
-          provider: form.provider,
-          base_url: form.base_url,
-          model: form.model,
-          api_key: form.api_key || undefined,
-        })
-      }
+      // 始终用表单当前值测试，API Key 为空时后端通过 config_id 从数据库补全
+      const result = await llmConfigApi.testConnection({
+        provider: form.provider,
+        base_url: form.base_url,
+        model: form.model,
+        api_key: form.api_key || undefined,
+        config_id: editingItem?.id || undefined,
+      })
       setDialogTestResult(result)
     } catch {
       setDialogTestResult({ success: false, message: '请求失败' })
@@ -479,13 +475,13 @@ function Models() {
                     删除
                   </Button>
                 </div>
-                {testResult && testResult.id === config.id && (
-                  <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                {testResults[config.id] && (
+                  <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResults[config.id]?.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
                     <div className="flex items-center gap-1.5">
-                      {testResult.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                      <span>{testResult.message}</span>
+                      {testResults[config.id]?.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                      <span>{testResults[config.id]?.message}</span>
                     </div>
-                    {testResult.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResult.reply}</p>}
+                    {testResults[config.id]?.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResults[config.id]?.reply}</p>}
                   </div>
                 )}
               </div>
@@ -687,3 +683,5 @@ function Models() {
 }
 
 export default Models
+
+

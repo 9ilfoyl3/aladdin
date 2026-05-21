@@ -1,13 +1,9 @@
-version: '3.8'
-
-# 生产部署用 docker-compose（内网全 Docker 化）
-# 使用方式：docker compose -f docker-compose-production.yml up -d
+# 本地开发用 docker-compose（只启动中间件）
+# 后端和前端通过 uvicorn / npm run dev 本地运行
 
 services:
-  # ============ 基础设施 ============
-
   etcd:
-    image: quay.io/coreos/etcd:v3.5.18
+    image: quay.io/coreos/etcd:v3.5.25
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
@@ -21,10 +17,9 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
-    restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -36,7 +31,6 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
-    restart: unless-stopped
 
   milvus:
     image: milvusdb/milvus:v2.4.6
@@ -48,6 +42,7 @@ services:
       - milvus_data:/var/lib/milvus
     ports:
       - "19530:19530"
+      - "9091:9091"
     depends_on:
       - etcd
       - minio
@@ -56,14 +51,13 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
-    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: aladdin
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
@@ -73,56 +67,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
 
-  # ============ 应用服务 ============
-
-  backend:
-    image: aladdin-backend:latest
+  redis:
+    image: redis:7-alpine
     ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
-      - MILVUS_HOST=milvus
-      - MILVUS_PORT=19530
-      - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
-      - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
-      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
-      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
-      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_API_KEY=${EMBED_API_KEY:-}
-      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_API_KEY=${RERANK_API_KEY:-}
-      - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
-      - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
-      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - HF_HUB_OFFLINE=1
-      - TRANSFORMERS_OFFLINE=1
+      - "6379:6379"
     volumes:
-      - upload_data:/app/data
-      - model_data:/root/.cache/huggingface/hub
-    depends_on:
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    image: aladdin-frontend:latest
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
+      - redis_data:/data
 
 volumes:
   etcd_data:
   minio_data:
   milvus_data:
   postgres_data:
-  upload_data:
-  model_data:
+  redis_data:

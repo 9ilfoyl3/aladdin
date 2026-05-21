@@ -1,6 +1,6 @@
 # Aladdin ARM64 部署打包
 param(
-    [switch]$WithML,       # 加 -WithML 构建含 ML 依赖的镜像
+    [switch]$GPU,          # 加 -GPU 含 ML 依赖（挂载模型模式，CPU PyTorch）
     [switch]$SkipInfra     # 加 -SkipInfra 跳过中间件（非首次部署）
 )
 
@@ -10,10 +10,10 @@ $OUT = "deploy-arm64"
 Write-Host "=== Aladdin ARM64 打包 ===" -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
-# 应用镜像
-Write-Host "`n[1] 构建后端镜像（ARM64 交叉编译，较慢）..." -ForegroundColor Cyan
-if ($WithML) {
-    Write-Host "  模式: 含 ML 依赖（flag-embedding + sentence-transformers）"
+# 后端镜像
+Write-Host "`n[1] 构建后端镜像（ARM64）..." -ForegroundColor Cyan
+if ($GPU) {
+    Write-Host "  模式: 含 ML 依赖（FlagEmbedding + CPU PyTorch）"
     docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
 } else {
     Write-Host "  模式: 远程（轻量）"
@@ -33,9 +33,10 @@ if (-not $SkipInfra) {
     Write-Host "`n[4] 拉取并导出中间件（ARM64）..." -ForegroundColor Cyan
     docker pull --platform linux/arm64 postgres:16-alpine
     docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
-    docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
-    docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
-    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.18 minio/minio:RELEASE.2023-03-20T20-16-18Z -o "$OUT\infra.tar"
+    docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.25
+    docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
+    docker pull --platform linux/arm64 redis:7-alpine
+    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z redis:7-alpine -o "$OUT\infra.tar"
 }
 
 # 配置文件
@@ -48,6 +49,8 @@ $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Le
 Write-Host "输出: $OUT\ ($size GB)"
 Write-Host ""
 Write-Host "用法:" -ForegroundColor Yellow
-Write-Host "  首次部署:  .\scripts\package-arm64.ps1"
-Write-Host "  更新应用:  .\scripts\package-arm64.ps1 -SkipInfra"
-Write-Host "  含ML依赖:  .\scripts\package-arm64.ps1 -WithML"
+Write-Host "  远程模式首次:  .\scripts\package-arm64.ps1"
+Write-Host "  本地模型首次:  .\scripts\package-arm64.ps1 -GPU"
+Write-Host "  更新应用:      .\scripts\package-arm64.ps1 -SkipInfra"
+Write-Host "  本地模型更新:  .\scripts\package-arm64.ps1 -GPU -SkipInfra"
+

@@ -109,9 +109,14 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
 
 
 async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
-    """安全包装，捕获异常避免 task 崩溃"""
+    """安全包装，捕获异常避免 task 崩溃。处理成功后清除该知识库的检索缓存。"""
     try:
         await _run_pipeline(file_path, doc_id, kb_id)
+        # 文档处理成功，清除该知识库的检索缓存
+        from app.retrieval.cache import get_retrieval_cache
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
     except Exception as e:
         import traceback
         print(f"[Pipeline] 文档 {doc_id} 管道处理异常: {type(e).__name__}: {e}")
@@ -219,6 +224,30 @@ async def upload_document(
 
     content = await file.read()
     file_size = len(content)
+
+    # 计算文件哈希，检测重复
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.execute(
+        select(Document).where(
+            Document.kb_id == kb_id,
+            Document.file_hash == file_hash,
+        )
+    )
+    existing_doc = existing.scalar_one_or_none()
+    if existing_doc is not None:
+        return DocumentResponse(
+            id=existing_doc.id,
+            kb_id=existing_doc.kb_id,
+            filename=existing_doc.filename,
+            file_type=existing_doc.file_type,
+            file_size=existing_doc.file_size,
+            status="duplicate",
+            error_message=f"文件已存在（与 {existing_doc.filename} 内容相同）",
+            chunk_count=existing_doc.chunk_count,
+            created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
+        )
+
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -230,6 +259,7 @@ async def upload_document(
         filename=filename,
         file_type=ext,
         file_size=file_size,
+        file_hash=file_hash,
         status="pending",
     )
     db.add(doc)
@@ -276,6 +306,58 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
+@router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
+async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """重新识别文档（清除旧数据后重新处理）"""
+    result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if doc.status == "processing":
+        raise HTTPException(status_code=400, detail="文档正在处理中")
+
+    # 清除旧的 chunk 数据
+    chunk_result = await db.execute(select(Chunk.id).where(Chunk.doc_id == doc_id))
+    chunk_ids = [row[0] for row in chunk_result.all()]
+    if chunk_ids:
+        try:
+            milvus = _get_milvus()
+            await milvus.delete(doc.kb_id, chunk_ids)
+        except Exception as e:
+            logger.warning("清除旧向量失败（可忽略）: %s", e)
+        # 删除 SQLite 中的 chunks
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(Chunk).where(Chunk.doc_id == doc_id))
+
+    # 重置状态
+    doc.status = "pending"
+    doc.error_message = None
+    doc.chunk_count = 0
+    await db.flush()
+
+    # 重新触发管道
+    file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+    if not file_path.exists():
+        doc.status = "failed"
+        doc.error_message = "原始文件已丢失，无法重新识别"
+        await db.flush()
+        raise HTTPException(status_code=400, detail="原始文件已丢失")
+
+    asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+
+    return DocumentResponse(
+        id=doc.id,
+        kb_id=doc.kb_id,
+        filename=doc.filename,
+        file_type=doc.file_type,
+        file_size=doc.file_size,
+        status="pending",
+        error_message=None,
+        chunk_count=0,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+    )
+
+
 @router.delete("/api/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     """删除文档（级联清理 chunks + Milvus 向量）"""
@@ -312,6 +394,80 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
     if file_path.exists():
         os.remove(file_path)
+
+    # 清除该知识库的检索缓存
+    from app.retrieval.cache import get_retrieval_cache
+    cache = await get_retrieval_cache()
+    if cache:
+        await cache.invalidate_kb(doc.kb_id)
+
+
+# ============================================================
+# 批量删除文档
+# ============================================================
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求"""
+    doc_ids: list[str]
+
+
+@router.post("/api/documents/batch-delete", status_code=200)
+async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = Depends(get_db)):
+    """批量删除文档"""
+    if not body.doc_ids:
+        raise HTTPException(status_code=400, detail="doc_ids 不能为空")
+
+    deleted_count = 0
+    kb_ids_affected: set[str] = set()
+
+    for doc_id in body.doc_ids:
+        result = await db.execute(select(Document).where(Document.id == doc_id))
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            continue
+
+        kb_ids_affected.add(doc.kb_id)
+
+        # 获取该文档的所有 chunk_id，用于清理 Milvus
+        chunk_result = await db.execute(
+            select(Chunk.id).where(Chunk.doc_id == doc_id)
+        )
+        chunk_ids = [row[0] for row in chunk_result.all()]
+
+        # 删除 Milvus 中的向量
+        if chunk_ids:
+            try:
+                milvus = _get_milvus()
+                await milvus.delete(doc.kb_id, chunk_ids)
+            except Exception as e:
+                logger.warning("批量删除 - 删除 Milvus 向量失败（可忽略）: %s", e)
+
+        # 更新知识库文档计数
+        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == doc.kb_id))
+        kb = kb_result.scalar_one_or_none()
+        if kb and kb.doc_count > 0:
+            kb.doc_count -= 1
+
+        # 删除文档
+        await db.delete(doc)
+        await db.flush()
+
+        # 删除本地文件
+        file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+        if file_path.exists():
+            os.remove(file_path)
+
+        deleted_count += 1
+
+    # 清除受影响知识库的检索缓存
+    from app.retrieval.cache import get_retrieval_cache
+    cache = await get_retrieval_cache()
+    if cache:
+        for kb_id in kb_ids_affected:
+            await cache.invalidate_kb(kb_id)
+
+    return {"deleted_count": deleted_count, "total_requested": len(body.doc_ids)}
 
 
 # ============================================================

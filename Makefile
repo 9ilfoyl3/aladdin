@@ -145,12 +145,12 @@ docker-export-arm:
 	@echo "拉取并导出基础设施镜像（ARM64）..."
 	docker pull --platform linux/arm64 postgres:16-alpine
 	docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
-	docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.18
-	docker pull --platform linux/arm64 minio/minio:RELEASE.2023-03-20T20-16-18Z
+	docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.25
+	docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_ARM)/postgres_16-alpine.tar
 	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_ARM)/milvusdb_milvus_v2.4.6.tar
-	docker save quay.io/coreos/etcd:v3.5.18 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.18.tar
-	docker save minio/minio:RELEASE.2023-03-20T20-16-18Z -o $(DEPLOY_DIR_ARM)/minio_minio_RELEASE.2023-03-20T20-16-18Z.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_ARM)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_ARM)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_ARM)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_ARM)/
@@ -206,12 +206,12 @@ docker-export-amd64:
 	@echo "拉取并导出基础设施镜像（AMD64）..."
 	docker pull --platform linux/amd64 postgres:16-alpine
 	docker pull --platform linux/amd64 milvusdb/milvus:v2.4.6
-	docker pull --platform linux/amd64 quay.io/coreos/etcd:v3.5.18
-	docker pull --platform linux/amd64 minio/minio:RELEASE.2023-03-20T20-16-18Z
+	docker pull --platform linux/amd64 quay.io/coreos/etcd:v3.5.25
+	docker pull --platform linux/amd64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_AMD64)/postgres_16-alpine.tar
 	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_AMD64)/milvusdb_milvus_v2.4.6.tar
-	docker save quay.io/coreos/etcd:v3.5.18 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.18.tar
-	docker save minio/minio:RELEASE.2023-03-20T20-16-18Z -o $(DEPLOY_DIR_AMD64)/minio_minio_RELEASE.2023-03-20T20-16-18Z.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_AMD64)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_AMD64)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_AMD64)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_AMD64)/
@@ -237,3 +237,4 @@ docker-package-amd64-update: docker-build-amd64
 	@echo "=== AMD64 迭代更新包打包完成 ==="
 	@echo "仅包含服务镜像，不含模型和基础设施"
 	@du -sh $(DEPLOY_DIR_AMD64)
+

@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     child_chunk_size: int = 300
     chunk_overlap: int = 50
 
+    # Redis（检索缓存，不配置则禁用缓存）
+    redis_url: str = ""  # 如 redis://localhost:6379/0
+    retrieval_cache_ttl: int = 1800  # 缓存 TTL（秒），默认 30 分钟
+
     # OCR 配置
     ocr_enabled: bool = True
     ocr_provider: str = "paddleocr"

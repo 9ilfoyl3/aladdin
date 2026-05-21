@@ -98,6 +98,13 @@ export const documentApi = {
   get: (id: string) => request<unknown>(`/documents/${id}`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
+  batchDelete: (docIds: string[]) =>
+    request<{ deleted_count: number; total_requested: number }>('/documents/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify({ doc_ids: docIds }),
+    }),
+  retry: (id: string) =>
+    request<unknown>(`/documents/${id}/retry`, { method: 'POST' }),
   chunks: (id: string) => request<unknown[]>(`/documents/${id}/chunks`),
 }
 
@@ -176,7 +183,7 @@ export const llmConfigApi = {
     request<void>(`/llm-configs/${id}`, { method: 'DELETE' }),
   test: (id: string) =>
     request<{ success: boolean; message: string; reply?: string }>(`/llm-configs/${id}/test`, { method: 'POST' }),
-  testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string }) =>
+  testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string; config_id?: string }) =>
     request<{ success: boolean; message: string; reply?: string }>('/llm-configs/test', {
       method: 'POST',
       body: JSON.stringify(data),

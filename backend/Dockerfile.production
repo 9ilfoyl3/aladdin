@@ -1,5 +1,5 @@
-# 生产用 Dockerfile：将模型打包进镜像，内网无需联网
-# 构建前需要先下载模型到 ./models/ 目录（见 scripts/prepare-offline.ps1）
+# 生产用 Dockerfile：CUDA PyTorch + FlagEmbedding
+# 模型通过 volume 挂载（docker-compose 中配置 MODEL_DIR）
 
 # ============ 阶段一：安装依赖 ============
 FROM python:3.12-slim AS builder
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖（包含 FlagEmbedding，生产环境使用）
+# 安装 Python 依赖（CUDA PyTorch + FlagEmbedding）
 COPY requirements.txt .
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 && \
     pip install --no-cache-dir -r requirements.txt && \
@@ -41,9 +41,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # 创建数据目录
 RUN mkdir -p /app/data
-
-# 复制模型文件（构建前需要准备好）
-COPY models/ /root/.cache/huggingface/hub/
 
 # 复制应用源码
 COPY app/ ./app/
