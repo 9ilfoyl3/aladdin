@@ -137,3 +137,40 @@
 **P3（锦上添花）**:
 10. #9 超长记录拆分
 11. #3 Embedding 配置化
+
+
+---
+
+## 五、检索增强（gf-deployment 分支）
+
+### 12. 检索结果缓存
+- **文件**: 新建 `backend/app/retrieval/cache.py`
+- **现状**: 相同查询每次都重新检索+Rerank
+- **目标**: 相同 query + kb_id 命中缓存，设置 TTL 过期
+- **冲突风险**: ✅ 无（新建文件，不改现有代码）
+- **优先级**: 中
+- **预估工作量**: 0.5-1 天
+
+### 13. Chunk 元数据增强
+- **文件**: `backend/app/pipeline/chunker.py`、`backend/app/schema/db.py`、`backend/app/storage/milvus.py`
+- **现状**: chunk 只记录 chunk_index 和 parent_id
+- **目标**: 记录标题路径、页码、所属章节、文件来源等 metadata
+- **冲突风险**: ⚠️ chunker.py 正在被 P0/P1 任务改动，建议等 #11 完成后再做
+- **优先级**: 中
+- **预估工作量**: 2-3 天
+
+### 14. 元数据过滤检索
+- **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/storage/milvus.py`、`backend/app/api/retrieval.py`
+- **现状**: 全库搜索，无法按文件名/日期/标签过滤
+- **目标**: 检索时支持传入 filter 条件（doc_id、file_type、date_range）
+- **冲突风险**: ⚠️ retrieval.py 被 #8 涉及，但改动位置不同（#8 改权重，这里改查询参数）
+- **优先级**: 中
+- **预估工作量**: 1-2 天
+
+### 15. 多知识库联合检索
+- **文件**: `backend/app/api/chat.py`、`backend/app/schema/api.py`、前端 Chat.tsx
+- **现状**: 对话时只能选单个知识库
+- **目标**: 支持选多个知识库并行检索，合并结果统一 Rerank
+- **冲突风险**: ⚠️ chat.py 被 P0 任务（#4 任务队列）可能涉及，但改动位置不同
+- **优先级**: 高
+- **预估工作量**: 2-3 天
