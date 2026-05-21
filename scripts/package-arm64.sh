@@ -1,26 +1,36 @@
 #!/bin/bash
-# Aladdin ARM64 部署打包（远程模式，不含 ML 依赖）
+# Aladdin ARM64 部署打包
 # 用法:
-#   ./scripts/package-arm64.sh              # 首次部署
-#   ./scripts/package-arm64.sh --skip-infra # 更新应用
+#   ./scripts/package-arm64.sh              # 远程模式，首次
+#   ./scripts/package-arm64.sh --gpu        # 本地模型（CPU + FlagEmbedding），首次
+#   ./scripts/package-arm64.sh --skip-infra # 远程模式，更新
+#   ./scripts/package-arm64.sh --gpu --skip-infra  # 本地模型，更新
 
 set -e
 
+GPU=false
 SKIP_INFRA=false
 OUT="deploy-arm64"
 
 for arg in "$@"; do
     case $arg in
+        --gpu) GPU=true ;;
         --skip-infra) SKIP_INFRA=true ;;
     esac
 done
 
-echo "=== Aladdin ARM64 打包（远程模式） ==="
+echo "=== Aladdin ARM64 打包 ==="
 mkdir -p "$OUT"
 
 echo ""
-echo "[1] 构建后端镜像（ARM64 远程模式，轻量）..."
-docker build --platform linux/arm64 -t aladdin-backend:latest backend/
+echo "[1] 构建后端镜像（ARM64）..."
+if [ "$GPU" = true ]; then
+    echo "  模式: 本地模型（FlagEmbedding + CPU PyTorch）"
+    docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+else
+    echo "  模式: 远程（轻量）"
+    docker build --platform linux/arm64 -t aladdin-backend:latest backend/
+fi
 
 echo ""
 echo "[2] 构建前端镜像（ARM64）..."

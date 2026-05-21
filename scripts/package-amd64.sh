@@ -1,27 +1,36 @@
 #!/bin/bash
-# Aladdin AMD64 + GPU 部署打包
-# 使用 Dockerfile.production（CUDA PyTorch + FlagEmbedding）
+# Aladdin AMD64 部署打包
 # 用法:
-#   ./scripts/package-amd64.sh              # 首次部署
-#   ./scripts/package-amd64.sh --skip-infra # 更新应用
+#   ./scripts/package-amd64.sh              # 远程模式，首次
+#   ./scripts/package-amd64.sh --gpu        # GPU 模式（CUDA + FlagEmbedding），首次
+#   ./scripts/package-amd64.sh --skip-infra # 远程模式，更新
+#   ./scripts/package-amd64.sh --gpu --skip-infra  # GPU 模式，更新
 
 set -e
 
+GPU=false
 SKIP_INFRA=false
 OUT="deploy-amd64"
 
 for arg in "$@"; do
     case $arg in
+        --gpu) GPU=true ;;
         --skip-infra) SKIP_INFRA=true ;;
     esac
 done
 
-echo "=== Aladdin AMD64 + GPU 打包 ==="
+echo "=== Aladdin AMD64 打包 ==="
 mkdir -p "$OUT"
 
 echo ""
-echo "[1] 构建后端镜像（CUDA + FlagEmbedding）..."
-docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+echo "[1] 构建后端镜像..."
+if [ "$GPU" = true ]; then
+    echo "  模式: GPU（CUDA + FlagEmbedding）"
+    docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+else
+    echo "  模式: 远程（轻量）"
+    docker build -t aladdin-backend:latest backend/
+fi
 
 echo ""
 echo "[2] 构建前端镜像..."
