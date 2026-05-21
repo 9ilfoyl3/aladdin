@@ -157,8 +157,11 @@ function Documents() {
     mutationFn: ({ file, localId }: { file: File; localId: string }) => {
       return documentApi.upload(kbId!, file, currentFolderId).then((res) => ({ res, localId }))
     },
-    onSuccess: ({ localId }) => {
+    onSuccess: ({ res, localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
+      if (res?.status === 'duplicate') {
+        alert(res.error_message || '文件已存在（内容重复）')
+      }
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
     },
     onError: (_err, { localId }) => {
