@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import {
   Upload,
   FileText,
@@ -15,6 +16,9 @@ import {
   LayoutGrid,
   List,
   RotateCcw,
+  CheckSquare,
+  Square,
+  X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -74,6 +78,11 @@ function Documents() {
   const [viewingChunks, setViewingChunks] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
 
+  // 批量选择状态
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+
   // 上传状态
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([])
 
@@ -131,6 +140,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setShowNewFolder(false)
+      toast.success('文件夹已创建')
+    },
+    onError: (err) => {
+      toast.error(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -141,6 +154,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setRenamingFolder(null)
+      toast.success('已重命名')
+    },
+    onError: (err) => {
+      toast.error(`重命名失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -149,6 +166,10 @@ function Documents() {
     mutationFn: (folderId: string) => folderApi.delete(folderId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
+      toast.success('文件夹已删除')
+    },
+    onError: (err) => {
+      toast.error(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -160,12 +181,13 @@ function Documents() {
     onSuccess: ({ res, localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
       if (res?.status === 'duplicate') {
-        alert(res.error_message || '文件已存在（内容重复）')
+        toast.warning(res.error_message || '文件已存在（内容重复）')
       }
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
     },
-    onError: (_err, { localId }) => {
+    onError: (err, { localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
+      toast.error(`上传失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -174,6 +196,26 @@ function Documents() {
     mutationFn: (id: string) => documentApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast.success('文档已删除')
+    },
+    onError: (err) => {
+      toast.error(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    },
+  })
+
+  // 批量删除文档
+  const batchDeleteMutation = useMutation({
+    mutationFn: (docIds: string[]) => documentApi.batchDelete(docIds),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast.success(`已删除 ${data.deleted_count} 个文档`)
+      setSelectedIds(new Set())
+      setSelectionMode(false)
+      setShowDeleteConfirm(false)
+    },
+    onError: (err) => {
+      toast.error(`批量删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      setShowDeleteConfirm(false)
     },
   })
 
@@ -182,6 +224,10 @@ function Documents() {
     mutationFn: (id: string) => documentApi.retry(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast.success('已重新提交解析')
+    },
+    onError: (err) => {
+      toast.error(`重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -291,6 +337,39 @@ function Documents() {
   // 点击空白取消选中
   function handleBackgroundClick() {
     setSelectedId(null)
+    // 不在批量选择模式下才清空
+    if (!selectionMode) {
+      setSelectedIds(new Set())
+    }
+  }
+
+  // 批量选择：切换单个文档
+  function toggleDocSelection(docId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(docId)) {
+        next.delete(docId)
+      } else {
+        next.add(docId)
+      }
+      return next
+    })
+  }
+
+  // 批量选择：全选/取消全选
+  function toggleSelectAll() {
+    const serverDocs = documents.filter((d) => d.status !== 'uploading')
+    if (selectedIds.size === serverDocs.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(serverDocs.map((d) => d.id)))
+    }
+  }
+
+  // 退出批量选择模式
+  function exitSelectionMode() {
+    setSelectionMode(false)
+    setSelectedIds(new Set())
   }
 
   // ============================================================
@@ -360,32 +439,82 @@ function Documents() {
 
         {/* 操作按钮 */}
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <FolderPlus className="h-4 w-4" />
-            新建文件夹
-          </Button>
-          <Button
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <Upload className="h-4 w-4" />
-            上传文件
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <FolderUp className="h-4 w-4" />
-            上传文件夹
-          </Button>
+          {selectionMode ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); toggleSelectAll() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                {selectedIds.size === documents.length && documents.length > 0 ? (
+                  <CheckSquare className="h-4 w-4" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+                {selectedIds.size === documents.length && documents.length > 0 ? '取消全选' : '全选'}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={selectedIds.size === 0}
+                onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true) }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="h-4 w-4" />
+                删除 ({selectedIds.size})
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); exitSelectionMode() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+                取消
+              </Button>
+            </>
+          ) : (
+            <>
+              {documents.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
+                  className="gap-1.5 cursor-pointer"
+                >
+                  <CheckSquare className="h-4 w-4" />
+                  批量选择
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <FolderPlus className="h-4 w-4" />
+                新建文件夹
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <Upload className="h-4 w-4" />
+                上传文件
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <FolderUp className="h-4 w-4" />
+                上传文件夹
+              </Button>
+            </>
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -512,12 +641,37 @@ function Documents() {
               return (
                 <ContextMenu key={doc.id}>
                   <ContextMenuTrigger>
-                    <FileItem
-                      doc={doc}
-                      isSelected={selectedId === doc.id}
-                      onSelect={handleSelectFile}
-                      onRetry={(id) => retryMutation.mutate(id)}
-                    />
+                    <div
+                      className="relative"
+                      onClick={(e) => {
+                        if (selectionMode) {
+                          e.stopPropagation()
+                          toggleDocSelection(doc.id)
+                        }
+                      }}
+                    >
+                      {selectionMode && (
+                        <div className="absolute top-1 left-1 z-10">
+                          <div className={`h-5 w-5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                            selectedIds.has(doc.id)
+                              ? 'bg-primary border-primary text-primary-foreground'
+                              : 'border-muted-foreground/50 bg-background/80'
+                          }`}>
+                            {selectedIds.has(doc.id) && (
+                              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none">
+                                <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      <FileItem
+                        doc={doc}
+                        isSelected={selectionMode ? selectedIds.has(doc.id) : selectedId === doc.id}
+                        onSelect={selectionMode ? toggleDocSelection : handleSelectFile}
+                        onRetry={(id) => retryMutation.mutate(id)}
+                      />
+                    </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
                     <ContextMenuItem
@@ -528,7 +682,10 @@ function Documents() {
                       查看切片
                     </ContextMenuItem>
                     <ContextMenuItem
-                      onClick={() => navigator.clipboard.writeText(doc.filename)}
+                      onClick={() => {
+                        navigator.clipboard.writeText(doc.filename)
+                        toast.success('已复制文件名')
+                      }}
                     >
                       <Copy className="h-4 w-4 mr-2" />
                       复制文件名
@@ -560,6 +717,24 @@ function Documents() {
             <table className="w-full text-sm">
               <thead className="bg-muted/80 border-b border-border">
                 <tr>
+                  {selectionMode && (
+                    <th className="w-10 px-3 py-2.5">
+                      <div
+                        className={`h-4 w-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                          selectedIds.size === documents.length && documents.length > 0
+                            ? 'bg-primary border-primary text-primary-foreground'
+                            : 'border-muted-foreground/50'
+                        }`}
+                        onClick={(e) => { e.stopPropagation(); toggleSelectAll() }}
+                      >
+                        {selectedIds.size === documents.length && documents.length > 0 && (
+                          <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="none">
+                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        )}
+                      </div>
+                    </th>
+                  )}
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">名称</th>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden md:table-cell">大小</th>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden lg:table-cell">状态</th>
@@ -577,6 +752,7 @@ function Documents() {
                     onClick={(e) => { e.stopPropagation(); handleSelectFolder(folder.id) }}
                     onDoubleClick={(e) => { e.stopPropagation(); navigateToFolder(folder.id) }}
                   >
+                    {selectionMode && <td className="px-3 py-2.5" />}
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <FolderInput className="h-4 w-4 text-blue-400" />
@@ -604,10 +780,37 @@ function Documents() {
                   <tr
                     key={doc.id}
                     className={`border-b border-border/50 last:border-0 transition-colors cursor-default ${
+                      selectionMode && selectedIds.has(doc.id) ? 'bg-primary/5' :
                       selectedId === doc.id ? 'bg-primary/5' : 'hover:bg-muted/30'
                     }`}
-                    onClick={(e) => { e.stopPropagation(); handleSelectFile(doc.id) }}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (selectionMode && !doc.isLocal) {
+                        toggleDocSelection(doc.id)
+                      } else {
+                        handleSelectFile(doc.id)
+                      }
+                    }}
                   >
+                    {selectionMode && (
+                      <td className="px-3 py-2.5">
+                        {!doc.isLocal && (
+                          <div
+                            className={`h-4 w-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                              selectedIds.has(doc.id)
+                                ? 'bg-primary border-primary text-primary-foreground'
+                                : 'border-muted-foreground/50'
+                            }`}
+                          >
+                            {selectedIds.has(doc.id) && (
+                              <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="none">
+                                <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    )}
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <FileText className="h-4 w-4 text-muted-foreground" />
@@ -625,7 +828,7 @@ function Documents() {
                     </td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center justify-end gap-1">
-                        {!doc.isLocal && (
+                        {!doc.isLocal && !selectionMode && (
                           <>
                             <Button
                               variant="ghost"
@@ -768,6 +971,45 @@ function Documents() {
                 <>
                   <Upload className="h-4 w-4" />
                   确认上传 {folderValidation?.supported.length || 0} 个文件
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量删除确认对话框 */}
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>确认删除</DialogTitle>
+            <DialogDescription>
+              确定要删除选中的 {selectedIds.size} 个文档吗？此操作不可撤销，相关的向量数据也将被清除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowDeleteConfirm(false)}
+              disabled={batchDeleteMutation.isPending}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => batchDeleteMutation.mutate(Array.from(selectedIds))}
+              disabled={batchDeleteMutation.isPending}
+              className="gap-1.5"
+            >
+              {batchDeleteMutation.isPending ? (
+                <>
+                  <div className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  删除中...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4" />
+                  确认删除
                 </>
               )}
             </Button>

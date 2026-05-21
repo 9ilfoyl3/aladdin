@@ -376,6 +376,74 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 
 # ============================================================
+# 批量删除文档
+# ============================================================
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求"""
+    doc_ids: list[str]
+
+
+@router.post("/api/documents/batch-delete", status_code=200)
+async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = Depends(get_db)):
+    """批量删除文档"""
+    if not body.doc_ids:
+        raise HTTPException(status_code=400, detail="doc_ids 不能为空")
+
+    deleted_count = 0
+    kb_ids_affected: set[str] = set()
+
+    for doc_id in body.doc_ids:
+        result = await db.execute(select(Document).where(Document.id == doc_id))
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            continue
+
+        kb_ids_affected.add(doc.kb_id)
+
+        # 获取该文档的所有 chunk_id，用于清理 Milvus
+        chunk_result = await db.execute(
+            select(Chunk.id).where(Chunk.doc_id == doc_id)
+        )
+        chunk_ids = [row[0] for row in chunk_result.all()]
+
+        # 删除 Milvus 中的向量
+        if chunk_ids:
+            try:
+                milvus = _get_milvus()
+                await milvus.delete(doc.kb_id, chunk_ids)
+            except Exception as e:
+                logger.warning("批量删除 - 删除 Milvus 向量失败（可忽略）: %s", e)
+
+        # 更新知识库文档计数
+        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == doc.kb_id))
+        kb = kb_result.scalar_one_or_none()
+        if kb and kb.doc_count > 0:
+            kb.doc_count -= 1
+
+        # 删除文档
+        await db.delete(doc)
+        await db.flush()
+
+        # 删除本地文件
+        file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+        if file_path.exists():
+            os.remove(file_path)
+
+        deleted_count += 1
+
+    # 清除受影响知识库的检索缓存
+    from app.retrieval.cache import get_retrieval_cache
+    cache = await get_retrieval_cache()
+    if cache:
+        for kb_id in kb_ids_affected:
+            await cache.invalidate_kb(kb_id)
+
+    return {"deleted_count": deleted_count, "total_requested": len(body.doc_ids)}
+
+
+# ============================================================
 # 文件夹批量上传
 # ============================================================
 
