@@ -279,3 +279,44 @@ class TestSystemAPI:
         data = resp.json()
         assert data["agent_max_iterations"] == 5
         assert data["agent_timeout"] == 15.0
+
+    @pytest.mark.asyncio
+    async def test_queue_stats_no_redis(self, client):
+        """队列统计 - Redis 不可用时返回全零"""
+        from app.main import app
+        # 确保 task_queue 为 None（模拟 Redis 不可用）
+        app.state.task_queue = None
+
+        resp = await client.get("/api/system/queue-stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stream_length"] == 0
+        assert data["pending_count"] == 0
+        assert data["active_workers"] == 0
+        assert data["dlq_length"] == 0
+
+    @pytest.mark.asyncio
+    async def test_queue_stats_with_redis(self, client):
+        """队列统计 - Redis 可用时返回实际统计"""
+        from app.main import app
+        from app.pipeline.queue import QueueStats
+
+        # Mock task_queue
+        mock_queue = AsyncMock()
+        mock_queue.get_stats.return_value = QueueStats(
+            stream_length=5,
+            pending_count=2,
+            active_workers=1,
+            dlq_length=3,
+        )
+        app.state.task_queue = mock_queue
+
+        resp = await client.get("/api/system/queue-stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stream_length"] == 5
+        assert data["pending_count"] == 2
+        assert data["active_workers"] == 1
+        assert data["dlq_length"] == 3
+
+        mock_queue.get_stats.assert_called_once()

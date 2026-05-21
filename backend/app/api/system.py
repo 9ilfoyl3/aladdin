@@ -4,10 +4,11 @@ import asyncio
 import logging
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.pipeline.queue import QueueStats
 from app.storage.milvus import MilvusClient
 
 logger = logging.getLogger(__name__)
@@ -238,3 +239,16 @@ async def update_config(body: SystemConfigUpdate):
         ocr_external_api_key=_mask_ocr_api_key(settings.ocr_external_api_key),
         ocr_external_api_timeout=settings.ocr_external_api_timeout,
     )
+
+
+@router.get("/queue-stats", response_model=QueueStats)
+async def get_queue_stats(request: Request):
+    """获取任务队列统计信息
+
+    返回当前队列深度、pending 任务数、活跃 Worker 数、DLQ 任务数。
+    Redis 不可用时返回全零值。
+    """
+    task_queue = getattr(request.app.state, "task_queue", None)
+    if task_queue is None:
+        return QueueStats()
+    return await task_queue.get_stats()

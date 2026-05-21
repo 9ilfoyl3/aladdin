@@ -62,6 +62,8 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100 处理进度
+    progress_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 阶段描述
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # 关联

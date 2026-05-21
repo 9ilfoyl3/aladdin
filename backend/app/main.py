@@ -1,5 +1,7 @@
 """FastAPI 应用入口"""
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,16 +19,97 @@ from app.api.ocr_config import router as ocr_config_router
 from app.api.middleware import ApiKeyAuthMiddleware
 from app.api.retrieval import router as retrieval_router
 from app.api.system import router as system_router
+from app.config import get_settings
 from app.storage.database import init_db
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化数据库，加载模型配置"""
+    """应用生命周期：启动时初始化数据库，加载模型配置，启动 Pipeline Worker"""
     await init_db()
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await _load_active_embed_configs()
+
+    # 初始化 TaskQueue 和 PipelineWorker
+    await _start_pipeline_worker(app)
+
     yield
+
+    # 关闭 Pipeline Worker
+    await _stop_pipeline_worker(app)
+
+
+async def _start_pipeline_worker(app: FastAPI) -> None:
+    """启动 Pipeline Worker
+
+    尝试连接 Redis 并创建 TaskQueue。如果 Redis 不可用，
+    跳过 Worker 启动，仅使用降级模式（asyncio.create_task）。
+    """
+    from app.models.manager import get_model_manager
+    from app.pipeline.pipeline import DocumentPipeline
+    from app.pipeline.queue import TaskQueue
+    from app.pipeline.worker import PipelineWorker
+    from app.storage.database import async_session
+    from app.storage.milvus import MilvusClient
+
+    settings = get_settings()
+
+    # 尝试创建 TaskQueue（Redis 不可用时返回 None）
+    task_queue = await TaskQueue.create(settings.redis_url)
+    app.state.task_queue = task_queue
+
+    if task_queue is not None:
+        # 创建 DocumentPipeline 实例
+        model_manager = get_model_manager()
+        milvus_client = MilvusClient(
+            host=settings.milvus_host, port=settings.milvus_port
+        )
+        pipeline = DocumentPipeline(
+            model_manager=model_manager,
+            milvus_client=milvus_client,
+            db_session_factory=async_session,
+        )
+
+        # 创建并启动 PipelineWorker
+        worker = PipelineWorker(
+            queue=task_queue,
+            pipeline=pipeline,
+            db_session_factory=async_session,
+            max_concurrent=settings.pipeline_max_concurrent,
+            max_retries=settings.pipeline_max_retries,
+        )
+        app.state.pipeline_worker = worker
+
+        # 以后台任务方式启动 Worker
+        worker_task = asyncio.create_task(worker.start())
+        app.state.pipeline_worker_task = worker_task
+        logger.info("Pipeline worker initialized and started")
+    else:
+        logger.warning(
+            "Redis unavailable, pipeline worker not started, using fallback mode"
+        )
+        app.state.task_queue = None
+        app.state.pipeline_worker = None
+        app.state.pipeline_worker_task = None
+
+
+async def _stop_pipeline_worker(app: FastAPI) -> None:
+    """停止 Pipeline Worker"""
+    worker = getattr(app.state, "pipeline_worker", None)
+    if worker is not None:
+        await worker.stop()
+        logger.info("Pipeline worker stopped")
+
+    # 取消 worker task（如果仍在运行）
+    worker_task = getattr(app.state, "pipeline_worker_task", None)
+    if worker_task is not None and not worker_task.done():
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def _load_active_embed_configs():

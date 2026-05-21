@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from app.api.validators import NameValidationError, validate_filename, validate_
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
+from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.db import Chunk, Document, Folder, KnowledgeBase, OCRConfig
 from app.storage.database import async_session, get_db
 from app.storage.milvus import MilvusClient
@@ -118,6 +119,31 @@ async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
         logger.error("文档 %s 管道处理异常: %s", doc_id, e)
 
 
+def _get_task_queue(request: Request) -> TaskQueue | None:
+    """从 app.state 获取 TaskQueue 实例，不存在或为 None 时返回 None"""
+    return getattr(request.app.state, "task_queue", None)
+
+
+async def _enqueue_or_fallback(
+    request: Request, file_path: str, doc_id: str, kb_id: str
+) -> None:
+    """尝试将任务入队 Redis Stream，失败时降级为 asyncio.create_task"""
+    queue = _get_task_queue(request)
+    if queue is not None:
+        try:
+            msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path)
+            await queue.enqueue(msg)
+            return
+        except Exception as e:
+            logger.warning(
+                "Redis unavailable, falling back to in-process task: %s", e
+            )
+    else:
+        logger.warning("Redis unavailable, falling back to in-process task")
+    # 降级：使用 asyncio.create_task
+    asyncio.create_task(_run_pipeline_safe(file_path, doc_id, kb_id))
+
+
 # ============================================================
 # 接口实现
 # ============================================================
@@ -158,6 +184,7 @@ async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSess
 @router.post("/api/knowledge-bases/{kb_id}/documents/upload", response_model=DocumentResponse, status_code=201)
 async def upload_document(
     kb_id: str,
+    request: Request,
     file: UploadFile = File(...),
     folder_id: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -213,8 +240,8 @@ async def upload_document(
     await db.flush()
     await db.refresh(doc)
 
-    # 后台触发管道处理
-    asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, kb_id))
+    # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
+    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
 
     return DocumentResponse(
         id=doc.id,
@@ -402,6 +429,7 @@ async def validate_folder_upload(
 @router.post("/api/knowledge-bases/{kb_id}/documents/upload-folder", response_model=FolderUploadResponse, status_code=201)
 async def upload_folder(
     kb_id: str,
+    request: Request,
     files: list[UploadFile] = File(...),
     paths: Annotated[str, Form(...)] = "",
     parent_folder_id: Annotated[str | None, Form()] = None,
@@ -557,8 +585,8 @@ async def upload_folder(
             # 更新知识库文档计数
             kb.doc_count = (kb.doc_count or 0) + 1
 
-            # 后台触发管道处理
-            asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, kb_id))
+            # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
+            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
 
             uploaded_count += 1
             results.append(FolderUploadResultItem(

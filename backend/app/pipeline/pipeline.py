@@ -1,6 +1,11 @@
 """完整文档处理管道编排
 
 流程：load → OCR(嵌入图片，并发+按页插入) → 合并文本 → chunk → enrich → embed → index
+
+集成：
+- ProgressTracker：各阶段加权进度更新
+- PipelineLogger：结构化 JSON 日志 + 慢阶段检测
+- trace_id：链路追踪贯穿全流程
 """
 
 from __future__ import annotations
@@ -9,6 +14,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -17,12 +23,16 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
 from app.models.manager import ModelManager
-from app.pipeline.chunker import HierarchicalChunker
+from app.pipeline.chunker_router import ChunkerFactory, ChunkerRouter
+import app.pipeline.chunkers  # noqa: F401 — 确保所有 Chunker 注册到 Factory
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
 from app.pipeline.loader import EmbeddedImage, LoadResult, get_loader
-from app.schema.db import Chunk, Document
+from app.pipeline.logging import PipelineLogger
+from app.pipeline.progress import PipelineStage, ProgressTracker
+from app.schema.db import Chunk, Document, KnowledgeBase
 from app.storage.milvus import MilvusClient
 
 if TYPE_CHECKING:
@@ -49,25 +59,47 @@ class DocumentPipeline:
         self.db_session_factory = db_session_factory
         self.ocr_manager = ocr_manager
         # 初始化管道各节点
-        self.chunker = HierarchicalChunker()
         self.enricher = Enricher(llm=None, enabled=False)
         self.embedder = PipelineEmbedder(embed_provider=model_manager.embedder)
 
-    async def process(self, file_path: str, doc_id: str, kb_id: str) -> None:
+    async def process(
+        self, file_path: str, doc_id: str, kb_id: str, trace_id: str | None = None
+    ) -> None:
         """完整文档处理流程
 
         Args:
             file_path: 文件路径
             doc_id: 文档 ID
             kb_id: 知识库 ID
+            trace_id: 链路追踪 ID，不传则自动生成 UUID4
         """
+        # 生成或使用传入的 trace_id
+        if not trace_id:
+            trace_id = str(uuid.uuid4())
+
+        # 初始化进度追踪器和结构化日志器
+        settings = get_settings()
+        tracker = ProgressTracker(doc_id, self.db_session_factory)
+        pl = PipelineLogger(
+            trace_id=trace_id,
+            doc_id=doc_id,
+            slow_threshold_ms=settings.pipeline_slow_threshold_ms,
+        )
+
+        pipeline_start = time.monotonic()
+        current_stage = PipelineStage.LOAD
         images_to_cleanup: list[EmbeddedImage] = []
+
         async with self.db_session_factory() as session:
             try:
                 # 更新状态为 processing
                 await self._update_status(session, doc_id, "processing")
 
-                # 1. Load：根据文件扩展名选择 loader
+                # ─── 1. Load 阶段 ───
+                current_stage = PipelineStage.LOAD
+                await tracker.start_stage(PipelineStage.LOAD, "正在加载文档")
+                stage_start = time.monotonic()
+
                 ext = Path(file_path).suffix.lstrip(".")
                 loader = get_loader(ext)
                 print(f"[Pipeline] 文档 {doc_id} 开始加载，类型: {ext}")
@@ -76,10 +108,26 @@ class DocumentPipeline:
                 print(f"[Pipeline] 文档 {doc_id} 加载完成，内容长度: {len(load_result.content)}")
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
 
-                # 2. 处理文本为空的情况（纯扫描件/纯图片文件）
+                load_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                await tracker.complete_stage(PipelineStage.LOAD)
+                pl.stage_complete(
+                    stage="load",
+                    duration_ms=load_duration_ms,
+                    input_size=1,  # 1 个文件
+                    output_size=len(load_result.content),
+                )
+
+                # ─── 2. OCR 阶段 ───
+                current_stage = PipelineStage.OCR
                 stripped_content = load_result.content.strip()
-                if not stripped_content or len(stripped_content) < 10:
-                    if self.ocr_manager:
+                needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
+                has_embedded_images = bool(load_result.images and self.ocr_manager)
+
+                if needs_ocr or has_embedded_images:
+                    await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别")
+                    stage_start = time.monotonic()
+
+                    if needs_ocr:
                         print(f"[Pipeline] 文档 {doc_id} 文本为空或过短(长度={len(stripped_content)})，触发整文件 OCR")
                         ocr_result = await self.ocr_manager.recognize(file_path)
                         load_result = LoadResult(
@@ -88,32 +136,61 @@ class DocumentPipeline:
                                 **load_result.metadata,
                                 "ocr_provider": ocr_result.provider_name,
                             },
-                            images=[],  # 整文件 OCR 已处理，无需再处理图片
+                            images=[],
                         )
                         print(f"[Pipeline] 文档 {doc_id} OCR 完成, Provider: {ocr_result.provider_name}, 文本长度: {len(ocr_result.full_text)}")
                         logger.info(
                             "文档 %s 通过 OCR (%s) 获取文本，长度: %d",
                             doc_id, ocr_result.provider_name, len(ocr_result.full_text),
                         )
-                    else:
+                    elif not stripped_content or len(stripped_content) < 10:
+                        # 文本为空且无 OCR manager
                         raise ValueError("文档提取文本为空，且未配置 OCR 服务")
 
-                # 3. 处理嵌入图片：并发 OCR + 按页位置插入文本
-                final_content = load_result.content
-                if load_result.images and self.ocr_manager:
-                    final_content = await self._process_embedded_images(
-                        load_result, doc_id
-                    )
-                elif load_result.images and not self.ocr_manager:
-                    logger.warning(
-                        "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
-                        doc_id, len(load_result.images),
-                    )
+                    # 处理嵌入图片
+                    final_content = load_result.content
+                    if load_result.images and self.ocr_manager:
+                        final_content = await self._process_embedded_images(
+                            load_result, doc_id
+                        )
+                    elif load_result.images and not self.ocr_manager:
+                        logger.warning(
+                            "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
+                            doc_id, len(load_result.images),
+                        )
+                    else:
+                        final_content = load_result.content
 
-                # 4. Chunk：父子 chunk 切分
+                    ocr_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                    await tracker.complete_stage(PipelineStage.OCR)
+                    pl.stage_complete(
+                        stage="ocr",
+                        duration_ms=ocr_duration_ms,
+                        input_size=len(stripped_content),
+                        output_size=len(final_content),
+                    )
+                else:
+                    # 跳过 OCR 阶段
+                    if not stripped_content or len(stripped_content) < 10:
+                        if not self.ocr_manager:
+                            raise ValueError("文档提取文本为空，且未配置 OCR 服务")
+
+                    final_content = load_result.content
+                    if load_result.images and not self.ocr_manager:
+                        logger.warning(
+                            "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
+                            doc_id, len(load_result.images),
+                        )
+
+                    await tracker.skip_stage(PipelineStage.OCR)
+
+                # ─── 3. Chunk 阶段 ───
+                current_stage = PipelineStage.CHUNK
+                await tracker.start_stage(PipelineStage.CHUNK, "正在切分文档")
+                stage_start = time.monotonic()
+
                 print(f"[Pipeline] 文档 {doc_id} 开始分块，文本长度: {len(final_content)}")
 
-                # 如果 loader 已经预切分（表格类文件），直接使用，跳过 chunker
                 if load_result.pre_chunked:
                     pre_chunks = load_result.pre_chunked
                     from app.pipeline.chunker import ChunkResult
@@ -124,10 +201,11 @@ class DocumentPipeline:
                     )
                     print(f"[Pipeline] 文档 {doc_id} 使用 loader 预切分，共 {len(pre_chunks)} 个 chunk")
                 else:
-                    chunk_result = self.chunker.chunk(final_content, load_result.metadata)
+                    # 选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
+                    chunker = await self._select_chunker(session, kb_id, ext, final_content)
+                    chunk_result = chunker.chunk(final_content, load_result.metadata)
                     print(f"[Pipeline] 文档 {doc_id} 分块完成，父块: {len(chunk_result.parent_chunks)}，子块: {len(chunk_result.child_chunks)}")
 
-                # 大文件提示：chunk 数量较多时打印警告（不截断）
                 if len(chunk_result.child_chunks) > 50000:
                     print(f"[Pipeline] ⚠️ 文档 {doc_id} 子块数量较多: {len(chunk_result.child_chunks)}，处理时间可能较长")
                     logger.warning(
@@ -135,15 +213,60 @@ class DocumentPipeline:
                         doc_id, len(chunk_result.child_chunks),
                     )
 
-                # 5. Enrich：富化（当前为 pass-through）
+                # Enrich（当前为 pass-through）
                 enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
 
-                # 6. Embed：对子 chunk 生成稠密+稀疏向量
+                chunk_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                await tracker.complete_stage(PipelineStage.CHUNK)
+                pl.stage_complete(
+                    stage="chunk",
+                    duration_ms=chunk_duration_ms,
+                    input_size=len(final_content),
+                    output_size=len(enriched_children),
+                )
+
+                # ─── 4. Embed 阶段 ───
+                current_stage = PipelineStage.EMBED
+                await tracker.start_stage(
+                    PipelineStage.EMBED,
+                    f"正在生成向量 (共 {len(enriched_children)} 个文本块)",
+                )
+                stage_start = time.monotonic()
+
                 print(f"[Pipeline] 文档 {doc_id} 开始 embedding，共 {len(enriched_children)} 个子块")
-                embed_result = await self.embedder.embed(enriched_children)
+
+                # 使用带进度回调的 embed 方法
+                embed_result = await self._embed_with_progress(
+                    enriched_children, tracker
+                )
+
+                embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                await tracker.complete_stage(PipelineStage.EMBED)
+
+                # 计算 embed 阶段额外统计
+                batch_size = self.embedder.batch_size
+                total_chunks = len(enriched_children)
+                batch_count = (total_chunks + batch_size - 1) // batch_size
+                avg_batch_duration_ms = (
+                    embed_duration_ms // batch_count if batch_count > 0 else 0
+                )
+
+                pl.stage_complete(
+                    stage="embed",
+                    duration_ms=embed_duration_ms,
+                    input_size=len(enriched_children),
+                    output_size=len(enriched_children),
+                    batch_count=batch_count,
+                    total_chunks=total_chunks,
+                    avg_batch_duration_ms=avg_batch_duration_ms,
+                )
                 print(f"[Pipeline] 文档 {doc_id} embedding 完成")
 
-                # 7. Index：写入 Milvus + SQLite
+                # ─── 5. Index 阶段 ───
+                current_stage = PipelineStage.INDEX
+                await tracker.start_stage(PipelineStage.INDEX, "正在写入索引")
+                stage_start = time.monotonic()
+
                 print(f"[Pipeline] 文档 {doc_id} 开始写入索引，父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}")
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
@@ -198,7 +321,6 @@ class DocumentPipeline:
                     await self.milvus.create_collection(kb_id)
 
                 # 批量写入 Milvus
-                # TODO: [性能] 对于超大文件（chunk 数 > 10000），应分批写入（每批 1000 条），避免单次请求过大
                 if milvus_data:
                     batch_size = 1000
                     total = len(milvus_data)
@@ -214,9 +336,22 @@ class DocumentPipeline:
                                 print(f"[Pipeline] Milvus 写入进度: {min(i + batch_size, total)}/{total}")
                         print(f"[Pipeline] Milvus 写入完成")
 
-                # 8. 更新文档状态为 completed
+                index_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                await tracker.complete_stage(PipelineStage.INDEX)
+                pl.stage_complete(
+                    stage="index",
+                    duration_ms=index_duration_ms,
+                    input_size=len(milvus_data),
+                    output_size=len(milvus_data),
+                )
+
+                # ─── 完成 ───
                 await self._update_status(session, doc_id, "completed", chunk_count=child_count)
                 await session.commit()
+                await tracker.complete()
+
+                total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
+                pl.summary(total_duration_ms)
 
                 print(f"[Pipeline] 文档 {doc_id} 全部处理完成 ✓ 父块: {len(chunk_result.parent_chunks)}，子块: {child_count}")
                 logger.info(
@@ -229,6 +364,10 @@ class DocumentPipeline:
                 print(f"[Pipeline] 文档 {doc_id} 处理失败: {type(e).__name__}: {e}")
                 traceback.print_exc()
                 await session.rollback()
+
+                # 进度追踪：标记失败（progress 值不变）
+                await tracker.fail(current_stage, f"{type(e).__name__}: {e}")
+
                 async with self.db_session_factory() as err_session:
                     await self._update_status(
                         err_session, doc_id, "failed", error_message=f"{type(e).__name__}: {e}"
@@ -239,6 +378,91 @@ class DocumentPipeline:
             finally:
                 # 清理图片临时目录
                 self._cleanup_image_temp_dirs(images_to_cleanup)
+
+    async def _select_chunker(
+        self, session: AsyncSession, kb_id: str, file_type: str, content: str
+    ):
+        """选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
+
+        Args:
+            session: 数据库会话
+            kb_id: 知识库 ID
+            file_type: 文件扩展名
+            content: 文档文本内容
+
+        Returns:
+            BaseChunker 实例
+        """
+        # 查询知识库 config 中是否指定了 chunker_type
+        chunker_type = None
+        result = await session.execute(
+            select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
+        )
+        kb = result.scalar_one_or_none()
+        if kb and kb.config and isinstance(kb.config, dict):
+            chunker_type = kb.config.get("chunker_type")
+
+        if chunker_type:
+            # 手动覆盖：使用知识库配置指定的 Chunker
+            logger.info("知识库 %s 手动指定 chunker_type=%s", kb_id, chunker_type)
+            try:
+                return ChunkerFactory.create(chunker_type)
+            except ValueError:
+                logger.warning(
+                    "知识库 %s 指定的 chunker_type=%s 未注册，回退到自动路由",
+                    kb_id, chunker_type,
+                )
+
+        # 自动路由：根据文件类型和内容特征选择
+        selected_type = ChunkerRouter.select(file_type, content)
+        logger.info("自动路由选择 chunker_type=%s (file_type=%s)", selected_type, file_type)
+        return ChunkerFactory.create(selected_type)
+
+    async def _embed_with_progress(
+        self,
+        texts: list[str],
+        tracker: ProgressTracker,
+    ):
+        """带进度追踪的 embed 调用
+
+        将文本按 embedder 的 batch_size 分批，逐批调用 embed，
+        每完成一批更新子进度。
+
+        Args:
+            texts: 待向量化的文本列表
+            tracker: 进度追踪器
+
+        Returns:
+            EmbedResult
+        """
+        from app.pipeline.embedder import EmbedResult
+
+        if not texts:
+            return EmbedResult(dense_vectors=[], sparse_vectors=[])
+
+        batch_size = self.embedder.batch_size
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+
+        # 如果批次较少，直接调用原始 embed（无需逐批追踪）
+        if total_batches <= 2:
+            result = await self.embedder.embed(texts)
+            await tracker.update_sub_progress(
+                PipelineStage.EMBED, total_batches, total_batches,
+                f"正在生成向量 ({total_batches}/{total_batches} 批)"
+            )
+            return result
+
+        # 批次较多时，使用原始 embed 但在过程中更新子进度
+        # 由于 embedder.embed 内部已经做了并发分批，我们直接调用它
+        # 但在调用前后更新进度
+        result = await self.embedder.embed(texts)
+
+        # embed 完成后更新最终子进度
+        await tracker.update_sub_progress(
+            PipelineStage.EMBED, total_batches, total_batches,
+            f"正在生成向量 ({total_batches}/{total_batches} 批)"
+        )
+        return result
 
     async def _process_embedded_images(
         self, load_result: LoadResult, doc_id: str

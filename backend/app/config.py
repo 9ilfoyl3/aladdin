@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     ocr_external_api_key: str = ""
     ocr_external_api_timeout: float = 30.0
 
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Pipeline Worker
+    pipeline_max_concurrent: int = 3
+    pipeline_max_retries: int = 3
+    pipeline_slow_threshold_ms: int = 30000
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

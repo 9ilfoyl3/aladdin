@@ -347,14 +347,20 @@ async def test_pipeline_ocr_provider_recorded_in_metadata(
         mock_model_manager, mock_milvus, db_session_factory, ocr_manager=mock_ocr_manager
     )
 
-    with patch.object(pipeline.chunker, "chunk", wraps=pipeline.chunker.chunk) as mock_chunk:
-        await pipeline.process(str(test_file), doc_id, kb_id)
+    # 使用 spy chunker 来捕获 chunk() 调用参数
+    from app.pipeline.chunker import HierarchicalChunker
+    spy_chunker = HierarchicalChunker()
+    with patch.object(spy_chunker, "chunk", wraps=spy_chunker.chunk) as mock_chunk:
+        async def _return_spy(*args, **kwargs):
+            return spy_chunker
+        with patch.object(pipeline, "_select_chunker", side_effect=_return_spy):
+            await pipeline.process(str(test_file), doc_id, kb_id)
 
-        # chunker.chunk 的第二个参数是 metadata
-        call_args = mock_chunk.call_args
-        metadata = call_args[0][1]  # positional arg: (content, metadata)
-        assert "ocr_provider" in metadata
-        assert metadata["ocr_provider"] == "paddleocr"
+            # chunker.chunk 的第二个参数是 metadata
+            call_args = mock_chunk.call_args
+            metadata = call_args[0][1]  # positional arg: (content, metadata)
+            assert "ocr_provider" in metadata
+            assert metadata["ocr_provider"] == "paddleocr"
 
 
 @pytest.mark.asyncio
