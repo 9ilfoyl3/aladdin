@@ -1,14 +1,16 @@
 """完整文档处理管道编排
 
-流程：load → OCR(嵌入图片) → 合并文本 → chunk → enrich → embed → index（写入 Milvus + SQLite）
+流程：load → OCR(嵌入图片，并发+按页插入) → 合并文本 → chunk → enrich → embed → index
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import tempfile
+import shutil
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,8 +27,12 @@ from app.storage.milvus import MilvusClient
 
 if TYPE_CHECKING:
     from app.pipeline.ocr.manager import OCRManager
+    from app.pipeline.ocr.provider import OCRResult
 
 logger = logging.getLogger(__name__)
+
+# 并发 OCR 的最大并行数
+_OCR_CONCURRENCY = 4
 
 
 class DocumentPipeline:
@@ -55,6 +61,7 @@ class DocumentPipeline:
             doc_id: 文档 ID
             kb_id: 知识库 ID
         """
+        images_to_cleanup: list[EmbeddedImage] = []
         async with self.db_session_factory() as session:
             try:
                 # 更新状态为 processing
@@ -64,13 +71,13 @@ class DocumentPipeline:
                 ext = Path(file_path).suffix.lstrip(".")
                 loader = get_loader(ext)
                 load_result = loader.load(file_path)
+                images_to_cleanup = load_result.images
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
 
                 # 2. 处理文本为空的情况（纯扫描件/纯图片文件）
                 stripped_content = load_result.content.strip()
                 if not stripped_content or len(stripped_content) < 10:
                     if self.ocr_manager:
-                        # OCR 可用，对整个文件调用 OCR 识别
                         print(f"[Pipeline] 文档 {doc_id} 文本为空或过短(长度={len(stripped_content)})，触发整文件 OCR")
                         ocr_result = await self.ocr_manager.recognize(file_path)
                         load_result = LoadResult(
@@ -84,35 +91,17 @@ class DocumentPipeline:
                         print(f"[Pipeline] 文档 {doc_id} OCR 完成, Provider: {ocr_result.provider_name}, 文本长度: {len(ocr_result.full_text)}")
                         logger.info(
                             "文档 %s 通过 OCR (%s) 获取文本，长度: %d",
-                            doc_id,
-                            ocr_result.provider_name,
-                            len(ocr_result.full_text),
+                            doc_id, ocr_result.provider_name, len(ocr_result.full_text),
                         )
                     else:
-                        raise ValueError(
-                            "文档提取文本为空，且未配置 OCR 服务"
-                        )
+                        raise ValueError("文档提取文本为空，且未配置 OCR 服务")
 
-                # 3. 处理嵌入图片：对文档中的图片调用 OCR，将识别文本追加到主文本
+                # 3. 处理嵌入图片：并发 OCR + 按页位置插入文本
+                final_content = load_result.content
                 if load_result.images and self.ocr_manager:
-                    image_text = await self._ocr_embedded_images(
-                        load_result.images, doc_id
+                    final_content = await self._process_embedded_images(
+                        load_result, doc_id
                     )
-                    if image_text:
-                        # 将图片 OCR 文本追加到文档文本末尾，用明确的分隔标记
-                        load_result = LoadResult(
-                            content=load_result.content + "\n\n" + image_text,
-                            metadata={
-                                **load_result.metadata,
-                                "has_ocr_images": True,
-                                "ocr_image_count": len(load_result.images),
-                            },
-                            images=[],  # 已处理完毕
-                        )
-                        logger.info(
-                            "文档 %s 嵌入图片 OCR 完成，追加文本长度: %d",
-                            doc_id, len(image_text),
-                        )
                 elif load_result.images and not self.ocr_manager:
                     logger.warning(
                         "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
@@ -120,7 +109,7 @@ class DocumentPipeline:
                     )
 
                 # 4. Chunk：父子 chunk 切分
-                chunk_result = self.chunker.chunk(load_result.content, load_result.metadata)
+                chunk_result = self.chunker.chunk(final_content, load_result.metadata)
 
                 # 5. Enrich：富化（当前为 pass-through）
                 enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
@@ -129,7 +118,6 @@ class DocumentPipeline:
                 embed_result = await self.embedder.embed(enriched_children)
 
                 # 7. Index：写入 Milvus + SQLite
-                # 生成父 chunk ID 映射
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
                     parent_ids.append(str(uuid.uuid4()))
@@ -155,11 +143,9 @@ class DocumentPipeline:
                 for child_idx, child_text in enumerate(enriched_children):
                     child_id = str(uuid.uuid4())
 
-                    # 找到该子 chunk 对应的父 chunk
                     parent_idx = self._find_parent(chunk_result.parent_child_map, child_idx)
                     parent_id = parent_ids[parent_idx] if parent_idx is not None else None
 
-                    # SQLite 元数据
                     child_chunk = Chunk(
                         id=child_id,
                         doc_id=doc_id,
@@ -170,11 +156,10 @@ class DocumentPipeline:
                     )
                     session.add(child_chunk)
 
-                    # Milvus 向量数据
                     milvus_data.append({
                         "chunk_id": child_id,
                         "doc_id": doc_id,
-                        "content": child_text[:65535],  # Milvus VARCHAR 长度限制
+                        "content": child_text[:65535],
                         "dense_vector": embed_result.dense_vectors[child_idx],
                         "sparse_vector": embed_result.sparse_vectors[child_idx],
                         "parent_id": parent_id or "",
@@ -195,14 +180,11 @@ class DocumentPipeline:
 
                 logger.info(
                     "文档 %s 处理完成，父块: %d，子块: %d",
-                    doc_id,
-                    len(chunk_result.parent_chunks),
-                    child_count,
+                    doc_id, len(chunk_result.parent_chunks), child_count,
                 )
 
             except Exception as e:
                 await session.rollback()
-                # 标记失败状态
                 async with self.db_session_factory() as err_session:
                     await self._update_status(
                         err_session, doc_id, "failed", error_message=str(e)
@@ -210,74 +192,136 @@ class DocumentPipeline:
                     await err_session.commit()
                 logger.error("文档 %s 处理失败: %s", doc_id, e)
                 raise
+            finally:
+                # 清理图片临时目录
+                self._cleanup_image_temp_dirs(images_to_cleanup)
 
-    async def _ocr_embedded_images(
-        self, images: list[EmbeddedImage], doc_id: str
+    async def _process_embedded_images(
+        self, load_result: LoadResult, doc_id: str
     ) -> str:
-        """对文档中嵌入的图片逐张调用 OCR 识别，返回合并后的文本
+        """处理嵌入图片：并发 OCR 识别，按页位置将图片文本插入到对应页面文本之后
 
-        将图片数据写入临时文件，调用 OCR Manager 识别，
-        识别完成后清理临时文件。
+        Args:
+            load_result: 文档加载结果
+            doc_id: 文档 ID
+
+        Returns:
+            合并了图片 OCR 文本的最终文档文本
+        """
+        images = load_result.images
+        logger.info("文档 %s 开始并发处理 %d 张嵌入图片 OCR", doc_id, len(images))
+
+        # 并发 OCR 识别所有图片
+        ocr_results = await self._concurrent_ocr_images(images, doc_id)
+
+        # 按页码分组图片 OCR 文本
+        page_image_texts: dict[int, list[str]] = defaultdict(list)
+        for img, ocr_text in zip(images, ocr_results):
+            if ocr_text:
+                page_image_texts[img.page_or_index].append(ocr_text)
+
+        if not page_image_texts:
+            return load_result.content
+
+        # 如果有按页文本，按页插入图片 OCR 文本
+        if load_result.page_texts:
+            merged_pages: list[str] = []
+            for page_idx, page_text in enumerate(load_result.page_texts):
+                merged_pages.append(page_text)
+                page_num = page_idx + 1
+                if page_num in page_image_texts:
+                    img_section = "\n".join(
+                        f"[图片内容]\n{txt}" for txt in page_image_texts[page_num]
+                    )
+                    merged_pages.append(img_section)
+
+            # 处理可能超出页码范围的图片（如 docx 的序号索引）
+            for page_num, texts in page_image_texts.items():
+                if page_num > len(load_result.page_texts):
+                    img_section = "\n".join(
+                        f"[图片内容]\n{txt}" for txt in texts
+                    )
+                    merged_pages.append(img_section)
+
+            final_content = "\n\n".join(merged_pages)
+        else:
+            # 没有按页文本（如 docx 只有段落），追加到末尾
+            all_img_texts = []
+            for page_num in sorted(page_image_texts.keys()):
+                for txt in page_image_texts[page_num]:
+                    all_img_texts.append(f"[图片内容 - 第{page_num}张]\n{txt}")
+            final_content = load_result.content + "\n\n" + "\n\n".join(all_img_texts)
+
+        logger.info(
+            "文档 %s 图片 OCR 完成，成功识别 %d/%d 张，最终文本长度: %d",
+            doc_id,
+            sum(1 for r in ocr_results if r),
+            len(images),
+            len(final_content),
+        )
+
+        return final_content
+
+    async def _concurrent_ocr_images(
+        self, images: list[EmbeddedImage], doc_id: str
+    ) -> list[str]:
+        """并发调用 OCR 识别多张图片，使用 Semaphore 控制并发数
 
         Args:
             images: 嵌入图片列表
             doc_id: 文档 ID（用于日志）
 
         Returns:
-            所有图片 OCR 识别文本的合并结果
+            与 images 等长的列表，每个元素为 OCR 识别文本（失败为空字符串）
         """
-        ocr_texts: list[str] = []
+        semaphore = asyncio.Semaphore(_OCR_CONCURRENCY)
 
-        logger.info(
-            "文档 %s 开始处理 %d 张嵌入图片的 OCR",
-            doc_id, len(images),
-        )
+        async def _ocr_single(idx: int, img: EmbeddedImage) -> str:
+            async with semaphore:
+                try:
+                    ocr_result = await self.ocr_manager.recognize(img.file_path)
+                    text = ocr_result.full_text.strip()
+                    if text:
+                        logger.debug(
+                            "文档 %s 图片 %d/%d OCR 成功，文本长度: %d",
+                            doc_id, idx + 1, len(images), len(text),
+                        )
+                    return text
+                except Exception as e:
+                    logger.warning(
+                        "文档 %s 图片 %d/%d OCR 失败: %s",
+                        doc_id, idx + 1, len(images), e,
+                    )
+                    return ""
 
-        for idx, img in enumerate(images):
-            tmp_path = None
+        tasks = [_ocr_single(i, img) for i, img in enumerate(images)]
+        results = await asyncio.gather(*tasks)
+        return list(results)
+
+    @staticmethod
+    def _cleanup_image_temp_dirs(images: list[EmbeddedImage]) -> None:
+        """清理图片临时文件和目录
+
+        从图片路径推断临时目录并删除整个目录。
+
+        Args:
+            images: 嵌入图片列表
+        """
+        if not images:
+            return
+
+        # 收集所有临时目录（去重）
+        tmp_dirs: set[str] = set()
+        for img in images:
+            if img.file_path and os.path.exists(img.file_path):
+                tmp_dirs.add(os.path.dirname(img.file_path))
+
+        for tmp_dir in tmp_dirs:
             try:
-                # 将图片数据写入临时文件
-                suffix = f".{img.format}" if img.format else ".png"
-                with tempfile.NamedTemporaryFile(
-                    suffix=suffix, delete=False
-                ) as tmp_file:
-                    tmp_file.write(img.data)
-                    tmp_path = tmp_file.name
-
-                # 调用 OCR 识别
-                ocr_result = await self.ocr_manager.recognize(tmp_path)
-
-                if ocr_result.full_text.strip():
-                    # 添加位置标记，便于后续理解上下文
-                    header = f"[图片内容 - 位置: 第{img.page_or_index}页/第{img.page_or_index}张]"
-                    ocr_texts.append(f"{header}\n{ocr_result.full_text.strip()}")
-                    logger.debug(
-                        "文档 %s 图片 %d/%d OCR 成功，文本长度: %d",
-                        doc_id, idx + 1, len(images), len(ocr_result.full_text),
-                    )
-                else:
-                    logger.debug(
-                        "文档 %s 图片 %d/%d OCR 结果为空，跳过",
-                        doc_id, idx + 1, len(images),
-                    )
-
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                logger.debug("已清理图片临时目录: %s", tmp_dir)
             except Exception as e:
-                logger.warning(
-                    "文档 %s 图片 %d/%d OCR 失败: %s",
-                    doc_id, idx + 1, len(images), e,
-                )
-            finally:
-                # 清理临时文件
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-
-        if ocr_texts:
-            logger.info(
-                "文档 %s 嵌入图片 OCR 完成，成功识别 %d/%d 张",
-                doc_id, len(ocr_texts), len(images),
-            )
-
-        return "\n\n".join(ocr_texts)
+                logger.warning("清理临时目录失败 %s: %s", tmp_dir, e)
 
     @staticmethod
     def _find_parent(parent_child_map: dict[int, list[int]], child_idx: int) -> int | None:

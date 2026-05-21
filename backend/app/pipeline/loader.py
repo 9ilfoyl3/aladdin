@@ -6,11 +6,12 @@ from dataclasses import dataclass, field
 
 @dataclass
 class EmbeddedImage:
-    """文档中嵌入的图片"""
-    data: bytes                  # 图片二进制数据
+    """文档中嵌入的图片（存储为临时文件路径，避免内存压力）"""
+    file_path: str               # 图片临时文件路径
     format: str                  # 图片格式（png/jpeg 等）
     page_or_index: int = 0       # 所在页码或位置索引（从1开始）
-    description: str = ""        # 可选描述（如 shape name）
+    content_hash: str = ""       # 图片内容 hash（用于去重）
+    description: str = ""        # 可选描述
 
 
 @dataclass
@@ -19,6 +20,7 @@ class LoadResult:
     content: str          # 文档文本内容
     metadata: dict = field(default_factory=dict)  # 元数据（文件名、页码等）
     images: list[EmbeddedImage] = field(default_factory=list)  # 文档中嵌入的图片
+    page_texts: list[str] = field(default_factory=list)  # 按页文本（用于图片文本按页插入）
 
 
 class BaseLoader(ABC):
