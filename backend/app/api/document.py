@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Document"])
 
 # 支持的文件类型
-_ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "pptx", "txt", "md", "jpg", "jpeg", "png"}
+_ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png"}
 
 # 上传文件存储目录
 _UPLOAD_DIR = Path("data/uploads")

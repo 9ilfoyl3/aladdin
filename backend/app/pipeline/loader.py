@@ -33,7 +33,7 @@ class BaseLoader(ABC):
 
 
 # 支持的文件类型
-SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "jpg", "jpeg", "png"}
+SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png"}
 
 
 def get_loader(file_type: str) -> BaseLoader:
@@ -66,6 +66,9 @@ def get_loader(file_type: str) -> BaseLoader:
     elif file_type == "docx":
         from app.pipeline.loaders.docx_loader import DocxLoader
         return DocxLoader()
+    elif file_type == "csv":
+        from app.pipeline.loaders.csv_loader import CsvLoader
+        return CsvLoader()
     elif file_type == "xlsx":
         from app.pipeline.loaders.xlsx_loader import XlsxLoader
         return XlsxLoader()
