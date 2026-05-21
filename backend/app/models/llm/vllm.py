@@ -52,6 +52,7 @@ class VllmLLM(LLMProvider):
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 请求 URL: {url}")
+            print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, enable_thinking={payload.get('enable_thinking', 'not set')}")
             print(f"[vLLM] Client Headers: {dict(self._client.headers)}")
             resp = await self._client.post(url, json=payload)
             print(f"[vLLM] 实际请求 Headers: {dict(resp.request.headers)}")

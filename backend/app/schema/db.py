@@ -115,6 +115,7 @@ class LLMConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     chat_visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     stream_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    thinking_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

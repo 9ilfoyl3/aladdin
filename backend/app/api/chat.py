@@ -49,13 +49,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None]:
+async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None, bool]:
     """根据 model_config_id 获取 LLM 实例和配置
 
     优先级：指定 ID > 数据库中的默认配置 > 系统全局配置
 
     Returns:
-        (LLM 实例, 是否启用流式, 最大上下文 token 数)
+        (LLM 实例, 是否启用流式, 最大上下文 token 数, 是否启用 thinking)
     """
     if model_config_id:
         async with async_session() as session:
@@ -64,7 +64,7 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
             )
             config = result.scalar_one_or_none()
             if config:
-                return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
+                return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens, config.thinking_enabled
 
     # 尝试使用数据库中标记为默认的配置
     async with async_session() as session:
@@ -73,13 +73,13 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
         )
         config = result.scalar_one_or_none()
         if config:
-            return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
+            return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens, config.thinking_enabled
 
     # 回退到系统全局配置
     settings = get_settings()
     if settings.llm_provider == "vllm":
-        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None
-    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None
+        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None, False
+    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None, False
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
@@ -304,6 +304,7 @@ async def _stream_response(
     llm: LLMProvider,
     stream_enabled: bool = True,
     max_context_tokens: int | None = None,
+    thinking_enabled: bool = False,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -359,9 +360,14 @@ async def _stream_response(
     yield json.dumps(first_chunk.model_dump(), ensure_ascii=False)
 
     # 流式生成内容，LLM 异常时降级为返回检索上下文
+    llm_kwargs = {}
+    if thinking_enabled:
+        llm_kwargs["enable_thinking"] = True
+    else:
+        llm_kwargs["enable_thinking"] = False
     try:
         if stream_enabled:
-            async for token in llm.stream(messages):
+            async for token in llm.stream(messages, **llm_kwargs):
                 chunk_data = ChatCompletionChunk(
                     id=completion_id,
                     choices=[StreamChoice(delta=DeltaContent(content=token))],
@@ -369,7 +375,7 @@ async def _stream_response(
                 yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
         else:
             # 非流式生成：一次性获取完整回复，然后分段推送
-            result = await llm.generate(messages)
+            result = await llm.generate(messages, **llm_kwargs)
             chunk_size = 4
             for i in range(0, len(result), chunk_size):
                 chunk_data = ChatCompletionChunk(
@@ -428,7 +434,7 @@ async def chat_completions(request: ChatCompletionRequest):
     mode = await _get_retrieval_mode(request.knowledge_base_id, request.retrieval_mode)
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
-    llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
+    llm, stream_enabled, max_context_tokens, thinking_enabled = await _get_llm_for_request(request.model_config_id)
 
     print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
 
@@ -439,7 +445,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled),
             media_type="text/event-stream",
         )
 
@@ -456,8 +462,13 @@ async def chat_completions(request: ChatCompletionRequest):
 
     # 尝试 LLM 生成，失败时降级为纯检索结果
     llm_degraded = False
+    llm_kwargs = {}
+    if thinking_enabled:
+        llm_kwargs["enable_thinking"] = True
+    else:
+        llm_kwargs["enable_thinking"] = False
     try:
-        answer = await llm.generate(messages)
+        answer = await llm.generate(messages, **llm_kwargs)
     except Exception as e:
         logger.warning("LLM 生成失败，降级为纯检索结果: %s", e)
         answer = _build_context(chunks)

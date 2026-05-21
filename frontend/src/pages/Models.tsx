@@ -19,6 +19,7 @@ interface LLMConfigItem {
   api_key_set: boolean
   is_default: boolean
   stream_enabled: boolean
+  thinking_enabled: boolean
   max_context_tokens: number | null
   chat_visible: boolean
   created_at: string
@@ -32,6 +33,7 @@ interface FormData {
   api_key: string
   is_default: boolean
   stream_enabled: boolean
+  thinking_enabled: boolean
   max_context_tokens: string
   chat_visible: boolean
 }
@@ -44,6 +46,7 @@ const emptyForm: FormData = {
   api_key: '',
   is_default: false,
   stream_enabled: true,
+  thinking_enabled: false,
   max_context_tokens: '',
   chat_visible: true,
 }
@@ -82,6 +85,7 @@ function Models() {
       api_key: data.api_key || undefined,
       is_default: data.is_default,
       stream_enabled: data.stream_enabled,
+      thinking_enabled: data.thinking_enabled,
       max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
       chat_visible: data.chat_visible,
     }),
@@ -209,6 +213,7 @@ function Models() {
       api_key: '',
       is_default: item.is_default,
       stream_enabled: item.stream_enabled,
+      thinking_enabled: item.thinking_enabled,
       max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
       chat_visible: item.chat_visible,
     })
@@ -630,6 +635,17 @@ function Models() {
               />
               <Label htmlFor="stream_enabled" className="text-sm font-normal cursor-pointer">启用流式输出</Label>
               <span className="text-xs text-muted-foreground">（部分模型不支持流式，关闭后使用非流式生成）</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="thinking_enabled"
+                checked={form.thinking_enabled}
+                onChange={(e) => setForm({ ...form, thinking_enabled: e.target.checked })}
+                className="rounded border-border"
+              />
+              <Label htmlFor="thinking_enabled" className="text-sm font-normal cursor-pointer">启用深度思考</Label>
+              <span className="text-xs text-muted-foreground">（开启后模型会进行推理思考，适用于支持 thinking 的模型）</span>
             </div>
             <div>
               <Label>最大上下文长度（token）</Label>
