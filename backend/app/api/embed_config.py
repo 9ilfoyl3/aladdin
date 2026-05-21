@@ -77,6 +77,7 @@ class EmbedTestRequest(BaseModel):
     api_key: Optional[str] = None
     timeout: float = 60.0
     config_type: str = "embedding"  # embedding | rerank
+    config_id: Optional[str] = None  # 编辑已有配置时传入，用于在 api_key 为空时回退到已保存的密钥
 
 
 class EmbedTestResponse(BaseModel):
@@ -264,8 +265,15 @@ async def delete_embed_config(config_id: str, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/test", response_model=EmbedTestResponse)
-async def test_embed_connection(body: EmbedTestRequest):
-    """测试 Embedding/Rerank 服务连通性"""
+async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depends(get_db)):
+    """测试 Embedding/Rerank 服务连通性（使用表单传入的值）"""
+    # 如果 api_key 为空且传了 config_id，从数据库回退获取已保存的密钥
+    if not body.api_key and body.config_id:
+        result = await db.execute(select(EmbedConfig).where(EmbedConfig.id == body.config_id))
+        saved = result.scalar_one_or_none()
+        if saved and saved.api_key:
+            body.api_key = saved.api_key
+
     try:
         if body.provider == "remote":
             if not body.base_url:
@@ -351,4 +359,4 @@ async def test_saved_embed_config(config_id: str, db: AsyncSession = Depends(get
         api_key=config.api_key,
         timeout=config.timeout,
         config_type=config.config_type,
-    ))
+    ), db=db)
