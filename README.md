@@ -111,7 +111,7 @@ make dev
 ```
 
 访问：
-- 前端界面：http://localhost:5173
+- 前端界面：http://localhost:3000
 - API 文档：http://localhost:8000/docs
 
 ### 使用流程
@@ -196,4 +196,3 @@ make clean              # 清理缓存
 ## 📄 许可证
 
 [MIT License](./LICENSE)
-```

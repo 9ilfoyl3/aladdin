@@ -112,7 +112,7 @@ make dev
 ```
 
 Access:
-- Frontend UI: http://localhost:5173
+- Frontend UI: http://localhost:3000
 - API Docs: http://localhost:8000/docs
 
 ### Usage
@@ -197,4 +197,3 @@ Issues and Pull Requests are welcome.
 ## 📄 License
 
 [MIT License](./LICENSE)
-```
