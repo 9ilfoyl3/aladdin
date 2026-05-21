@@ -47,7 +47,8 @@ if [ "$SKIP_INFRA" = false ]; then
     docker pull milvusdb/milvus:v2.4.6
     docker pull quay.io/coreos/etcd:v3.5.25
     docker pull minio/minio:RELEASE.2024-05-28T17-19-04Z
-    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z -o "$OUT/infra.tar"
+    docker pull redis:7-alpine
+    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z redis:7-alpine -o "$OUT/infra.tar"
 fi
 
 echo ""
@@ -58,3 +59,4 @@ cp backend/.env.example "$OUT/.env.example"
 echo ""
 echo "=== 完成 ==="
 du -sh "$OUT"
+

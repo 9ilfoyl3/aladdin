@@ -75,6 +75,19 @@ services:
 
   # ============ 应用服务 ============
 
+  redis:
+    image: ${IMAGE_REDIS:-redis:7-alpine}
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   backend:
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
     ports:
@@ -97,6 +110,7 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - upload_data:/app/data
       - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
@@ -121,3 +135,4 @@ volumes:
   milvus_data:
   postgres_data:
   upload_data:
+  redis_data:

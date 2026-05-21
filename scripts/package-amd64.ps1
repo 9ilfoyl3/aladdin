@@ -35,7 +35,8 @@ if (-not $SkipInfra) {
     docker pull milvusdb/milvus:v2.4.6
     docker pull quay.io/coreos/etcd:v3.5.25
     docker pull minio/minio:RELEASE.2024-05-28T17-19-04Z
-    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z -o "$OUT\infra.tar"
+    docker pull redis:7-alpine
+    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z redis:7-alpine -o "$OUT\infra.tar"
 }
 
 # 配置文件
@@ -52,3 +53,4 @@ Write-Host "  远程模式首次:  .\scripts\package-amd64.ps1"
 Write-Host "  GPU模式首次:   .\scripts\package-amd64.ps1 -GPU"
 Write-Host "  更新应用:      .\scripts\package-amd64.ps1 -SkipInfra"
 Write-Host "  GPU更新:       .\scripts\package-amd64.ps1 -GPU -SkipInfra"
+
