@@ -176,7 +176,7 @@ export const llmConfigApi = {
     request<void>(`/llm-configs/${id}`, { method: 'DELETE' }),
   test: (id: string) =>
     request<{ success: boolean; message: string; reply?: string }>(`/llm-configs/${id}/test`, { method: 'POST' }),
-  testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string }) =>
+  testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string; config_id?: string }) =>
     request<{ success: boolean; message: string; reply?: string }>('/llm-configs/test', {
       method: 'POST',
       body: JSON.stringify(data),

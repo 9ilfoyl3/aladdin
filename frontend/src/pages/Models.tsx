@@ -176,18 +176,14 @@ function Models() {
     setDialogTesting(true)
     setDialogTestResult(null)
     try {
-      let result
-      // 编辑模式下，如果用户没有重新输入 API Key，使用已保存配置测试
-      if (editingItem && !form.api_key && editingItem.api_key_set) {
-        result = await llmConfigApi.test(editingItem.id)
-      } else {
-        result = await llmConfigApi.testConnection({
-          provider: form.provider,
-          base_url: form.base_url,
-          model: form.model,
-          api_key: form.api_key || undefined,
-        })
-      }
+      // 始终用表单当前值测试，API Key 为空时后端通过 config_id 从数据库补全
+      const result = await llmConfigApi.testConnection({
+        provider: form.provider,
+        base_url: form.base_url,
+        model: form.model,
+        api_key: form.api_key || undefined,
+        config_id: editingItem?.id || undefined,
+      })
       setDialogTestResult(result)
     } catch {
       setDialogTestResult({ success: false, message: '请求失败' })
