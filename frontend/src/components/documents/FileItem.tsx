@@ -170,12 +170,27 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
         )}
 
         {/* 非完成状态指示器 - 底部居中 */}
-        {doc.status !== 'completed' && doc.status !== 'uploading' && (
+        {doc.status !== 'completed' && doc.status !== 'uploading' && doc.status !== 'failed' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
             <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
               {doc.status === 'processing' && <Loader2 className="h-2 w-2 mr-0.5 animate-spin" />}
               {statusLabel(doc.status)}
             </Badge>
+          </div>
+        )}
+
+        {/* 失败状态 - 图标中间显示失败+重试 */}
+        {doc.status === 'failed' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded">
+            <span className="text-[9px] text-red-500 font-medium">失败</span>
+            {onRetry && (
+              <button
+                className="text-[9px] text-red-500 hover:text-red-700 cursor-pointer underline mt-0.5"
+                onClick={(e) => { e.stopPropagation(); onRetry(doc.id) }}
+              >
+                点击重试
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -194,16 +209,6 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
       <p className="text-[9px] text-muted-foreground mt-0.5">
         {formatSize(doc.file_size)}
       </p>
-
-      {/* 失败时显示点击重试 */}
-      {doc.status === 'failed' && onRetry && (
-        <button
-          className="text-[9px] text-red-500 hover:text-red-700 mt-1 cursor-pointer underline"
-          onClick={(e) => { e.stopPropagation(); onRetry(doc.id) }}
-        >
-          点击重试
-        </button>
-      )}
     </div>
   )
 }
