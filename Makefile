@@ -5,13 +5,14 @@
 # Python 解释器（可通过 make install-backend PYTHON=python3.12 覆盖）
 PYTHON ?= python3
 
-# 启动基础设施（Milvus 向量数据库）
+# 启动基础设施（Milvus 向量数据库 + Redis）
 infra:
-	@echo "启动 Milvus 向量数据库..."
-	docker compose up -d etcd minio milvus postgres
-	@echo "等待 Milvus 就绪..."
+	@echo "启动基础设施（Milvus + Redis）..."
+	docker compose up -d etcd minio milvus postgres redis
+	@echo "等待服务就绪..."
 	@sleep 5
 	@echo "Milvus 已启动 (localhost:19530)"
+	@echo "Redis 已启动 (localhost:6379)"
 
 # 停止基础设施
 infra-down:
@@ -151,6 +152,8 @@ docker-export-arm:
 	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_ARM)/milvusdb_milvus_v2.4.6.tar
 	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.18.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_ARM)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
+	docker pull --platform linux/arm64 redis:7-alpine
+	docker save redis:7-alpine -o $(DEPLOY_DIR_ARM)/redis_7-alpine.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_ARM)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_ARM)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_ARM)/
@@ -212,6 +215,8 @@ docker-export-amd64:
 	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_AMD64)/milvusdb_milvus_v2.4.6.tar
 	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.18.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_AMD64)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
+	docker pull --platform linux/amd64 redis:7-alpine
+	docker save redis:7-alpine -o $(DEPLOY_DIR_AMD64)/redis_7-alpine.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_AMD64)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_AMD64)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_AMD64)/
