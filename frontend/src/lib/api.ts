@@ -163,6 +163,8 @@ export const systemApi = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+  getFrontendConfig: () =>
+    request<{ upload_max_concurrent: number; upload_max_file_size_mb: number }>('/system/frontend-config'),
 }
 
 // LLM 模型配置接口

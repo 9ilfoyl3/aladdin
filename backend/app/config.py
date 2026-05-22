@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     pipeline_max_retries: int = 3
     pipeline_slow_threshold_ms: int = 30000
 
+    # 前端配置（通过 /api/system/frontend-config 下发）
+    upload_max_concurrent: int = 3  # 前端并发上传数
+    upload_max_file_size_mb: int = 500  # 单文件最大 MB
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

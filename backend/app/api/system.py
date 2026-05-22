@@ -252,3 +252,19 @@ async def get_queue_stats(request: Request):
     if task_queue is None:
         return QueueStats()
     return await task_queue.get_stats()
+
+
+class FrontendConfigResponse(BaseModel):
+    """前端运行时配置（无需认证，前端启动时拉取）"""
+    upload_max_concurrent: int = 3
+    upload_max_file_size_mb: int = 500
+
+
+@router.get("/frontend-config", response_model=FrontendConfigResponse)
+async def get_frontend_config():
+    """获取前端配置（公开接口，前端启动时拉取）"""
+    settings = get_settings()
+    return FrontendConfigResponse(
+        upload_max_concurrent=settings.upload_max_concurrent,
+        upload_max_file_size_mb=settings.upload_max_file_size_mb,
+    )

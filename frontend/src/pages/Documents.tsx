@@ -20,7 +20,7 @@ import {
   Square,
   X,
 } from 'lucide-react'
-import { documentApi, knowledgeBaseApi, folderApi } from '@/lib/api'
+import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -100,6 +100,13 @@ function Documents() {
   // ============================================================
   // 数据查询
   // ============================================================
+
+  // 获取前端配置
+  const { data: frontendConfig } = useQuery({
+    queryKey: ['frontend-config'],
+    queryFn: () => systemApi.getFrontendConfig(),
+    staleTime: 60000, // 1 分钟内不重复请求
+  })
 
   // 获取知识库信息
   const { data: kb } = useQuery({
@@ -259,17 +266,28 @@ function Documents() {
     setSelectedId(null)
   }
 
-  // 处理文件选择
+  // 处理文件选择（限制并发上传数，避免后端过载）
   function handleFileSelect(files: FileList | null) {
     if (!files) return
-    Array.from(files).forEach((file) => {
+    const fileArray = Array.from(files)
+    const MAX_CONCURRENT = frontendConfig?.upload_max_concurrent ?? 3
+    let index = 0
+
+    function uploadNext() {
+      if (index >= fileArray.length) return
+      const file = fileArray[index++]
       const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`
       setUploadingFiles((prev) => [
         ...prev,
         { id: localId, filename: file.name, file_size: file.size, status: 'uploading' },
       ])
-      uploadMutation.mutate({ file, localId })
-    })
+      uploadMutation.mutate({ file, localId }, { onSettled: uploadNext })
+    }
+
+    // 启动最多 MAX_CONCURRENT 个并行上传
+    for (let i = 0; i < Math.min(MAX_CONCURRENT, fileArray.length); i++) {
+      uploadNext()
+    }
   }
 
   // 处理文件夹选择
