@@ -233,9 +233,9 @@ class PipelineWorker:
                     select(Document.status).where(Document.id == doc_id)
                 )
                 status = result.scalar_one_or_none()
-                # 文档不存在时可能是事务还没提交，不视为已删除
+                # 文档不存在（已被删除），跳过处理
                 if status is None:
-                    return False
+                    return True
                 return status in ("completed", "cancelled")
         except Exception as e:
             print(f"[Worker] ❌ 查询文档状态失败 {doc_id}: {e}")
@@ -243,5 +243,4 @@ class PipelineWorker:
                 "Failed to check document status for %s: %s", doc_id, e
             )
             # 无法确认状态时，继续处理（不跳过）
-            return False
             return False
