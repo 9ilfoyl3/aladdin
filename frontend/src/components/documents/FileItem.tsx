@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   Loader2,
   FileText,
@@ -121,7 +122,9 @@ function getFileExt(filename: string) {
 }
 
 // 文件缩略图预览
-function FileThumbnail({ filename, status }: { filename: string; status: string }) {
+function FileThumbnail({ filename, status, docId }: { filename: string; status: string; docId?: string }) {
+  const [imgFailed, setImgFailed] = useState(false)
+
   if (status === 'uploading') {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -130,7 +133,23 @@ function FileThumbnail({ filename, status }: { filename: string; status: string 
     )
   }
 
-  // 模拟文档预览：骨架线在上，图标在下
+  // 图片和 PDF 文件直接显示缩略图（仅非上传中/排队中状态，且未加载失败）
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  if (['jpg', 'jpeg', 'png', 'pdf'].includes(ext) && docId && !docId.startsWith('local_') && status !== 'pending' && !imgFailed) {
+    return (
+      <div className="w-full h-full">
+        <img
+          src={`/api/documents/${docId}/preview`}
+          alt={filename}
+          className="w-full h-full object-cover rounded-sm"
+          loading="lazy"
+          onError={() => setImgFailed(true)}
+        />
+      </div>
+    )
+  }
+
+  // 降级：骨架线在上，图标在下
   return (
     <div className="w-full h-full flex flex-col items-center p-2.5 pt-3">
       {/* 骨架线条 */}
@@ -162,7 +181,7 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
     >
       {/* 文件缩略图 */}
       <div className="w-16 h-20 rounded bg-white border border-border/60 flex items-center justify-center mb-2.5 relative overflow-hidden shadow-sm">
-        <FileThumbnail filename={doc.filename} status={doc.status} />
+        <FileThumbnail filename={doc.filename} status={doc.status} docId={doc.id} />
 
         {/* 文件类型角标 - 右上角外侧 */}
         {doc.status !== 'uploading' && (
