@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -146,7 +146,7 @@ async def update_knowledge_base(
     update_data = body.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(kb, field, value)
-    kb.updated_at = datetime.now(timezone.utc)
+    kb.updated_at = datetime.utcnow()
 
     await db.flush()
     await db.refresh(kb)

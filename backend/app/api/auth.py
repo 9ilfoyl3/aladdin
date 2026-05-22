@@ -7,7 +7,7 @@ Key 格式: sk- + 48 位随机十六进制字符
 
 import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +66,7 @@ async def verify_key(key: str, session: AsyncSession) -> ApiKey | None:
     await session.execute(
         update(ApiKey)
         .where(ApiKey.id == api_key.id)
-        .values(call_count=ApiKey.call_count + 1, last_used_at=datetime.now(timezone.utc))
+        .values(call_count=ApiKey.call_count + 1, last_used_at=datetime.utcnow())
     )
     await session.commit()
 
