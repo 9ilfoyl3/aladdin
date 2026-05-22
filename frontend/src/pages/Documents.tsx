@@ -492,7 +492,7 @@ function Documents() {
                 {selectedIds.size === documents.length && documents.length > 0 ? '取消全选' : '全选'}
               </Button>
               <Button
-                variant="destructive"
+                variant="default"
                 size="sm"
                 disabled={selectedIds.size === 0}
                 onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true) }}
@@ -688,7 +688,7 @@ function Documents() {
                       }}
                     >
                       {selectionMode && (
-                        <div className="absolute top-1 left-1 z-10">
+                        <div className="absolute -top-1 -left-1 z-10">
                           <div className={`h-5 w-5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
                             selectedIds.has(doc.id)
                               ? 'bg-primary border-primary text-primary-foreground'
@@ -1033,7 +1033,7 @@ function Documents() {
               取消
             </Button>
             <Button
-              variant="destructive"
+              variant="default"
               onClick={() => batchDeleteMutation.mutate(Array.from(selectedIds))}
               disabled={batchDeleteMutation.isPending}
               className="gap-1.5"

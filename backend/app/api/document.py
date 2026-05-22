@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,50 @@ _ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg",
 
 # 上传文件存储目录
 _UPLOAD_DIR = Path("data/uploads")
+
+# 缩略图缓存目录
+_THUMBNAIL_DIR = _UPLOAD_DIR / "thumbnails"
+
+
+def _generate_thumbnail(doc_id: str, file_type: str) -> None:
+    """为文档生成缩略图（同步，适合在后台任务中调用）。
+    支持 PDF（渲染首页）和图片（直接复制/缩放）。
+    """
+    if file_type not in ("pdf", "jpg", "jpeg", "png"):
+        return
+
+    _THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+    thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
+    if thumb_path.exists():
+        return
+
+    file_path = _UPLOAD_DIR / f"{doc_id}.{file_type}"
+    if not file_path.exists():
+        return
+
+    try:
+        if file_type == "pdf":
+            import fitz
+            pdf_doc = fitz.open(str(file_path))
+            page = pdf_doc[0]
+            zoom = 200.0 / page.rect.width
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat)
+            pix.save(str(thumb_path))
+            pdf_doc.close()
+        # 图片类型不需要生成缩略图，preview 接口直接返回原文件
+    except Exception as e:
+        logger.warning("生成缩略图失败 doc_id=%s: %s", doc_id, e)
+
+
+def _delete_thumbnail(doc_id: str) -> None:
+    """删除文档对应的缩略图缓存"""
+    thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
+    if thumb_path.exists():
+        try:
+            os.remove(thumb_path)
+        except OSError:
+            pass
 
 
 # ============================================================
@@ -285,6 +330,9 @@ async def upload_document(
     await db.refresh(doc)
     await db.commit()
 
+    # 生成缩略图（PDF 首页渲染）
+    _generate_thumbnail(doc_id, ext)
+
     # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
     await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
 
@@ -421,6 +469,9 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     if file_path.exists():
         os.remove(file_path)
 
+    # 删除缩略图缓存
+    _delete_thumbnail(doc_id)
+
     # 清除该知识库的检索缓存
     from app.retrieval.cache import get_retrieval_cache
     cache = await get_retrieval_cache()
@@ -527,6 +578,8 @@ async def _batch_cleanup_background(
                 os.remove(file_path)
             except OSError:
                 pass
+        # 删除缩略图缓存
+        _delete_thumbnail(info['id'])
 
     # 清除检索缓存
     from app.retrieval.cache import get_retrieval_cache
@@ -809,6 +862,9 @@ async def upload_folder(
             await db.flush()
             await db.commit()
 
+            # 生成缩略图（PDF 首页渲染）
+            _generate_thumbnail(doc_id, ext)
+
             # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
             await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
 
@@ -838,6 +894,46 @@ async def upload_folder(
         created_folders=created_folders,
         results=results,
     )
+
+
+@router.get("/api/documents/{doc_id}/preview")
+async def preview_document_file(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """预览文档文件缩略图（支持图片和 PDF 首页）"""
+    result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    # 图片类型：直接返回原文件
+    if doc.file_type in ("jpg", "jpeg", "png"):
+        file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type_map.get(doc.file_type, "application/octet-stream"),
+            filename=doc.filename,
+        )
+
+    # PDF 类型：返回缩略图（上传时已预生成，此处兜底）
+    if doc.file_type == "pdf":
+        thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
+
+        # 兜底：如果缩略图不存在则现场生成
+        if not thumb_path.exists():
+            _generate_thumbnail(doc_id, "pdf")
+
+        if not thumb_path.exists():
+            raise HTTPException(status_code=404, detail="缩略图不可用")
+
+        return FileResponse(
+            path=str(thumb_path),
+            media_type="image/png",
+            filename=f"{doc_id}_thumb.png",
+        )
+
+    raise HTTPException(status_code=400, detail="该文件类型不支持预览")
 
 
 @router.get("/api/documents/{doc_id}/chunks", response_model=list[ChunkResponse])
