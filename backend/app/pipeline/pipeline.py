@@ -208,10 +208,15 @@ class DocumentPipeline:
 
                 if enable_cleaner:
                     cleaner = TextCleaner()
+                    # 如果 final_content 经过了嵌入图片 OCR 合并，page_blocks 不再准确
+                    # （page_blocks 只包含 pymupdf 提取的原始文本块，不含图片 OCR 文本）
+                    use_page_blocks = load_result.page_blocks if load_result.page_blocks else None
+                    if final_content != load_result.content:
+                        use_page_blocks = None
                     final_content = cleaner.clean(
                         content=final_content,
                         page_texts=load_result.page_texts if load_result.page_texts else None,
-                        page_blocks=load_result.page_blocks if load_result.page_blocks else None,
+                        page_blocks=use_page_blocks,
                     )
                     logger.info(
                         "文档 %s TextCleaner 去噪完成，文本长度: %d",
