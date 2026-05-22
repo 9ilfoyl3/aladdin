@@ -72,3 +72,27 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_db()
+    # 重置被中断的任务（上次服务重启时正在处理的文档）
+    await _reset_interrupted_tasks()
+
+
+async def _reset_interrupted_tasks() -> None:
+    """重置被中断的任务：将 processing 状态的文档改为 failed
+
+    服务重启时，processing 状态意味着上次处理被中断，不可能自动恢复。
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text(
+                    "UPDATE documents SET status='failed', error_message='服务重启，处理中断' "
+                    "WHERE status='processing'"
+                )
+            )
+            if result.rowcount > 0:
+                _logger.info("重置 %d 个中断的文档为 failed 状态", result.rowcount)
+                print(f"[Init] 重置 {result.rowcount} 个中断的文档为 failed 状态")
+    except Exception as e:
+        _logger.warning("重置中断任务失败: %s", e)

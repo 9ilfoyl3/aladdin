@@ -2,7 +2,12 @@
 
 提供：
 - PipelineWorker 类：从 TaskQueue 消费任务，通过 Semaphore 控制并发，
-  执行 DocumentPipeline 处理，支持失败重试和死信队列。
+  执行 DocumentPipeline 处理，支持失败重试、死信队列、熔断机制。
+
+特性：
+- 启动前健康检查 Embedding 服务，不可用时轮询等待
+- 单个文档处理总超时（默认 30 分钟）
+- 熔断机制：连续 N 次失败后暂停消费，轮询恢复
 """
 
 from __future__ import annotations
@@ -12,8 +17,10 @@ import logging
 import socket
 from typing import TYPE_CHECKING
 
+import httpx
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.pipeline.pipeline import CancelledError
 from app.schema.db import Document
@@ -32,27 +39,19 @@ NON_RETRYABLE_ERRORS = (FileNotFoundError, ValueError, PermissionError, Cancelle
 class PipelineWorker:
     """管道工作进程，消费 Redis Stream 任务
 
-    启动时先 claim_pending() 恢复中断任务，再循环 consume() 新任务。
-    使用 asyncio.Semaphore 控制并发处理文件数。
+    启动时先健康检查 Embedding 服务，通过后 claim_pending() 恢复中断任务，
+    再循环 consume() 新任务。使用 asyncio.Semaphore 控制并发处理文件数。
+    内置熔断机制，连续失败超过阈值时暂停消费。
     """
 
     def __init__(
         self,
         queue: TaskQueue,
-        pipeline: DocumentPipeline,
+        pipeline: "DocumentPipeline",
         db_session_factory: "async_sessionmaker[AsyncSession]",
         max_concurrent: int = 3,
         max_retries: int = 3,
     ):
-        """初始化 PipelineWorker
-
-        Args:
-            queue: Redis Stream 任务队列
-            pipeline: 文档处理管道实例
-            db_session_factory: 异步数据库会话工厂
-            max_concurrent: 最大并发处理文件数
-            max_retries: 最大重试次数
-        """
         self._queue = queue
         self._pipeline = pipeline
         self._db_session_factory = db_session_factory
@@ -63,17 +62,28 @@ class PipelineWorker:
         self._consumer_name = f"worker-{socket.gethostname()}"
         self._tasks: set[asyncio.Task] = set()
 
-    async def start(self) -> None:
-        """启动 Worker 循环：claim pending → consume new
+        # 熔断状态
+        settings = get_settings()
+        self._circuit_breaker_threshold = settings.pipeline_circuit_breaker_threshold
+        self._health_check_interval = settings.pipeline_health_check_interval
+        self._task_timeout = settings.pipeline_task_timeout_minutes * 60  # 转为秒
+        self._consecutive_failures = 0
+        self._circuit_open = False
 
-        1. 输出启动日志
-        2. 恢复中断的 pending 任务
-        3. 循环消费新任务
-        """
+    async def start(self) -> None:
+        """启动 Worker 循环：健康检查 → claim pending → consume new"""
         self._running = True
         logger.info(
-            "Pipeline worker started, max_concurrent=%d", self._max_concurrent
+            "Pipeline worker starting, max_concurrent=%d, task_timeout=%ds, "
+            "circuit_breaker_threshold=%d",
+            self._max_concurrent, self._task_timeout, self._circuit_breaker_threshold,
         )
+
+        # 启动前健康检查 Embedding 服务
+        await self._wait_for_embedding_service()
+
+        logger.info("Pipeline worker started, embedding service available")
+        print("[Worker] Pipeline worker initialized, embedding service healthy")
 
         # 恢复中断的 pending 任务
         try:
@@ -91,6 +101,16 @@ class PipelineWorker:
 
         # 主消费循环
         while self._running:
+            # 熔断检查
+            if self._circuit_open:
+                print("[Worker] ⚡ 熔断中，等待 Embedding 服务恢复...")
+                logger.warning("Circuit breaker OPEN, waiting for embedding service recovery")
+                await self._wait_for_embedding_service()
+                self._circuit_open = False
+                self._consecutive_failures = 0
+                print("[Worker] ✅ Embedding 服务恢复，继续消费")
+                logger.info("Circuit breaker CLOSED, resuming consumption")
+
             try:
                 messages = await self._queue.consume(
                     self._consumer_name, count=1, block_ms=5000
@@ -108,27 +128,48 @@ class PipelineWorker:
                 await asyncio.sleep(5)
 
     async def stop(self) -> None:
-        """停止 Worker
-
-        设置 running=False，等待所有正在处理的任务完成。
-        """
+        """停止 Worker，等待所有正在处理的任务完成。"""
         self._running = False
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    async def _wait_for_embedding_service(self) -> None:
+        """轮询等待 Embedding 服务可用"""
+        attempt = 0
+        while self._running:
+            attempt += 1
+            if await self._ping_embedding():
+                if attempt > 1:
+                    print(f"[Worker] ✅ Embedding 服务恢复（第 {attempt} 次检查）")
+                    logger.info("Embedding service recovered after %d attempts", attempt)
+                return
+            print(
+                f"[Worker] ⏳ Embedding 服务不可用，第 {attempt} 次检查失败，"
+                f"{self._health_check_interval}s 后重试..."
+            )
+            logger.warning(
+                "Embedding health check #%d failed, retrying in %ds...",
+                attempt, self._health_check_interval,
+            )
+            await asyncio.sleep(self._health_check_interval)
+
+    async def _ping_embedding(self) -> bool:
+        """检查 Embedding 服务是否可用（发送一个简单请求）"""
+        try:
+            from app.models.manager import get_model_manager
+            manager = get_model_manager()
+            # 发送一个最小的 embed 请求测试连通性
+            await asyncio.wait_for(
+                manager.embedder.embed(["ping"]),
+                timeout=10.0,
+            )
+            return True
+        except Exception as e:
+            logger.debug("Embedding health check failed: %s", e)
+            return False
+
     async def _process_task(self, message_id: str, msg: TaskMessage) -> None:
-        """处理单个任务
-
-        流程：
-        1. 检查文档状态，已 completed 则跳过（幂等）
-        2. acquire semaphore 控制并发
-        3. 执行 pipeline.process()
-        4. 成功则 ACK，失败则调用 _handle_failure
-
-        Args:
-            message_id: Redis Stream 消息 ID
-            msg: 任务消息
-        """
+        """处理单个任务（带总超时）"""
         # 幂等检查：文档已完成则跳过
         if await self._is_document_completed(msg.doc_id):
             print(f"[Worker] 文档 {msg.doc_id} 已完成/取消/删除，跳过")
@@ -139,38 +180,88 @@ class PipelineWorker:
             await self._queue.ack(message_id)
             return
 
-        print(f"[Worker] 开始处理文档 {msg.doc_id} (trace_id={msg.trace_id})")
+        print(f"[Worker] 📄 开始处理文档 {msg.doc_id} (retry={msg.retry_count}, trace_id={msg.trace_id})")
+        logger.info(
+            "Processing doc_id=%s, retry=%d, trace_id=%s",
+            msg.doc_id, msg.retry_count, msg.trace_id,
+        )
 
         # 通过 semaphore 控制并发
         async with self.semaphore:
             try:
-                await self._pipeline.process(
-                    file_path=msg.file_path,
-                    doc_id=msg.doc_id,
-                    kb_id=msg.kb_id,
+                # 单个文档处理总超时
+                await asyncio.wait_for(
+                    self._pipeline.process(
+                        file_path=msg.file_path,
+                        doc_id=msg.doc_id,
+                        kb_id=msg.kb_id,
+                    ),
+                    timeout=self._task_timeout,
                 )
-                # 处理成功，ACK 消息
+                # 处理成功，ACK 消息，重置熔断计数
                 await self._queue.ack(message_id)
+                self._consecutive_failures = 0
+                print(f"[Worker] ✅ 文档 {msg.doc_id} 处理完成")
                 logger.info(
                     "Task completed: doc_id=%s (trace_id=%s)",
                     msg.doc_id, msg.trace_id,
                 )
+            except asyncio.TimeoutError:
+                error_msg = f"处理超时（超过 {self._task_timeout // 60} 分钟）"
+                print(f"[Worker] ⏰ 文档 {msg.doc_id} {error_msg}")
+                logger.error(
+                    "Task timeout for doc_id=%s (trace_id=%s): %s",
+                    msg.doc_id, msg.trace_id, error_msg,
+                )
+                # 超时直接标记失败，不重试
+                await self._mark_failed(msg.doc_id, error_msg)
+                await self._queue.ack(message_id)
+                self._record_failure()
             except Exception as e:
+                print(f"[Worker] ❌ 文档 {msg.doc_id} 处理失败: {type(e).__name__}: {e}")
+                logger.error(
+                    "Task failed: doc_id=%s, error=%s (trace_id=%s)",
+                    msg.doc_id, e, msg.trace_id,
+                )
+                self._record_failure()
                 await self._handle_failure(message_id, msg, e)
+
+    def _record_failure(self) -> None:
+        """记录失败次数，触发熔断"""
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._circuit_breaker_threshold:
+            self._circuit_open = True
+            logger.error(
+                "Circuit breaker OPEN: %d consecutive failures (threshold=%d)",
+                self._consecutive_failures, self._circuit_breaker_threshold,
+            )
+            print(
+                f"[Worker] ⚡ 熔断触发：连续 {self._consecutive_failures} 次失败"
+            )
+
+    async def _mark_failed(self, doc_id: str, error_message: str) -> None:
+        """将文档标记为失败"""
+        try:
+            async with self._db_session_factory() as session:
+                result = await session.execute(
+                    select(Document).where(Document.id == doc_id)
+                )
+                doc = result.scalar_one_or_none()
+                if doc and doc.status != "completed":
+                    doc.status = "failed"
+                    doc.error_message = error_message
+                    await session.commit()
+        except Exception as e:
+            logger.warning("Failed to mark document %s as failed: %s", doc_id, e)
 
     async def _handle_failure(
         self, message_id: str, msg: TaskMessage, error: Exception
     ) -> None:
         """失败处理
 
-        - 不可重试错误（FileNotFoundError、ValueError、PermissionError）直接进 DLQ
+        - 不可重试错误直接进 DLQ
         - retry_count < max_retries 时指数退避重新入队
         - 否则移入 DLQ
-
-        Args:
-            message_id: Redis Stream 消息 ID
-            msg: 任务消息
-            error: 异常对象
         """
         error_str = f"{type(error).__name__}: {error}"
 
@@ -180,25 +271,26 @@ class PipelineWorker:
                 "Non-retryable error for doc_id=%s, moving to DLQ: %s (trace_id=%s)",
                 msg.doc_id, error_str, msg.trace_id,
             )
+            await self._mark_failed(msg.doc_id, error_str)
             await self._queue.move_to_dlq(message_id, msg, error_str)
             return
 
         # 检查重试次数
         next_retry = msg.retry_count + 1
         if next_retry <= self._max_retries:
-            # 指数退避：delay = 2^(retry_count - 1)，retry_count 从 1 开始
             delay = 2 ** (next_retry - 1)  # 1s, 2s, 4s
+            print(
+                f"[Worker] 🔄 文档 {msg.doc_id} 第 {next_retry}/{self._max_retries} 次重试，"
+                f"{delay}s 后重新入队"
+            )
             logger.warning(
                 "Task failed for doc_id=%s (retry %d/%d), "
                 "retrying in %ds: %s (trace_id=%s)",
                 msg.doc_id, next_retry, self._max_retries,
                 delay, error_str, msg.trace_id,
             )
-            # ACK 当前消息
             await self._queue.ack(message_id)
-            # 等待退避时间后重新入队
             await asyncio.sleep(delay)
-            # 重新入队，增加 retry_count
             retry_msg = TaskMessage(
                 doc_id=msg.doc_id,
                 kb_id=msg.kb_id,
@@ -209,38 +301,27 @@ class PipelineWorker:
             )
             await self._queue.enqueue(retry_msg)
         else:
-            # 超过最大重试次数，移入 DLQ
+            print(f"[Worker] 💀 文档 {msg.doc_id} 重试 {self._max_retries} 次后放弃，进入死信队列")
             logger.error(
                 "Max retries exceeded for doc_id=%s, moving to DLQ: %s (trace_id=%s)",
                 msg.doc_id, error_str, msg.trace_id,
             )
+            await self._mark_failed(msg.doc_id, f"重试 {self._max_retries} 次后失败: {error_str}")
             await self._queue.move_to_dlq(message_id, msg, error_str)
 
     async def _is_document_completed(self, doc_id: str) -> bool:
-        """检查文档是否应跳过处理
-
-        跳过条件：文档已完成、已取消、或已被删除（不存在）。
-
-        Args:
-            doc_id: 文档 ID
-
-        Returns:
-            True 如果文档应跳过处理
-        """
+        """检查文档是否应跳过处理"""
         try:
             async with self._db_session_factory() as session:
                 result = await session.execute(
                     select(Document.status).where(Document.id == doc_id)
                 )
                 status = result.scalar_one_or_none()
-                # 文档不存在 = 已被删除，应跳过
                 if status is None:
                     return True
                 return status in ("completed", "cancelled")
         except Exception as e:
-            print(f"[Worker] ❌ 查询文档状态失败 {doc_id}: {e}")
             logger.warning(
                 "Failed to check document status for %s: %s", doc_id, e
             )
-            # 无法确认状态时，继续处理（不跳过）
             return False
