@@ -70,7 +70,12 @@ class DocumentPipeline:
         self.ocr_manager = ocr_manager
         # 初始化管道各节点
         self.enricher = Enricher(llm=None, enabled=False)
-        self.embedder = PipelineEmbedder(embed_provider=model_manager.embedder)
+        settings = get_settings()
+        self.embedder = PipelineEmbedder(
+            model_manager=model_manager,
+            batch_size=settings.pipeline_embed_batch_size,
+            concurrency=settings.pipeline_embed_concurrency,
+        )
 
     async def process(
         self, file_path: str, doc_id: str, kb_id: str, trace_id: str | None = None

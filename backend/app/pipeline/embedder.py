@@ -28,17 +28,26 @@ class PipelineEmbedder:
     # BGE-M3 支持 8192 tokens，中文约 1.5 字符/token，保守取 8000 字符
     MAX_EMBED_CHARS = 8000
 
-    def __init__(self, embed_provider: EmbedProvider, batch_size: int = 128, concurrency: int = 8):
+    def __init__(self, embed_provider: EmbedProvider = None, batch_size: int = 128, concurrency: int = 8, model_manager=None):
         """初始化向量化器
 
         Args:
-            embed_provider: 向量嵌入模型 Provider 实例
+            embed_provider: 向量嵌入模型 Provider 实例（直接引用，不推荐）
             batch_size: 每批处理的文本数量，控制内存占用
             concurrency: 并发请求数，控制对 embedding 服务的并行调用
+            model_manager: ModelManager 实例，优先使用（动态获取最新 embedder）
         """
-        self.provider = embed_provider
+        self._model_manager = model_manager
+        self._direct_provider = embed_provider
         self.batch_size = batch_size
         self.concurrency = concurrency
+
+    @property
+    def provider(self) -> EmbedProvider:
+        """动态获取最新的 embed provider（支持热更新）"""
+        if self._model_manager is not None:
+            return self._model_manager.embedder
+        return self._direct_provider
 
     @staticmethod
     def _sanitize_texts(texts: list[str]) -> list[str]:
@@ -124,11 +133,12 @@ class PipelineEmbedder:
                 dense = await self.provider.embed(batch)
                 sparse = await self.provider.embed_sparse(batch)
                 results[batch_idx] = (dense, sparse)
-            # 进度报告
+            # 让出事件循环，避免长时间占用导致 API 无响应
+            await asyncio.sleep(0)
+            # 进度报告（每批都输出）
             async with progress_lock:
                 completed_count += 1
-                if total_batches > 10 and completed_count % max(1, total_batches // 10) == 0:
-                    print(f"[Embedder] 进度: {completed_count}/{total_batches} 批 ({completed_count * 100 // total_batches}%)")
+                print(f"[Embedder] 批次 {completed_count}/{total_batches} 完成 ({completed_count * 100 // total_batches}%，本批 {len(batch)} 个文本)")
 
         # 一次性提交所有任务，semaphore 自动控制并发窗口
         await asyncio.gather(*[_process_batch(i, batch) for i, batch in enumerate(batches)])
