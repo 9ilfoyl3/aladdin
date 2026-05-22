@@ -24,7 +24,9 @@ from app.models.provider import LLMProvider
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
 from app.retrieval.base import RetrievalResult
+from app.retrieval.filter import RetrievalFilter
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.multi_kb import KBRetrievalConfig, MultiKBRetriever, MultiKBSearchResult
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.vector import VectorRetriever
 from app.schema.api import (
@@ -214,8 +216,43 @@ async def _get_retrieval_mode(kb_id: str, request_mode: str | None) -> str:
     return "agent"
 
 
+async def _retrieve_multi_kb(
+    query: str,
+    kb_ids: list[str],
+    filter_obj: RetrievalFilter | None = None,
+) -> tuple[list[RetrievalResult], bool]:
+    """多知识库联合检索
+
+    第一个 kb_id 为主库 (priority=1.0)，其余为辅助库 (priority=0.8)。
+    返回 (检索结果, 是否降级)。
+    """
+    # 构建知识库配置
+    kb_configs = []
+    for i, kb_id in enumerate(kb_ids):
+        priority = 1.0 if i == 0 else 0.8
+        kb_configs.append(KBRetrievalConfig(kb_id=kb_id, priority=priority))
+
+    # 构建 HybridRetriever
+    manager = get_model_manager()
+    milvus = _get_milvus_client()
+    vector_retriever = VectorRetriever(manager.embedder, milvus)
+    sparse_retriever = SparseRetriever(manager.embedder, milvus)
+    hybrid_retriever = HybridRetriever(
+        vector_retriever=vector_retriever,
+        sparse_retriever=sparse_retriever,
+        rerank_provider=manager.reranker,
+        db_session_factory=async_session,
+    )
+
+    # 使用 MultiKBRetriever 执行联合检索
+    multi_kb = MultiKBRetriever(hybrid_retriever)
+    multi_result: MultiKBSearchResult = await multi_kb.search(query, kb_configs, top_k=30, filters=filter_obj)
+    return multi_result.results, multi_result.degraded
+
+
 async def _retrieve_chunks(
-    query: str, kb_id: str, mode: str, llm: LLMProvider, progress_queue: asyncio.Queue | None = None
+    query: str, kb_id: str, mode: str, llm: LLMProvider, progress_queue: asyncio.Queue | None = None,
+    expr: str | None = None,
 ) -> tuple[list[RetrievalResult], bool]:
     """根据模式执行检索，返回 (检索结果, 是否降级)
 
@@ -244,7 +281,7 @@ async def _retrieve_chunks(
     if mode == "direct":
         # 直检索：仅稠密向量
         retriever = VectorRetriever(manager.embedder, milvus)
-        results = await retriever.search(query, kb_id, top_k=30)
+        results = await retriever.search(query, kb_id, top_k=30, expr=expr)
         # 写入缓存
         if cache:
             await cache.set(kb_id, query, mode, results)
@@ -279,7 +316,7 @@ async def _retrieve_chunks(
             if progress_queue:
                 await progress_queue.put({"type": "agent_progress", "step": step, "detail": detail})
 
-        agent_result: AgentResult = await orchestrator.run(query, kb_id, on_progress=on_progress)
+        agent_result: AgentResult = await orchestrator.run(query, kb_id, on_progress=on_progress, expr=expr)
         return agent_result.chunks, agent_result.degraded
 
     else:
@@ -292,7 +329,7 @@ async def _retrieve_chunks(
             rerank_provider=manager.reranker,
             db_session_factory=async_session,
         )
-        results = await hybrid_retriever.search(query, kb_id, top_k=30)
+        results = await hybrid_retriever.search(query, kb_id, top_k=30, expr=expr)
         # 写入缓存
         if cache:
             await cache.set(kb_id, query, mode, results)
@@ -321,6 +358,8 @@ async def _stream_response(
     stream_enabled: bool = True,
     max_context_tokens: int | None = None,
     thinking_enabled: bool = False,
+    expr: str | None = None,
+    kb_ids: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -329,13 +368,22 @@ async def _stream_response(
     chunks: list[RetrievalResult] = []
     degraded = False
 
-    if kb_id and mode == "agent":
+    if kb_ids:
+        # 多知识库联合检索
+        try:
+            filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
+            chunks, degraded = await _retrieve_multi_kb(query, kb_ids, filter_obj)
+        except Exception as e:
+            logger.error("多知识库联合检索失败: %s", e)
+            chunks = []
+
+    elif kb_id and mode == "agent":
         # 使用队列实现进度推送
         progress_queue: asyncio.Queue = asyncio.Queue()
 
         # 启动检索任务
         retrieve_task = asyncio.create_task(
-            _retrieve_chunks(query, kb_id, mode, llm, progress_queue=progress_queue)
+            _retrieve_chunks(query, kb_id, mode, llm, progress_queue=progress_queue, expr=expr)
         )
 
         # 持续读取进度事件并推送给前端
@@ -357,7 +405,7 @@ async def _stream_response(
     elif kb_id:
         # 非 agent 模式：直接检索，无进度事件
         try:
-            chunks, degraded = await _retrieve_chunks(query, kb_id, mode, llm)
+            chunks, degraded = await _retrieve_chunks(query, kb_id, mode, llm, expr=expr)
         except Exception as e:
             logger.error("检索失败: %s", e)
             chunks = []
@@ -454,6 +502,13 @@ async def chat_completions(request: ChatCompletionRequest):
 
     print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
 
+    # 构造过滤条件
+    filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
+    expr = filter_obj.to_milvus_expr()
+
+    # 判断是否使用多知识库联合检索
+    use_multi_kb = bool(request.kb_ids)
+
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
     degraded = False
@@ -461,14 +516,21 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None),
             media_type="text/event-stream",
         )
 
     # 非流式响应
-    if request.knowledge_base_id:
+    if use_multi_kb:
+        # 多知识库联合检索
         try:
-            chunks, degraded = await _retrieve_chunks(user_query, request.knowledge_base_id, mode, llm)
+            chunks, degraded = await _retrieve_multi_kb(user_query, request.kb_ids, filter_obj)
+        except Exception as e:
+            logger.error("多知识库联合检索失败: %s", e)
+            raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
+    elif request.knowledge_base_id:
+        try:
+            chunks, degraded = await _retrieve_chunks(user_query, request.knowledge_base_id, mode, llm, expr=expr)
         except Exception as e:
             logger.error("检索失败: %s", e)
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")

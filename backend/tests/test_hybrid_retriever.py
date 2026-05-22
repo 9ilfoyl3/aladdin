@@ -204,3 +204,80 @@ async def test_rerank_reorders_results():
     # 反转 reranker 会把最后一个排到第一位
     assert results[0].chunk_id == "c2"
     assert results[1].chunk_id == "c1"
+
+
+@pytest.mark.asyncio
+async def test_rrf_fusion_table_type_downweight():
+    """测试 RRF 融合对 table 类型施加 0.8 降权"""
+    # c1 是 text 类型，c2 是 table 类型，两者在同一位置（rank=0）
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="文本内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0, "element_type": "text"}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="表格内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1, "element_type": "table"}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+
+    # 直接测试 RRF 融合
+    fused = hybrid._rrf_fusion([dense_results, sparse_results])
+
+    # c1 (text) 和 c2 (table) 都在 rank=0，基础 RRF 分数相同
+    # 但 c2 是 table 类型，被施加 0.8 降权，所以 c1 排在前面
+    assert fused[0].chunk_id == "c1"
+    assert fused[1].chunk_id == "c2"
+
+
+@pytest.mark.asyncio
+async def test_rrf_fusion_custom_type_weights():
+    """测试 RRF 融合支持自定义 type_weights"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="文本内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0, "element_type": "text"}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="标题内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1, "element_type": "title"}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+
+    # 使用自定义权重：title 降权 0.5
+    fused = hybrid._rrf_fusion([dense_results, sparse_results], type_weights={"title": 0.5})
+
+    # c2 是 title 类型，被施加 0.5 降权，所以 c1 排在前面
+    assert fused[0].chunk_id == "c1"
+    assert fused[1].chunk_id == "c2"
+
+
+@pytest.mark.asyncio
+async def test_rrf_fusion_no_element_type_defaults_to_text():
+    """测试 RRF 融合：metadata 中无 element_type 时默认为 text（权重 1.0）"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="内容1", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="内容2", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1, "element_type": "table"}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+
+    # c1 无 element_type（默认 text，权重 1.0），c2 是 table（权重 0.8）
+    fused = hybrid._rrf_fusion([dense_results, sparse_results])
+
+    # c1 分数不变，c2 被降权，c1 排在前面
+    assert fused[0].chunk_id == "c1"
+    assert fused[1].chunk_id == "c2"

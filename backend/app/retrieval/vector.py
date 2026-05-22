@@ -21,7 +21,7 @@ class VectorRetriever(BaseRetriever):
         self.milvus = milvus_client
 
     async def search(
-        self, query: str, kb_id: str, top_k: int = 10, **kwargs
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
     ) -> list[RetrievalResult]:
         """执行稠密向量检索
 
@@ -32,7 +32,7 @@ class VectorRetriever(BaseRetriever):
         query_vector = vectors[0]
 
         # 2. 在 Milvus 中执行稠密向量搜索
-        hits = await self.milvus.search_dense(kb_id, query_vector, top_k)
+        hits = await self.milvus.search_dense(kb_id, query_vector, top_k, expr=expr)
 
         # 3. 转换为 RetrievalResult 并按分数降序排列
         results = [
@@ -44,6 +44,7 @@ class VectorRetriever(BaseRetriever):
                 metadata={
                     "parent_id": hit.get("parent_id", ""),
                     "chunk_index": hit.get("chunk_index", 0),
+                    "element_type": hit.get("element_type", "text"),
                 },
             )
             for hit in hits

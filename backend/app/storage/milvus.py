@@ -24,6 +24,9 @@ _FIELDS = [
     FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
     FieldSchema(name="parent_id", dtype=DataType.VARCHAR, max_length=64),
     FieldSchema(name="chunk_index", dtype=DataType.INT64),
+    # scalar 字段，用于 pre-filter 过滤检索
+    FieldSchema(name="file_type", dtype=DataType.VARCHAR, max_length=20),
+    FieldSchema(name="element_type", dtype=DataType.VARCHAR, max_length=20),
 ]
 
 # 索引配置
@@ -69,16 +72,18 @@ class MilvusClient:
         return await asyncio.to_thread(self._insert_sync, kb_id, data)
 
     async def search_dense(
-        self, kb_id: str, vector: list[float], top_k: int = 10
+        self, kb_id: str, vector: list[float], top_k: int = 10,
+        expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """稠密向量相似度搜索"""
-        return await asyncio.to_thread(self._search_dense_sync, kb_id, vector, top_k)
+        return await asyncio.to_thread(self._search_dense_sync, kb_id, vector, top_k, expr)
 
     async def search_sparse(
-        self, kb_id: str, sparse_vector: dict[int, float], top_k: int = 10
+        self, kb_id: str, sparse_vector: dict[int, float], top_k: int = 10,
+        expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """稀疏向量搜索"""
-        return await asyncio.to_thread(self._search_sparse_sync, kb_id, sparse_vector, top_k)
+        return await asyncio.to_thread(self._search_sparse_sync, kb_id, sparse_vector, top_k, expr)
 
     async def delete(self, kb_id: str, chunk_ids: list[str]) -> None:
         """按 chunk_id 列表删除数据"""
@@ -91,6 +96,17 @@ class MilvusClient:
     async def has_collection(self, kb_id: str) -> bool:
         """检查 collection 是否存在"""
         return await asyncio.to_thread(self._has_collection_sync, kb_id)
+
+    async def check_schema_version(self, kb_id: str) -> dict:
+        """检查 collection 的 schema 版本
+
+        Returns:
+            dict with keys:
+            - exists: bool - collection 是否存在
+            - has_new_fields: bool - 是否包含 file_type/element_type 字段
+            - field_names: list[str] - 当前所有字段名
+        """
+        return await asyncio.to_thread(self._check_schema_version_sync, kb_id)
 
     # ------------------------------------------------------------------
     # 同步实现
@@ -118,6 +134,15 @@ class MilvusClient:
             field_name="sparse_vector",
             index_params=_SPARSE_INDEX_PARAMS,
         )
+        # 创建 scalar 索引，用于 pre-filter 过滤检索
+        collection.create_index(
+            field_name="file_type",
+            index_name="idx_file_type",
+        )
+        collection.create_index(
+            field_name="element_type",
+            index_name="idx_element_type",
+        )
 
         logger.info("Collection %s 创建完成", name)
 
@@ -131,7 +156,8 @@ class MilvusClient:
         return result.insert_count
 
     def _search_dense_sync(
-        self, kb_id: str, vector: list[float], top_k: int
+        self, kb_id: str, vector: list[float], top_k: int,
+        expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """同步稠密向量搜索"""
         self._connect()
@@ -139,18 +165,23 @@ class MilvusClient:
         collection = Collection(name=name, using=self._alias)
         collection.load()
 
-        results = collection.search(
-            data=[vector],
-            anns_field="dense_vector",
-            param={"metric_type": "COSINE", "params": {"ef": 128}},
-            limit=top_k,
-            output_fields=["chunk_id", "doc_id", "content", "parent_id", "chunk_index"],
-        )
+        search_kwargs: dict[str, Any] = {
+            "data": [vector],
+            "anns_field": "dense_vector",
+            "param": {"metric_type": "COSINE", "params": {"ef": 128}},
+            "limit": top_k,
+            "output_fields": ["chunk_id", "doc_id", "content", "parent_id", "chunk_index", "file_type", "element_type"],
+        }
+        if expr is not None:
+            search_kwargs["expr"] = expr
+
+        results = collection.search(**search_kwargs)
 
         return self._parse_search_results(results)
 
     def _search_sparse_sync(
-        self, kb_id: str, sparse_vector: dict[int, float], top_k: int
+        self, kb_id: str, sparse_vector: dict[int, float], top_k: int,
+        expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """同步稀疏向量搜索"""
         self._connect()
@@ -158,13 +189,17 @@ class MilvusClient:
         collection = Collection(name=name, using=self._alias)
         collection.load()
 
-        results = collection.search(
-            data=[sparse_vector],
-            anns_field="sparse_vector",
-            param={"metric_type": "IP"},
-            limit=top_k,
-            output_fields=["chunk_id", "doc_id", "content", "parent_id", "chunk_index"],
-        )
+        search_kwargs: dict[str, Any] = {
+            "data": [sparse_vector],
+            "anns_field": "sparse_vector",
+            "param": {"metric_type": "IP"},
+            "limit": top_k,
+            "output_fields": ["chunk_id", "doc_id", "content", "parent_id", "chunk_index", "file_type", "element_type"],
+        }
+        if expr is not None:
+            search_kwargs["expr"] = expr
+
+        results = collection.search(**search_kwargs)
 
         return self._parse_search_results(results)
 
@@ -197,6 +232,31 @@ class MilvusClient:
         name = self._collection_name(kb_id)
         return utility.has_collection(name, using=self._alias)
 
+    def _check_schema_version_sync(self, kb_id: str) -> dict:
+        """同步检查 schema 版本
+
+        Returns:
+            dict with keys:
+            - exists: bool - collection 是否存在
+            - has_new_fields: bool - 是否包含 file_type/element_type 字段
+            - field_names: list[str] - 当前所有字段名
+        """
+        self._connect()
+        name = self._collection_name(kb_id)
+
+        if not utility.has_collection(name, using=self._alias):
+            return {"exists": False, "has_new_fields": False, "field_names": []}
+
+        collection = Collection(name=name, using=self._alias)
+        field_names = [field.name for field in collection.schema.fields]
+        has_new_fields = "file_type" in field_names and "element_type" in field_names
+
+        return {
+            "exists": True,
+            "has_new_fields": has_new_fields,
+            "field_names": field_names,
+        }
+
     # ------------------------------------------------------------------
     # 工具方法
     # ------------------------------------------------------------------
@@ -213,6 +273,8 @@ class MilvusClient:
                     "content": hit.entity.get("content"),
                     "parent_id": hit.entity.get("parent_id"),
                     "chunk_index": hit.entity.get("chunk_index"),
+                    "file_type": hit.entity.get("file_type"),
+                    "element_type": hit.entity.get("element_type"),
                     "score": hit.score,
                 })
         return hits

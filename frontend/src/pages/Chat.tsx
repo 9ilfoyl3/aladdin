@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Send, ChevronDown, Bot, Database, Cpu, FileText } from 'lucide-react'
+import { Send, ChevronDown, Bot, Database, Cpu, FileText, Check, Library } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { knowledgeBaseApi, llmConfigApi } from '@/lib/api'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -54,10 +54,13 @@ function Chat() {
   const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [retrievalMode, setRetrievalMode] = useState('auto')
+  const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
+  const [kbDropdownOpen, setKbDropdownOpen] = useState(false)
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const kbDropdownRef = useRef<HTMLDivElement>(null)
 
   // 获取知识库列表
   const { data: knowledgeBases = [] } = useQuery({
@@ -104,6 +107,26 @@ function Chat() {
     }
   }, [input])
 
+  // 点击外部关闭知识库多选下拉
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (kbDropdownRef.current && !kbDropdownRef.current.contains(e.target as Node)) {
+        setKbDropdownOpen(false)
+      }
+    }
+    if (kbDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [kbDropdownOpen])
+
+  // 切换辅助知识库选中状态
+  function toggleAuxiliaryKb(kbId: string) {
+    setAuxiliaryKbIds((prev) =>
+      prev.includes(kbId) ? prev.filter((id) => id !== kbId) : [...prev, kbId]
+    )
+  }
+
   // 发送消息
   async function handleSend() {
     const query = input.trim()
@@ -118,6 +141,14 @@ function Chat() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
+      // 构造 kb_ids：主库在前，辅助库在后
+      let kbIds: string[] | undefined = undefined
+      if (selectedKb && auxiliaryKbIds.length > 0) {
+        kbIds = [selectedKb, ...auxiliaryKbIds.filter((id) => id !== selectedKb)]
+      } else if (!selectedKb && auxiliaryKbIds.length > 0) {
+        kbIds = auxiliaryKbIds
+      }
+
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -128,6 +159,7 @@ function Chat() {
           knowledge_base_id: selectedKb || undefined,
           model_config_id: selectedModel || undefined,
           retrieval_mode: retrievalMode === 'auto' ? undefined : retrievalMode,
+          kb_ids: kbIds,
         }),
       })
 
@@ -504,6 +536,45 @@ function Chat() {
                     <SelectItem value="hybrid">快速检索</SelectItem>
                   </SelectContent>
                 </Select>
+
+                {/* 关联知识库多选 */}
+                <div className="relative" ref={kbDropdownRef}>
+                  <button
+                    onClick={() => setKbDropdownOpen((prev) => !prev)}
+                    className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors"
+                  >
+                    <Library className="h-3 w-3 shrink-0" />
+                    <span>关联知识库</span>
+                    {auxiliaryKbIds.length > 0 && (
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
+                        {auxiliaryKbIds.length}
+                      </Badge>
+                    )}
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                  {kbDropdownOpen && (
+                    <div className="absolute bottom-full mb-1 left-0 z-50 min-w-[180px] max-h-[200px] overflow-auto rounded-md border bg-popover p-1 shadow-md animate-in fade-in-0 zoom-in-95">
+                      {knowledgeBases.length === 0 ? (
+                        <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
+                      ) : (
+                        knowledgeBases
+                          .filter((kb) => kb.id !== selectedKb)
+                          .map((kb) => (
+                            <button
+                              key={kb.id}
+                              onClick={() => toggleAuxiliaryKb(kb.id)}
+                              className="relative flex w-full cursor-pointer select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-xs outline-none hover:bg-accent hover:text-accent-foreground transition-colors"
+                            >
+                              <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+                                {auxiliaryKbIds.includes(kb.id) && <Check className="h-3.5 w-3.5 text-primary" />}
+                              </span>
+                              <span className="truncate">{kb.name}</span>
+                            </button>
+                          ))
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* 右侧：模型选择 + 发送 */}
