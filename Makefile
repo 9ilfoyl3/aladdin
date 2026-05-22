@@ -28,6 +28,11 @@ dev-backend:
 	@echo "启动后端 (http://localhost:8000)..."
 	cd backend && ../.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
+# 启动 Worker 开发服务
+dev-worker:
+	@echo "启动 Pipeline Worker..."
+	cd backend && ../.venv/bin/python -m app.worker_main
+
 # 启动前端开发服务
 dev-frontend:
 	@echo "启动前端 (http://localhost:5173)..."

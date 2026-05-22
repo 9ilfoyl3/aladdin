@@ -123,6 +123,43 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  worker:
+    image: ${IMAGE_BACKEND:-aladdin-backend:latest}
+    command: ["python", "-m", "app.worker_main"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-remote}
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-}
+      - EMBED_API_KEY=${EMBED_API_KEY:-}
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-remote}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
+      - RERANK_MODEL=${RERANK_MODEL:-}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - REDIS_URL=redis://redis:6379/0
+      - PIPELINE_MAX_CONCURRENT=${PIPELINE_MAX_CONCURRENT:-3}
+      - PIPELINE_MAX_RETRIES=${PIPELINE_MAX_RETRIES:-3}
+      - PIPELINE_EMBED_BATCH_SIZE=${PIPELINE_EMBED_BATCH_SIZE:-128}
+      - PIPELINE_EMBED_CONCURRENCY=${PIPELINE_EMBED_CONCURRENCY:-8}
+      - PIPELINE_TASK_TIMEOUT_MINUTES=${PIPELINE_TASK_TIMEOUT_MINUTES:-30}
+      - PIPELINE_CIRCUIT_BREAKER_THRESHOLD=${PIPELINE_CIRCUIT_BREAKER_THRESHOLD:-5}
+      - PIPELINE_HEALTH_CHECK_INTERVAL=${PIPELINE_HEALTH_CHECK_INTERVAL:-30}
+    volumes:
+      - upload_data:/app/data
+      - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   frontend:
     image: ${IMAGE_FRONTEND:-aladdin-frontend:latest}
     ports:

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化数据库，加载模型配置，启动 Pipeline Worker"""
+    """应用生命周期：启动时初始化数据库，加载模型配置"""
     await init_db()
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await _load_active_embed_configs()
@@ -35,106 +35,38 @@ async def lifespan(app: FastAPI):
     # 启动时补偿清理：删除孤儿上传文件（DB 记录已删除但文件残留的情况）
     asyncio.create_task(_cleanup_orphan_files())
 
-    # 初始化 TaskQueue 和 PipelineWorker
-    await _start_pipeline_worker(app)
+    # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
+    await _init_task_queue(app)
 
     yield
 
-    # 关闭 Pipeline Worker
-    await _stop_pipeline_worker(app)
+    # 关闭 TaskQueue 连接
+    await _close_task_queue(app)
 
 
-async def _start_pipeline_worker(app: FastAPI) -> None:
-    """启动 Pipeline Worker
-
-    尝试连接 Redis 并创建 TaskQueue。如果 Redis 不可用，
-    跳过 Worker 启动，仅使用降级模式（asyncio.create_task）。
-    """
-    from app.models.manager import get_model_manager
-    from app.pipeline.pipeline import DocumentPipeline
+async def _init_task_queue(app: FastAPI) -> None:
+    """初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）"""
     from app.pipeline.queue import TaskQueue
-    from app.pipeline.worker import PipelineWorker
-    from app.storage.database import async_session
-    from app.storage.milvus import MilvusClient
 
     settings = get_settings()
-
-    # 尝试创建 TaskQueue（Redis 不可用时返回 None）
     task_queue = await TaskQueue.create(settings.redis_url)
     app.state.task_queue = task_queue
 
     if task_queue is not None:
-        try:
-            # 创建 DocumentPipeline 实例
-            model_manager = get_model_manager()
-            milvus_client = MilvusClient(
-                host=settings.milvus_host, port=settings.milvus_port
-            )
-
-            # 从数据库加载 OCR 配置
-            from app.pipeline.ocr.manager import OCRManager
-            from app.schema.db import OCRConfig
-            from sqlalchemy import select
-
-            ocr_manager = None
-            async with async_session() as session:
-                result = await session.execute(select(OCRConfig))
-                configs = result.scalars().all()
-            if configs:
-                ocr_manager = OCRManager(configs)
-
-            pipeline = DocumentPipeline(
-                model_manager=model_manager,
-                milvus_client=milvus_client,
-                db_session_factory=async_session,
-                ocr_manager=ocr_manager,
-            )
-
-            # 创建并启动 PipelineWorker
-            worker = PipelineWorker(
-                queue=task_queue,
-                pipeline=pipeline,
-                db_session_factory=async_session,
-                max_concurrent=settings.pipeline_max_concurrent,
-                max_retries=settings.pipeline_max_retries,
-            )
-            app.state.pipeline_worker = worker
-
-            # 以后台任务方式启动 Worker
-            worker_task = asyncio.create_task(worker.start())
-            app.state.pipeline_worker_task = worker_task
-            print(f"[Worker] Pipeline worker initialized, max_concurrent={settings.pipeline_max_concurrent}")
-            logger.info("Pipeline worker initialized and started")
-        except Exception as e:
-            logger.error("Failed to start pipeline worker: %s", e, exc_info=True)
-            print(f"[Worker] ❌ Failed to start pipeline worker: {e}")
-            app.state.task_queue = task_queue  # 保留 queue 用于入队
-            app.state.pipeline_worker = None
-            app.state.pipeline_worker_task = None
+        print("[API] TaskQueue 已连接 Redis，文档任务将入队由独立 Worker 处理")
+        logger.info("TaskQueue connected to Redis")
     else:
-        print("[Worker] ⚠️ Redis unavailable, using fallback mode (asyncio.create_task)")
-        logger.warning(
-            "Redis unavailable, pipeline worker not started, using fallback mode"
-        )
-        app.state.task_queue = None
-        app.state.pipeline_worker = None
-        app.state.pipeline_worker_task = None
+        print("[API] ⚠️ Redis 不可用，文档上传后将使用降级模式处理")
+        logger.warning("Redis unavailable, using fallback mode")
 
 
-async def _stop_pipeline_worker(app: FastAPI) -> None:
-    """停止 Pipeline Worker"""
-    worker = getattr(app.state, "pipeline_worker", None)
-    if worker is not None:
-        await worker.stop()
-        logger.info("Pipeline worker stopped")
-
-    # 取消 worker task（如果仍在运行）
-    worker_task = getattr(app.state, "pipeline_worker_task", None)
-    if worker_task is not None and not worker_task.done():
-        worker_task.cancel()
+async def _close_task_queue(app: FastAPI) -> None:
+    """关闭 TaskQueue 连接"""
+    queue = getattr(app.state, "task_queue", None)
+    if queue is not None and hasattr(queue, '_redis'):
         try:
-            await worker_task
-        except asyncio.CancelledError:
+            await queue._redis.aclose()
+        except Exception:
             pass
 
 

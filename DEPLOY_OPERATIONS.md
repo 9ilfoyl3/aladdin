@@ -60,8 +60,9 @@ tar -czf models.tar.gz -C $HF_CACHE models--BAAI--bge-m3 models--BAAI--bge-reran
 
 ```
 deploy-amd64/ 或 deploy-arm64/
-├── app.tar           ← 应用镜像
-├── infra.tar         ← 中间件（首次才有）
+├── app.tar            ← 应用镜像（backend + frontend）
+├── infra.tar          ← 中间件镜像（首次才有）
+├── nginx.conf         ← nginx 配置（挂载到 frontend 容器）
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -83,16 +84,18 @@ mkdir -p /opt/models
 tar -xzf models.tar.gz -C /opt/models
 
 cp .env.example .env
-vim .env
+vim .env                                # 必须配置 EMBED/RERANK 相关项
 docker compose up -d
 ```
+
+> **注意：** 首次启动后需等待所有服务 healthy（约 30 秒），Worker 会自动检测 Embedding 服务可用后开始消费。
 
 ### 更新
 
 ```bash
 cd /opt/aladdin
 docker load -i app.tar
-docker compose up -d --force-recreate backend frontend
+docker compose up -d --force-recreate backend worker frontend
 docker image prune -f
 ```
 
@@ -106,10 +109,14 @@ docker image prune -f
 EMBED_PROVIDER=remote
 EMBED_BASE_URL=http://Embedding服务地址/v1
 EMBED_MODEL=模型名
+EMBED_API_KEY=密钥
 RERANK_PROVIDER=remote
-RERANK_BASE_URL=http://Rerank服务地址/v1
+RERANK_BASE_URL=http://Rerank服务地址/ranking_score
 RERANK_MODEL=模型名
+RERANK_API_KEY=密钥
 ```
+
+> `.env` 中的 Embedding/Rerank 配置是兜底值。启动后可在前端"Embedding"页面管理，数据库配置优先级更高。
 
 ### 挂载模型 — GPU（AMD64 + NVIDIA）
 
@@ -166,27 +173,79 @@ FRONTEND_PORT=8888
 
 ```bash
 docker compose ps                                       # 状态
-docker compose logs backend -f                          # 日志
-docker compose restart backend                          # 重启
+docker compose logs backend -f                          # API 日志
+docker compose logs worker -f                           # Worker 日志（文档处理）
+docker compose restart backend                          # 重启 API
+docker compose restart worker                           # 重启 Worker
 docker compose down                                     # 停止
 docker compose down -v                                  # 清数据（慎用）
 docker image prune -f                                   # 清旧镜像
 ```
 
+### 架构说明
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   frontend   │───▶│   backend    │───▶│    worker    │
+│   (nginx)    │    │  (API only)  │    │ (Pipeline)   │
+└──────────────┘    └──────┬───────┘    └──────┬───────┘
+                           │                    │
+                    ┌──────▼───────┐            │
+                    │ Redis Stream │◀───────────┘
+                    └──────────────┘
+```
+
+- **backend**：仅处理 API 请求，文档上传后入队 Redis Stream
+- **worker**：独立进程消费队列，执行文档解析、Embedding、索引
+- Worker 卡死不影响 API 响应，可独立重启
+
 ---
 
 ## 六、本地开发
+
+### Windows（conda 环境）
 
 ```powershell
 cd C:\newHLSWorkspace\aladdin
 docker compose up -d                    # 启动中间件
 conda activate aladdin
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 前端（新终端）
-cd C:\newHLSWorkspace\aladdin\frontend
+# 终端 1：API 服务
+cd backend
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 终端 2：Worker（文档处理）
+cd backend
+python -m app.worker_main
+
+# 终端 3：前端
+cd frontend
 npm run dev
+```
+
+### macOS / Linux（venv 环境）
+
+```bash
+cd aladdin
+docker compose up -d
+source .venv/bin/activate
+
+# 终端 1：API
+cd backend && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 终端 2：Worker
+cd backend && python -m app.worker_main
+
+# 终端 3：前端
+cd frontend && npm run dev
+```
+
+或使用 Makefile（macOS/Linux）：
+```bash
+make infra          # 启动中间件
+make dev-backend    # 启动 API
+make dev-worker     # 启动 Worker（新终端）
+make dev-frontend   # 启动前端（新终端）
 ```
 
 **Windows .env：**
