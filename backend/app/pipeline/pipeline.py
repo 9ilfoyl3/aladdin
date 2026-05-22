@@ -218,6 +218,38 @@ class DocumentPipeline:
                         doc_id, len(final_content),
                     )
 
+                # ─── 2.6 清洗后文本为空时，尝试整文件 OCR 兜底 ───
+                cleaned_stripped = final_content.strip()
+                if (not cleaned_stripped or len(cleaned_stripped) < 10) and self.ocr_manager and not needs_ocr:
+                    print(f"[Pipeline] 文档 {doc_id} 清洗后文本为空或过短(长度={len(cleaned_stripped)})，触发整文件 OCR 兜底")
+                    logger.info(
+                        "文档 %s 清洗后文本为空，触发整文件 OCR 兜底", doc_id
+                    )
+                    # 之前没有走过整文件 OCR，现在补做
+                    await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别（清洗后兜底）")
+                    stage_start = time.monotonic()
+
+                    ocr_result = await self.ocr_manager.recognize(file_path)
+                    final_content = ocr_result.full_text
+                    load_result = LoadResult(
+                        content=final_content,
+                        metadata={
+                            **load_result.metadata,
+                            "ocr_provider": ocr_result.provider_name,
+                        },
+                        images=[],
+                    )
+                    print(f"[Pipeline] 文档 {doc_id} OCR 兜底完成, Provider: {ocr_result.provider_name}, 文本长度: {len(final_content)}")
+
+                    ocr_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                    await tracker.complete_stage(PipelineStage.OCR)
+                    pl.stage_complete(
+                        stage="ocr",
+                        duration_ms=ocr_duration_ms,
+                        input_size=0,
+                        output_size=len(final_content),
+                    )
+
                 # ─── 3. Chunk 阶段 ───
                 await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.CHUNK

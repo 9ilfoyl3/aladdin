@@ -70,10 +70,24 @@ async def _start_pipeline_worker(app: FastAPI) -> None:
             milvus_client = MilvusClient(
                 host=settings.milvus_host, port=settings.milvus_port
             )
+
+            # 从数据库加载 OCR 配置
+            from app.pipeline.ocr.manager import OCRManager
+            from app.schema.db import OCRConfig
+            from sqlalchemy import select
+
+            ocr_manager = None
+            async with async_session() as session:
+                result = await session.execute(select(OCRConfig))
+                configs = result.scalars().all()
+            if configs:
+                ocr_manager = OCRManager(configs)
+
             pipeline = DocumentPipeline(
                 model_manager=model_manager,
                 milvus_client=milvus_client,
                 db_session_factory=async_session,
+                ocr_manager=ocr_manager,
             )
 
             # 创建并启动 PipelineWorker
