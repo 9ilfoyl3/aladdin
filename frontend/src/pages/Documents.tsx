@@ -405,10 +405,20 @@ function Documents() {
     }, 0)
   }
 
-  // 构建合并列表：本地条目（未被服务端确认的）+ 服务端文档
-  // uploaded 状态的文件显示为 "pending"（排队中），避免消失
+  // 构建合并列表：服务端文档（已按状态排序）+ 本地条目排在最后
   const confirmedLocalIds = new Set(idsToRemove)
   const allFiles: MergedFile[] = [
+    ...documents.map((doc) => ({
+      id: doc.id,
+      filename: doc.filename,
+      file_size: doc.file_size,
+      status: doc.status,
+      error_message: doc.error_message,
+      chunk_count: doc.chunk_count,
+      progress: doc.progress ?? 0,
+      progress_message: doc.progress_message ?? null,
+      isLocal: false,
+    })),
     ...uploadingFiles
       .filter((f) => !confirmedLocalIds.has(f.id))
       .map((f) => ({
@@ -422,17 +432,6 @@ function Documents() {
         progress_message: null,
         isLocal: true,
       })),
-    ...documents.map((doc) => ({
-      id: doc.id,
-      filename: doc.filename,
-      file_size: doc.file_size,
-      status: doc.status,
-      error_message: doc.error_message,
-      chunk_count: doc.chunk_count,
-      progress: doc.progress ?? 0,
-      progress_message: doc.progress_message ?? null,
-      isLocal: false,
-    })),
   ]
 
   const totalItems = folders.length + allFiles.length

@@ -173,7 +173,16 @@ async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSess
     else:
         query = select(Document).where(Document.kb_id == kb_id, Document.folder_id.is_(None))
 
-    result = await db.execute(query.order_by(Document.created_at.desc()))
+    # 排序：completed > failed > processing > pending，同状态按创建时间倒序
+    from sqlalchemy import case
+    status_order = case(
+        (Document.status == "completed", 0),
+        (Document.status == "failed", 1),
+        (Document.status == "processing", 2),
+        (Document.status == "pending", 3),
+        else_=4,
+    )
+    result = await db.execute(query.order_by(status_order, Document.created_at.desc()))
     docs = result.scalars().all()
     return [
         DocumentResponse(
