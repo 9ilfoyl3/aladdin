@@ -148,7 +148,21 @@
 
 ---
 
-## 五、检索增强（gf-deployment 分支）
+## 五、文件类型扩展
+
+### 16. 音频文件上传解析（mp3/m4a/wav）
+- **文件**: 新建 `backend/app/pipeline/loaders/audio_loader.py`、修改 `loader.py`、`document.py`、前端 `Documents.tsx`
+- **现状**: 仅支持文本/文档/图片类文件，不支持音频
+- **目标**: 
+  - 支持 mp3、m4a、wav 等音频文件上传
+  - 通过 ASR（语音转文字）将音频转为文本后进入 pipeline
+  - 候选方案：faster-whisper（轻量本地）、FunASR（中文优）、OpenAI Whisper API
+- **优先级**: 中
+- **预估工作量**: 2-3 天
+
+---
+
+## 六、检索增强（gf-deployment 分支）
 
 ### 12. 检索结果缓存
 - **文件**: 新建 `backend/app/retrieval/cache.py`
