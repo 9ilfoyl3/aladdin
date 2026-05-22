@@ -23,14 +23,19 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dataclasses import asdict
+
 from app.config import get_settings
 from app.models.manager import ModelManager
 from app.pipeline.chunker_router import ChunkerFactory, ChunkerRouter
 import app.pipeline.chunkers  # noqa: F401 — 确保所有 Chunker 注册到 Factory
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
+from app.pipeline.cleaner import TextCleaner
 from app.pipeline.loader import EmbeddedImage, LoadResult, get_loader
 from app.pipeline.logging import PipelineLogger
+from app.pipeline.context_embedder import ContextualEmbedder
+from app.pipeline.metadata import ChunkMetadata, MetadataExtractor
 from app.pipeline.progress import PipelineStage, ProgressTracker
 from app.schema.db import Chunk, Document, KnowledgeBase
 from app.storage.milvus import MilvusClient
@@ -191,6 +196,60 @@ class DocumentPipeline:
 
                     await tracker.skip_stage(PipelineStage.OCR)
 
+                # ─── 2.5 TextCleaner 去噪阶段 ───
+                # 从知识库 config 读取 enable_cleaner 开关（默认 True）
+                enable_cleaner = True
+                result_kb = await session.execute(
+                    select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
+                )
+                kb_obj = result_kb.scalar_one_or_none()
+                if kb_obj and kb_obj.config and isinstance(kb_obj.config, dict):
+                    enable_cleaner = kb_obj.config.get("enable_cleaner", True)
+
+                if enable_cleaner:
+                    cleaner = TextCleaner()
+                    final_content = cleaner.clean(
+                        content=final_content,
+                        page_texts=load_result.page_texts if load_result.page_texts else None,
+                        page_blocks=load_result.page_blocks if load_result.page_blocks else None,
+                    )
+                    logger.info(
+                        "文档 %s TextCleaner 去噪完成，文本长度: %d",
+                        doc_id, len(final_content),
+                    )
+
+                # ─── 2.6 清洗后文本为空时，尝试整文件 OCR 兜底 ───
+                cleaned_stripped = final_content.strip()
+                if (not cleaned_stripped or len(cleaned_stripped) < 10) and self.ocr_manager and not needs_ocr:
+                    print(f"[Pipeline] 文档 {doc_id} 清洗后文本为空或过短(长度={len(cleaned_stripped)})，触发整文件 OCR 兜底")
+                    logger.info(
+                        "文档 %s 清洗后文本为空，触发整文件 OCR 兜底", doc_id
+                    )
+                    # 之前没有走过整文件 OCR，现在补做
+                    await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别（清洗后兜底）")
+                    stage_start = time.monotonic()
+
+                    ocr_result = await self.ocr_manager.recognize(file_path)
+                    final_content = ocr_result.full_text
+                    load_result = LoadResult(
+                        content=final_content,
+                        metadata={
+                            **load_result.metadata,
+                            "ocr_provider": ocr_result.provider_name,
+                        },
+                        images=[],
+                    )
+                    print(f"[Pipeline] 文档 {doc_id} OCR 兜底完成, Provider: {ocr_result.provider_name}, 文本长度: {len(final_content)}")
+
+                    ocr_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                    await tracker.complete_stage(PipelineStage.OCR)
+                    pl.stage_complete(
+                        stage="ocr",
+                        duration_ms=ocr_duration_ms,
+                        input_size=0,
+                        output_size=len(final_content),
+                    )
+
                 # ─── 3. Chunk 阶段 ───
                 await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.CHUNK
@@ -244,9 +303,28 @@ class DocumentPipeline:
 
                 print(f"[Pipeline] 文档 {doc_id} 开始 embedding，共 {len(enriched_children)} 个子块")
 
-                # 使用带进度回调的 embed 方法
+                # 提取元数据（供上下文增强和 Index 阶段使用）
+                extractor = MetadataExtractor()
+                metadata_list = extractor.extract(
+                    child_chunks=enriched_children,
+                    parent_chunks=chunk_result.parent_chunks,
+                    parent_child_map=chunk_result.parent_child_map,
+                    doc_metadata=load_result.metadata,
+                    page_texts=load_result.page_texts if load_result.page_texts else None,
+                )
+
+                # 使用 ContextualEmbedder 构造上下文增强的 embedding 输入
+                ctx_embedder = ContextualEmbedder()
+                embed_texts = []
+                for child_idx, (child_text, meta) in enumerate(zip(enriched_children, metadata_list)):
+                    parent_idx = self._find_parent(chunk_result.parent_child_map, child_idx)
+                    parent_text = chunk_result.parent_chunks[parent_idx] if parent_idx is not None else None
+                    embed_text = ctx_embedder.build_embed_text(child_text, meta, parent_text)
+                    embed_texts.append(embed_text)
+
+                # 使用增强后的文本进行 embedding
                 embed_result = await self._embed_with_progress(
-                    enriched_children, tracker, doc_id
+                    embed_texts, tracker, doc_id
                 )
 
                 embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
@@ -278,6 +356,7 @@ class DocumentPipeline:
                 stage_start = time.monotonic()
 
                 print(f"[Pipeline] 文档 {doc_id} 开始写入索引，父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}")
+
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
                     parent_ids.append(str(uuid.uuid4()))
@@ -306,6 +385,10 @@ class DocumentPipeline:
                     parent_idx = self._find_parent(chunk_result.parent_child_map, child_idx)
                     parent_id = parent_ids[parent_idx] if parent_idx is not None else None
 
+                    # 构造 chunk_metadata JSON
+                    meta = metadata_list[child_idx]
+                    chunk_metadata_dict = asdict(meta)
+
                     child_chunk = Chunk(
                         id=child_id,
                         doc_id=doc_id,
@@ -313,6 +396,7 @@ class DocumentPipeline:
                         parent_id=parent_id,
                         content=child_text,
                         chunk_index=child_idx,
+                        chunk_metadata=chunk_metadata_dict,
                     )
                     session.add(child_chunk)
 
@@ -324,11 +408,21 @@ class DocumentPipeline:
                         "sparse_vector": embed_result.sparse_vectors[child_idx],
                         "parent_id": parent_id or "",
                         "chunk_index": child_idx,
+                        "file_type": meta.file_type,
+                        "element_type": meta.element_type,
                     })
 
                 # 确保 collection 存在
                 if not await self.milvus.has_collection(kb_id):
                     await self.milvus.create_collection(kb_id)
+
+                # 检查 collection schema 版本，兼容旧 schema
+                schema_info = await self.milvus.check_schema_version(kb_id)
+                if schema_info["exists"] and not schema_info["has_new_fields"]:
+                    for record in milvus_data:
+                        record.pop("file_type", None)
+                        record.pop("element_type", None)
+                    logger.info("文档 %s: 旧 schema collection，跳过 file_type/element_type 字段", doc_id)
 
                 # 批量写入 Milvus
                 if milvus_data:
@@ -493,6 +587,15 @@ class DocumentPipeline:
 
         async def _process_batch(batch_idx: int, batch: list[str]):
             nonlocal completed_count
+            # 每批开始前检查是否已取消
+            async with self.db_session_factory() as check_session:
+                r = await check_session.execute(
+                    select(Document.status).where(Document.id == doc_id)
+                )
+                st = r.scalar_one_or_none()
+                if st is None or st == "cancelled":
+                    raise CancelledError(f"文档 {doc_id} 已被取消或删除")
+
             async with semaphore:
                 dense = await self.embedder.provider.embed(batch)
                 sparse = await self.embedder.provider.embed_sparse(batch)

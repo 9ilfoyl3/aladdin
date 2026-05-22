@@ -32,6 +32,9 @@ async def lifespan(app: FastAPI):
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await _load_active_embed_configs()
 
+    # 启动时补偿清理：删除孤儿上传文件（DB 记录已删除但文件残留的情况）
+    asyncio.create_task(_cleanup_orphan_files())
+
     # 初始化 TaskQueue 和 PipelineWorker
     await _start_pipeline_worker(app)
 
@@ -67,10 +70,24 @@ async def _start_pipeline_worker(app: FastAPI) -> None:
             milvus_client = MilvusClient(
                 host=settings.milvus_host, port=settings.milvus_port
             )
+
+            # 从数据库加载 OCR 配置
+            from app.pipeline.ocr.manager import OCRManager
+            from app.schema.db import OCRConfig
+            from sqlalchemy import select
+
+            ocr_manager = None
+            async with async_session() as session:
+                result = await session.execute(select(OCRConfig))
+                configs = result.scalars().all()
+            if configs:
+                ocr_manager = OCRManager(configs)
+
             pipeline = DocumentPipeline(
                 model_manager=model_manager,
                 milvus_client=milvus_client,
                 db_session_factory=async_session,
+                ocr_manager=ocr_manager,
             )
 
             # 创建并启动 PipelineWorker
@@ -119,6 +136,57 @@ async def _stop_pipeline_worker(app: FastAPI) -> None:
             await worker_task
         except asyncio.CancelledError:
             pass
+
+
+async def _cleanup_orphan_files() -> None:
+    """启动时补偿清理：删除 DB 中已无记录但磁盘上残留的上传文件
+
+    场景：批量删除时 DB 记录已删除，但后台异步清理本地文件时服务重启了。
+    此函数扫描 uploads 目录，对比 DB 中的文档记录，删除孤儿文件。
+    """
+    import os
+    from pathlib import Path
+    from sqlalchemy import select
+    from app.schema.db import Document
+    from app.storage.database import async_session
+
+    upload_dir = Path("data/uploads")
+    if not upload_dir.exists():
+        return
+
+    try:
+        # 获取磁盘上所有文件的 doc_id（文件名格式: {doc_id}.{ext}）
+        disk_files = {}
+        for f in upload_dir.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                doc_id = f.stem  # 去掉扩展名就是 doc_id
+                disk_files[doc_id] = f
+
+        if not disk_files:
+            return
+
+        # 批量查询 DB 中存在的 doc_id
+        async with async_session() as session:
+            result = await session.execute(
+                select(Document.id).where(Document.id.in_(list(disk_files.keys())))
+            )
+            existing_ids = {row[0] for row in result.all()}
+
+        # 删除孤儿文件
+        orphan_count = 0
+        for doc_id, file_path in disk_files.items():
+            if doc_id not in existing_ids:
+                try:
+                    os.remove(file_path)
+                    orphan_count += 1
+                except OSError:
+                    pass
+
+        if orphan_count > 0:
+            print(f"[Cleanup] 启动清理：删除了 {orphan_count} 个孤儿上传文件")
+            logger.info("Startup cleanup: removed %d orphan upload files", orphan_count)
+    except Exception as e:
+        logger.warning("Startup orphan file cleanup failed (non-critical): %s", e)
 
 
 async def _load_active_embed_configs():

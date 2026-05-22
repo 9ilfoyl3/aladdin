@@ -155,11 +155,17 @@ async def update_knowledge_base(
 
 @router.delete("/{kb_id}", status_code=204)
 async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
-    """删除知识库（级联清理 Milvus collection）"""
+    """删除知识库（级联清理 Milvus collection + 物理文件）"""
     result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = result.scalar_one_or_none()
     if kb is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # 收集所有文档信息（用于后续清理物理文件）
+    doc_result = await db.execute(
+        select(Document.id, Document.file_type).where(Document.kb_id == kb_id)
+    )
+    doc_info_list = [{"id": row[0], "file_type": row[1]} for row in doc_result.all()]
 
     # 删除 Milvus collection
     try:
@@ -168,6 +174,39 @@ async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.warning("删除 Milvus collection 失败（可忽略）: %s", e)
 
-    # 级联删除 SQLite 数据（ORM cascade 会自动处理 documents 和 chunks）
+    # 级联删除 SQLite 数据（ORM cascade 会自动处理 folders、documents 和 chunks）
     await db.delete(kb)
     await db.flush()
+
+    # 后台异步清理物理文件和缓存
+    if doc_info_list:
+        import asyncio
+        asyncio.create_task(_kb_cleanup_background(kb_id, doc_info_list))
+
+
+async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
+    """后台清理物理文件和缓存（不阻塞 API 响应）"""
+    import os
+    from pathlib import Path
+
+    upload_dir = Path("data/uploads")
+
+    # 删除物理文件
+    for info in doc_info_list:
+        file_path = upload_dir / f"{info['id']}.{info['file_type']}"
+        if file_path.exists():
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.warning("知识库删除 - 删除文件失败 %s: %s", file_path, e)
+
+    logger.info("知识库 %s 删除 - 物理文件清理完成，共 %d 个", kb_id, len(doc_info_list))
+
+    # 清除检索缓存
+    try:
+        from app.retrieval.cache import get_retrieval_cache
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
+    except Exception as e:
+        logger.warning("知识库删除 - 清除缓存失败: %s", e)

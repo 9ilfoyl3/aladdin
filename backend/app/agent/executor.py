@@ -105,7 +105,7 @@ class RetrievalExecutor:
         return unique_queries
 
     async def execute(
-        self, queries: list[str], kb_id: str, top_k: int = 30
+        self, queries: list[str], kb_id: str, top_k: int = 30, expr: str | None = None,
     ) -> list[RetrievalResult]:
         """并行执行多个查询，合并去重后统一 rerank
 
@@ -118,6 +118,7 @@ class RetrievalExecutor:
             queries: 待检索的查询列表（可能由 Rewriter 生成）
             kb_id: 知识库 ID
             top_k: 最终返回的最大结果数
+            expr: Milvus pre-filter 表达式
 
         Returns:
             按分数降序排列的去重结果列表
@@ -131,7 +132,7 @@ class RetrievalExecutor:
         if use_batch_rerank:
             # 并行执行所有子查询，跳过 rerank（只做稠密+稀疏+RRF）
             tasks = [
-                self.retriever.search(q, kb_id, top_k, skip_rerank=True)
+                self.retriever.search(q, kb_id, top_k, skip_rerank=True, expr=expr)
                 for q in deduped_queries
             ]
             all_results = await asyncio.gather(*tasks)
@@ -151,7 +152,7 @@ class RetrievalExecutor:
             return await self.retriever.rerank_and_expand(combined_query, merged_list, top_k)
         else:
             # 回退：非 HybridRetriever 时保持原有逻辑
-            tasks = [self.retriever.search(q, kb_id, top_k) for q in deduped_queries]
+            tasks = [self.retriever.search(q, kb_id, top_k, expr=expr) for q in deduped_queries]
             all_results = await asyncio.gather(*tasks)
 
             merged: dict[str, RetrievalResult] = {}

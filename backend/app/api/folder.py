@@ -1,8 +1,11 @@
 """文件夹 CRUD 接口"""
 
+import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -10,12 +13,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.validators import NameValidationError, validate_folder_name
-from app.schema.db import Document, Folder, KnowledgeBase
+from app.schema.db import Chunk, Document, Folder, KnowledgeBase
 from app.storage.database import get_db
+from app.storage.milvus import MilvusClient
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Folder"])
+
+# 上传文件存储目录
+_UPLOAD_DIR = Path("data/uploads")
 
 
 # ============================================================
@@ -211,14 +219,60 @@ async def update_folder(
 
 @router.delete("/api/folders/{folder_id}", status_code=204)
 async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
-    """删除文件夹（级联删除子文件夹和文档）"""
+    """删除文件夹（级联删除子文件夹、文档、Milvus 向量和物理文件）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
         raise HTTPException(status_code=404, detail="文件夹不存在")
 
+    kb_id = folder.kb_id
+
+    # 递归收集该文件夹及所有子文件夹下的文档
+    all_doc_ids: list[str] = []
+    all_doc_info: list[dict] = []  # {"id": ..., "file_type": ...}
+    folder_ids_to_check = [folder_id]
+
+    while folder_ids_to_check:
+        current_folder_id = folder_ids_to_check.pop()
+        # 收集当前文件夹下的文档
+        doc_result = await db.execute(
+            select(Document.id, Document.file_type).where(Document.folder_id == current_folder_id)
+        )
+        for doc_id, file_type in doc_result.all():
+            all_doc_ids.append(doc_id)
+            all_doc_info.append({"id": doc_id, "file_type": file_type})
+
+        # 收集子文件夹
+        sub_result = await db.execute(
+            select(Folder.id).where(Folder.parent_id == current_folder_id)
+        )
+        for (sub_id,) in sub_result.all():
+            folder_ids_to_check.append(sub_id)
+
+    # 收集所有 chunk_ids（用于删除 Milvus 向量）
+    chunk_ids: list[str] = []
+    if all_doc_ids:
+        chunk_result = await db.execute(
+            select(Chunk.id).where(Chunk.doc_id.in_(all_doc_ids))
+        )
+        chunk_ids = [row[0] for row in chunk_result.all()]
+
+    # 更新知识库文档计数
+    if all_doc_ids:
+        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+        kb = kb_result.scalar_one_or_none()
+        if kb:
+            kb.doc_count = max(0, (kb.doc_count or 0) - len(all_doc_ids))
+
+    # 删除文件夹（ORM cascade 会自动删除子文件夹、文档和 chunks）
     await db.delete(folder)
     await db.flush()
+
+    # 后台异步清理 Milvus 向量和物理文件
+    if chunk_ids or all_doc_info:
+        asyncio.create_task(
+            _folder_cleanup_background(kb_id, chunk_ids, all_doc_info)
+        )
 
 
 @router.post("/api/knowledge-bases/{kb_id}/move", status_code=200)
@@ -287,3 +341,38 @@ async def _is_descendant(db: AsyncSession, folder_id: str, ancestor_id: str) -> 
             break
         current_id = folder.parent_id
     return False
+
+
+async def _folder_cleanup_background(
+    kb_id: str, chunk_ids: list[str], doc_info_list: list[dict]
+) -> None:
+    """后台清理 Milvus 向量和物理文件（不阻塞 API 响应）"""
+    # 删除 Milvus 向量
+    if chunk_ids:
+        try:
+            settings = get_settings()
+            milvus = MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+            for i in range(0, len(chunk_ids), 1000):
+                batch = chunk_ids[i:i + 1000]
+                await milvus.delete(kb_id, batch)
+            logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 条", len(chunk_ids))
+        except Exception as e:
+            logger.warning("文件夹删除 - Milvus 向量清理失败: %s", e)
+
+    # 删除物理文件
+    for info in doc_info_list:
+        file_path = _UPLOAD_DIR / f"{info['id']}.{info['file_type']}"
+        if file_path.exists():
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.warning("文件夹删除 - 删除文件失败 %s: %s", file_path, e)
+
+    # 清除检索缓存
+    try:
+        from app.retrieval.cache import get_retrieval_cache
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
+    except Exception as e:
+        logger.warning("文件夹删除 - 清除缓存失败: %s", e)

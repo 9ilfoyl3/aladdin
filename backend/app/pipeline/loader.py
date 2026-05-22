@@ -22,6 +22,7 @@ class LoadResult:
     images: list[EmbeddedImage] = field(default_factory=list)  # 文档中嵌入的图片
     page_texts: list[str] = field(default_factory=list)  # 按页文本（用于图片文本按页插入）
     pre_chunked: list[str] = field(default_factory=list)  # loader 预切分的 chunk（跳过 chunker）
+    page_blocks: list[list[dict]] | None = None  # 按页文本块（含 bbox），用于 TextCleaner 去噪
 
 
 class BaseLoader(ABC):

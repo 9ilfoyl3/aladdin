@@ -33,13 +33,14 @@ class HybridRetriever(BaseRetriever):
         self.db_session_factory = db_session_factory
 
     async def search(
-        self, query: str, kb_id: str, top_k: int = 10, **kwargs
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
     ) -> list[RetrievalResult]:
         """执行混合检索
 
         流程：并行稠密+稀疏检索 → RRF 融合 → Rerank 精排 → 父块扩展
 
-        kwargs:
+        Args:
+            expr: Milvus pre-filter 表达式，传递给子检索器进行元数据过滤
             skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果（用于批量合并后统一 rerank）
         """
         skip_rerank = kwargs.pop("skip_rerank", False)
@@ -47,8 +48,8 @@ class HybridRetriever(BaseRetriever):
 
         # 1. 并行执行稠密检索和稀疏检索
         dense_results, sparse_results = await asyncio.gather(
-            self.vector_retriever.search(query, kb_id, top_k=expanded_k, **kwargs),
-            self.sparse_retriever.search(query, kb_id, top_k=expanded_k, **kwargs),
+            self.vector_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
+            self.sparse_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
         )
         print(f"[Retrieval] 稠密检索: {len(dense_results)} 条, 稀疏检索: {len(sparse_results)} 条")
 
@@ -100,18 +101,37 @@ class HybridRetriever(BaseRetriever):
         return expanded
 
     def _rrf_fusion(
-        self, results_lists: list[list[RetrievalResult]], k: int = 60
+        self,
+        results_lists: list[list[RetrievalResult]],
+        k: int = 60,
+        type_weights: dict[str, float] | None = None,
     ) -> list[RetrievalResult]:
-        """Reciprocal Rank Fusion 融合多路检索结果"""
+        """Reciprocal Rank Fusion 融合多路检索结果，支持按元素类型施加权重
+
+        Args:
+            results_lists: 多路检索结果列表
+            k: RRF 参数，默认 60
+            type_weights: 元素类型权重映射，默认对 table 类型施加 0.8 降权
+        """
+        if type_weights is None:
+            type_weights = {"table": 0.8}
+
         scores: dict[str, float] = {}
         items: dict[str, RetrievalResult] = {}
 
         for results in results_lists:
             for rank, item in enumerate(results):
-                scores[item.chunk_id] = scores.get(item.chunk_id, 0) + 1.0 / (k + rank + 1)
+                rrf_score = 1.0 / (k + rank + 1)
+                scores[item.chunk_id] = scores.get(item.chunk_id, 0) + rrf_score
                 items[item.chunk_id] = item
 
-        # 按 RRF 分数降序排列
+        # 施加类型权重
+        for chunk_id, item in items.items():
+            element_type = item.metadata.get("element_type", "text")
+            weight = type_weights.get(element_type, 1.0)
+            scores[chunk_id] *= weight
+
+        # 按分数降序排列
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
         return [items[cid] for cid in sorted_ids]
 

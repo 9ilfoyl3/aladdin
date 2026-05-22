@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Send, ChevronDown, Bot, Database, Cpu, FileText } from 'lucide-react'
+import { Send, ChevronDown, Bot, Database, Cpu, FileText, Library } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { knowledgeBaseApi, llmConfigApi } from '@/lib/api'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
 
 // 消息类型
@@ -54,6 +55,7 @@ function Chat() {
   const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [retrievalMode, setRetrievalMode] = useState('auto')
+  const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -104,6 +106,13 @@ function Chat() {
     }
   }, [input])
 
+  // 切换辅助知识库选中状态
+  function toggleAuxiliaryKb(kbId: string) {
+    setAuxiliaryKbIds((prev) =>
+      prev.includes(kbId) ? prev.filter((id) => id !== kbId) : [...prev, kbId]
+    )
+  }
+
   // 发送消息
   async function handleSend() {
     const query = input.trim()
@@ -118,6 +127,14 @@ function Chat() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
+      // 构造 kb_ids：主库在前，辅助库在后
+      let kbIds: string[] | undefined = undefined
+      if (selectedKb && auxiliaryKbIds.length > 0) {
+        kbIds = [selectedKb, ...auxiliaryKbIds.filter((id) => id !== selectedKb)]
+      } else if (!selectedKb && auxiliaryKbIds.length > 0) {
+        kbIds = auxiliaryKbIds
+      }
+
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -128,6 +145,7 @@ function Chat() {
           knowledge_base_id: selectedKb || undefined,
           model_config_id: selectedModel || undefined,
           retrieval_mode: retrievalMode === 'auto' ? undefined : retrievalMode,
+          kb_ids: kbIds,
         }),
       })
 
@@ -466,7 +484,7 @@ function Chat() {
       {/* 底部输入区域 - 悬浮定位 */}
       <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background to-transparent pt-10 pointer-events-none">
         <div className="max-w-3xl mx-auto pointer-events-auto">
-          <div className="rounded-2xl border border-border bg-card shadow-lg overflow-hidden">
+          <div className="rounded-2xl border border-border bg-card shadow-lg">
             {/* 输入框 */}
             <textarea
               ref={textareaRef}
@@ -480,11 +498,11 @@ function Chat() {
             />
 
             {/* 底部工具栏 */}
-            <div className="flex items-center justify-between px-3 pb-3">
+            <div className="flex items-center justify-between px-3 pb-3 gap-2 flex-wrap">
               {/* 左侧：知识库选择 */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Select value={selectedKb} onValueChange={setSelectedKb}>
-                  <SelectTrigger className="h-7 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
                     <Database className="h-3 w-3 shrink-0" />
                     <SelectValue placeholder="全部知识库" />
                   </SelectTrigger>
@@ -496,7 +514,7 @@ function Chat() {
                 </Select>
 
                 <Select value={retrievalMode} onValueChange={setRetrievalMode}>
-                  <SelectTrigger className="h-7 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -504,14 +522,50 @@ function Chat() {
                     <SelectItem value="hybrid">快速检索</SelectItem>
                   </SelectContent>
                 </Select>
+
+                {/* 关联知识库多选 */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap"
+                    >
+                      <Library className="h-3 w-3 shrink-0" />
+                      <span>关联知识库</span>
+                      {auxiliaryKbIds.length > 0 && (
+                        <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
+                          {auxiliaryKbIds.length}
+                        </Badge>
+                      )}
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="top" align="start">
+                    {knowledgeBases.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
+                    ) : (
+                      knowledgeBases
+                        .filter((kb) => kb.id !== selectedKb)
+                        .map((kb) => (
+                          <DropdownMenuCheckboxItem
+                            key={kb.id}
+                            checked={auxiliaryKbIds.includes(kb.id)}
+                            onCheckedChange={() => toggleAuxiliaryKb(kb.id)}
+                            onSelect={(e) => e.preventDefault()}
+                          >
+                            {kb.name}
+                          </DropdownMenuCheckboxItem>
+                        ))
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
 
               {/* 右侧：模型选择 + 发送 */}
               <div className="flex items-center gap-2">
                 <Select value={selectedModel} onValueChange={setSelectedModel}>
-                  <SelectTrigger className="h-7 border-none bg-transparent hover:bg-muted/50 rounded-lg px-2 gap-1 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <SelectTrigger className="h-7 w-auto border-none bg-transparent hover:bg-muted/50 rounded-lg px-2 gap-1 text-xs text-muted-foreground shadow-none focus:ring-0">
                     <Cpu className="h-3 w-3 shrink-0" />
-                    <span className="max-w-[80px] truncate">{selectedModelName || '模型'}</span>
+                    <span className="max-w-[15em] truncate">{selectedModelName || '模型'}</span>
                   </SelectTrigger>
                   <SelectContent>
                     {llmConfigs.length === 0 ? (

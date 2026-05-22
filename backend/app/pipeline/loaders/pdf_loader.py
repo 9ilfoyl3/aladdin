@@ -53,6 +53,7 @@ class PdfLoader(BaseLoader):
         tmp_dir = tempfile.mkdtemp(prefix="pdf_images_")
 
         pages_text: list[str] = []
+        page_blocks: list[list[dict]] = []
         images: list[EmbeddedImage] = []
         seen_hashes: set[str] = set()  # 用于去重
         total_images_extracted = 0
@@ -61,6 +62,10 @@ class PdfLoader(BaseLoader):
             # 提取文本
             text = page.get_text()
             pages_text.append(text)
+
+            # 使用 get_text("dict") 获取带 bbox 的文本块，供 TextCleaner 去噪使用
+            blocks = self._extract_page_blocks(page)
+            page_blocks.append(blocks)
 
             # 达到图片上限后不再提取
             if total_images_extracted >= _MAX_IMAGES_PER_DOC:
@@ -91,7 +96,49 @@ class PdfLoader(BaseLoader):
             metadata=metadata,
             images=images,
             page_texts=pages_text,
+            page_blocks=page_blocks,
         )
+
+    @staticmethod
+    def _extract_page_blocks(page: fitz.Page) -> list[dict]:
+        """从页面中提取带 bbox 的文本块
+
+        使用 get_text("dict") 获取结构化文本信息，
+        仅保留文本块（type==0），提取 bbox 和文本内容。
+
+        Args:
+            page: fitz 页面对象
+
+        Returns:
+            简化后的文本块列表，每个块包含 bbox 和 text
+        """
+        page_dict = page.get_text("dict")
+        blocks = page_dict.get("blocks", [])
+        result: list[dict] = []
+
+        for block in blocks:
+            # 仅处理文本块（type==0），跳过图片块（type==1）
+            if block.get("type", 0) != 0:
+                continue
+
+            # 从 lines -> spans -> text 中提取文本内容
+            text_parts: list[str] = []
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    span_text = span.get("text", "")
+                    if span_text:
+                        text_parts.append(span_text)
+
+            text = "".join(text_parts)
+            if not text.strip():
+                continue
+
+            result.append({
+                "bbox": tuple(block["bbox"]),  # (x0, y0, x1, y1)
+                "text": text,
+            })
+
+        return result
 
     @staticmethod
     def _extract_page_images(

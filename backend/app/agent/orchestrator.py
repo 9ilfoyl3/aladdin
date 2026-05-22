@@ -55,14 +55,15 @@ class AgentOrchestrator:
         self.max_iterations = max_iterations
 
     async def run(
-        self, query: str, kb_id: str, on_progress: ProgressCallback | None = None
+        self, query: str, kb_id: str, on_progress: ProgressCallback | None = None,
+        expr: str | None = None,
     ) -> AgentResult:
         """执行完整 Agent 编排流程，异常时降级到快路径"""
         try:
-            return await self._agent_flow(query, kb_id, on_progress)
+            return await self._agent_flow(query, kb_id, on_progress, expr=expr)
         except Exception as e:
             print(f"[Agent] 异常降级: query={query!r}, error={e}")
-            return await self._fast_path(query, kb_id, degraded=True)
+            return await self._fast_path(query, kb_id, degraded=True, expr=expr)
 
     async def _emit(self, on_progress: ProgressCallback | None, step: str, detail: str):
         """发送进度通知"""
@@ -70,7 +71,8 @@ class AgentOrchestrator:
             await on_progress(step, detail)
 
     async def _agent_flow(
-        self, query: str, kb_id: str, on_progress: ProgressCallback | None
+        self, query: str, kb_id: str, on_progress: ProgressCallback | None,
+        expr: str | None = None,
     ) -> AgentResult:
         """完整 Agent 编排逻辑"""
         # 重置 executor 查询缓存（每次新编排开始时）
@@ -89,7 +91,7 @@ class AgentOrchestrator:
             # simple 路由不需要改写结果，取消任务
             rewrite_task.cancel()
             await self._emit(on_progress, "routing_done", "简单查询，直接检索")
-            return await self._fast_path(query, kb_id)
+            return await self._fast_path(query, kb_id, expr=expr)
 
         await self._emit(on_progress, "routing_done", "判定为复杂查询，启动深度检索")
 
@@ -107,7 +109,7 @@ class AgentOrchestrator:
 
         for i in range(self.max_iterations):
             await self._emit(on_progress, "retrieving", f"第 {i+1} 轮检索中...")
-            new_results = await self.executor.execute(rewritten_queries, kb_id)
+            new_results = await self.executor.execute(rewritten_queries, kb_id, expr=expr)
             print(f"[Agent] 第 {i+1} 轮检索: 查询={rewritten_queries}, 返回 {len(new_results)} 条结果")
 
             # 去重：只保留之前没见过的结果
@@ -177,8 +179,8 @@ class AgentOrchestrator:
         return AgentResult(chunks=results, iterations=iterations)
 
     async def _fast_path(
-        self, query: str, kb_id: str, degraded: bool = False
+        self, query: str, kb_id: str, degraded: bool = False, expr: str | None = None,
     ) -> AgentResult:
         """快路径：直接使用 retriever 检索"""
-        results = await self.retriever.search(query, kb_id, top_k=30)
+        results = await self.retriever.search(query, kb_id, top_k=30, expr=expr)
         return AgentResult(chunks=results, iterations=0, degraded=degraded)

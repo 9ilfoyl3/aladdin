@@ -111,7 +111,10 @@ class VllmLLM(LLMProvider):
                     if data_str == "[DONE]":
                         break
                     chunk = json.loads(data_str)
-                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    content = choices[0].get("delta", {}).get("content", "")
                     if content:
                         yield content
         except httpx.HTTPStatusError as e:

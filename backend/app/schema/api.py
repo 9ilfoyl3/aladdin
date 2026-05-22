@@ -33,6 +33,12 @@ class ChatCompletionRequest(BaseModel):
     model_config_id: Optional[str] = Field(
         default=None, description="LLM 模型配置 ID，为空时使用系统默认模型"
     )
+    filter_doc_ids: Optional[list[str]] = Field(
+        default=None, description="限定文档范围过滤，仅在指定文档中检索"
+    )
+    kb_ids: Optional[list[str]] = Field(
+        default=None, description="多知识库联合检索，指定多个知识库 ID 列表"
+    )
     temperature: Optional[float] = Field(default=None, description="生成温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
 

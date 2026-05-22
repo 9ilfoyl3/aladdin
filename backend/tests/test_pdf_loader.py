@@ -82,3 +82,44 @@ class TestPdfLoader:
 
         actual_size = os.path.getsize(file_path)
         assert result.metadata["file_size"] == actual_size
+
+    def test_page_blocks_extracted(self, tmp_path):
+        """page_blocks 包含带 bbox 的文本块"""
+        file_path = self._create_pdf(tmp_path, "blocks.pdf", ["Block Text"])
+
+        result = self.loader.load(file_path)
+
+        assert result.page_blocks is not None
+        assert len(result.page_blocks) == 1  # 1 页
+        # 至少有一个文本块
+        assert len(result.page_blocks[0]) > 0
+        block = result.page_blocks[0][0]
+        assert "bbox" in block
+        assert "text" in block
+        assert len(block["bbox"]) == 4  # (x0, y0, x1, y1)
+        assert "Block Text" in block["text"]
+
+    def test_page_blocks_multi_page(self, tmp_path):
+        """多页 PDF 的 page_blocks 按页组织"""
+        pages = ["First Page", "Second Page"]
+        file_path = self._create_pdf(tmp_path, "multi_blocks.pdf", pages)
+
+        result = self.loader.load(file_path)
+
+        assert result.page_blocks is not None
+        assert len(result.page_blocks) == 2
+        # 每页都有文本块
+        assert len(result.page_blocks[0]) > 0
+        assert len(result.page_blocks[1]) > 0
+        assert "First Page" in result.page_blocks[0][0]["text"]
+        assert "Second Page" in result.page_blocks[1][0]["text"]
+
+    def test_page_blocks_empty_page(self, tmp_path):
+        """空白页的 page_blocks 为空列表"""
+        file_path = self._create_pdf(tmp_path, "empty_blocks.pdf", [""])
+
+        result = self.loader.load(file_path)
+
+        assert result.page_blocks is not None
+        assert len(result.page_blocks) == 1
+        assert result.page_blocks[0] == []  # 空白页无文本块

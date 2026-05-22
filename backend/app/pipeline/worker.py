@@ -233,7 +233,7 @@ class PipelineWorker:
                     select(Document.status).where(Document.id == doc_id)
                 )
                 status = result.scalar_one_or_none()
-                # 文档不存在（已被删除），跳过处理
+                # 文档不存在 = 已被删除，应跳过
                 if status is None:
                     return True
                 return status in ("completed", "cancelled")

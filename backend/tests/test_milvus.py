@@ -161,7 +161,20 @@ class TestMilvusClient:
         vector = [0.1] * 1024
         result = await client.search_dense("test_kb", vector, top_k=5)
         assert result == expected
-        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5)
+        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, None)
+
+    @pytest.mark.asyncio
+    async def test_search_dense_with_expr(self):
+        """测试 search_dense 带 expr 参数"""
+        client = MilvusClient()
+        expected = [{"chunk_id": "chk_001", "score": 0.9}]
+        client._search_dense_sync = MagicMock(return_value=expected)
+
+        vector = [0.1] * 1024
+        expr = 'file_type in ["pdf"]'
+        result = await client.search_dense("test_kb", vector, top_k=5, expr=expr)
+        assert result == expected
+        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, expr)
 
     @pytest.mark.asyncio
     async def test_search_sparse(self):
@@ -173,4 +186,121 @@ class TestMilvusClient:
         sparse_vec = {1: 0.5, 100: 0.3, 500: 0.2}
         result = await client.search_sparse("test_kb", sparse_vec, top_k=3)
         assert result == expected
-        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3)
+        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, None)
+
+    @pytest.mark.asyncio
+    async def test_search_sparse_with_expr(self):
+        """测试 search_sparse 带 expr 参数"""
+        client = MilvusClient()
+        expected = [{"chunk_id": "chk_002", "score": 0.8}]
+        client._search_sparse_sync = MagicMock(return_value=expected)
+
+        sparse_vec = {1: 0.5, 100: 0.3, 500: 0.2}
+        expr = 'doc_id in ["doc-123"]'
+        result = await client.search_sparse("test_kb", sparse_vec, top_k=3, expr=expr)
+        assert result == expected
+        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, expr)
+
+    @pytest.mark.asyncio
+    async def test_check_schema_version_async(self):
+        """测试 check_schema_version 异步调用"""
+        client = MilvusClient()
+        expected = {"exists": True, "has_new_fields": True, "field_names": ["chunk_id", "file_type", "element_type"]}
+        client._check_schema_version_sync = MagicMock(return_value=expected)
+
+        result = await client.check_schema_version("test_kb")
+        assert result == expected
+        client._check_schema_version_sync.assert_called_once_with("test_kb")
+
+    def test_check_schema_version_sync_no_collection(self):
+        """测试 schema 版本检测 - collection 不存在"""
+        client = MilvusClient()
+        client._connect = MagicMock()
+
+        with patch.object(pymilvus_mock, "utility") as mock_util:
+            # 需要 patch 模块级别的 utility
+            with patch("app.storage.milvus.utility") as mock_utility:
+                mock_utility.has_collection.return_value = False
+
+                result = client._check_schema_version_sync("test_kb")
+                assert result == {"exists": False, "has_new_fields": False, "field_names": []}
+                mock_utility.has_collection.assert_called_once_with(
+                    "kb_test_kb", using="default"
+                )
+
+    def test_check_schema_version_sync_old_schema(self):
+        """测试 schema 版本检测 - 旧版 schema（不含新字段）"""
+        client = MilvusClient()
+        client._connect = MagicMock()
+
+        # 模拟旧版 schema（不含 file_type/element_type）
+        mock_field1 = MagicMock()
+        mock_field1.name = "chunk_id"
+        mock_field2 = MagicMock()
+        mock_field2.name = "doc_id"
+        mock_field3 = MagicMock()
+        mock_field3.name = "content"
+
+        mock_collection = MagicMock()
+        mock_collection.schema.fields = [mock_field1, mock_field2, mock_field3]
+
+        with patch("app.storage.milvus.utility") as mock_utility, \
+             patch("app.storage.milvus.Collection", return_value=mock_collection):
+            mock_utility.has_collection.return_value = True
+
+            result = client._check_schema_version_sync("test_kb")
+            assert result["exists"] is True
+            assert result["has_new_fields"] is False
+            assert result["field_names"] == ["chunk_id", "doc_id", "content"]
+
+    def test_check_schema_version_sync_new_schema(self):
+        """测试 schema 版本检测 - 新版 schema（包含新字段）"""
+        client = MilvusClient()
+        client._connect = MagicMock()
+
+        # 模拟新版 schema（包含 file_type 和 element_type）
+        field_names = ["chunk_id", "doc_id", "content", "dense_vector",
+                       "sparse_vector", "parent_id", "chunk_index",
+                       "file_type", "element_type"]
+        mock_fields = []
+        for name in field_names:
+            f = MagicMock()
+            f.name = name
+            mock_fields.append(f)
+
+        mock_collection = MagicMock()
+        mock_collection.schema.fields = mock_fields
+
+        with patch("app.storage.milvus.utility") as mock_utility, \
+             patch("app.storage.milvus.Collection", return_value=mock_collection):
+            mock_utility.has_collection.return_value = True
+
+            result = client._check_schema_version_sync("test_kb")
+            assert result["exists"] is True
+            assert result["has_new_fields"] is True
+            assert result["field_names"] == field_names
+
+    def test_check_schema_version_sync_partial_fields(self):
+        """测试 schema 版本检测 - 只有 file_type 没有 element_type"""
+        client = MilvusClient()
+        client._connect = MagicMock()
+
+        # 模拟只有 file_type 但没有 element_type
+        field_names = ["chunk_id", "doc_id", "content", "file_type"]
+        mock_fields = []
+        for name in field_names:
+            f = MagicMock()
+            f.name = name
+            mock_fields.append(f)
+
+        mock_collection = MagicMock()
+        mock_collection.schema.fields = mock_fields
+
+        with patch("app.storage.milvus.utility") as mock_utility, \
+             patch("app.storage.milvus.Collection", return_value=mock_collection):
+            mock_utility.has_collection.return_value = True
+
+            result = client._check_schema_version_sync("test_kb")
+            assert result["exists"] is True
+            assert result["has_new_fields"] is False
+            assert result["field_names"] == field_names
