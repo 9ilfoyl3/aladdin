@@ -50,6 +50,8 @@ class DocumentResponse(BaseModel):
     status: str
     error_message: str | None
     chunk_count: int
+    progress: float = 0
+    progress_message: str | None = None
     created_at: str
 
 
@@ -429,60 +431,100 @@ class BatchDeleteRequest(BaseModel):
 
 @router.post("/api/documents/batch-delete", status_code=200)
 async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = Depends(get_db)):
-    """批量删除文档"""
+    """批量删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     if not body.doc_ids:
         raise HTTPException(status_code=400, detail="doc_ids 不能为空")
 
-    deleted_count = 0
+    # ─── 第一步：批量标记 cancelled，让 pipeline 立即停止处理 ───
+    from sqlalchemy import update as sql_update, delete as sql_delete
+    await db.execute(
+        sql_update(Document)
+        .where(Document.id.in_(body.doc_ids))
+        .where(Document.status.in_(("pending", "processing")))
+        .values(status="cancelled")
+    )
+    await db.flush()
+
+    # ─── 第二步：批量查询所有待删除文档（收集清理所需信息） ───
+    result = await db.execute(
+        select(Document).where(Document.id.in_(body.doc_ids))
+    )
+    docs = result.scalars().all()
+    if not docs:
+        return {"deleted_count": 0, "total_requested": len(body.doc_ids)}
+
+    # 收集清理信息
     kb_ids_affected: set[str] = set()
+    doc_ids_found: list[str] = []
+    cleanup_info: list[dict] = []  # [{id, kb_id, file_type}]
 
-    for doc_id in body.doc_ids:
-        result = await db.execute(select(Document).where(Document.id == doc_id))
-        doc = result.scalar_one_or_none()
-        if doc is None:
-            continue
-
+    for doc in docs:
         kb_ids_affected.add(doc.kb_id)
+        doc_ids_found.append(doc.id)
+        cleanup_info.append({"id": doc.id, "kb_id": doc.kb_id, "file_type": doc.file_type})
 
-        # 获取该文档的所有 chunk_id，用于清理 Milvus
+    # ─── 第三步：批量查询所有 chunk_ids（在删除前收集） ───
+    kb_chunk_map: dict[str, list[str]] = {}
+    if doc_ids_found:
         chunk_result = await db.execute(
-            select(Chunk.id).where(Chunk.doc_id == doc_id)
+            select(Chunk.id, Chunk.doc_id).where(Chunk.doc_id.in_(doc_ids_found))
         )
-        chunk_ids = [row[0] for row in chunk_result.all()]
+        for chunk_id, doc_id in chunk_result.all():
+            doc_obj = next((d for d in docs if d.id == doc_id), None)
+            if doc_obj:
+                kb_chunk_map.setdefault(doc_obj.kb_id, []).append(chunk_id)
 
-        # 删除 Milvus 中的向量
+    # ─── 第四步：批量更新知识库文档计数 ───
+    for kb_id in kb_ids_affected:
+        doc_count_in_batch = sum(1 for d in docs if d.kb_id == kb_id)
+        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+        kb = kb_result.scalar_one_or_none()
+        if kb:
+            kb.doc_count = max(0, (kb.doc_count or 0) - doc_count_in_batch)
+
+    # ─── 第五步：批量删除 DB 记录（立即生效，前端刷新后看不到这些文档） ───
+    await db.execute(sql_delete(Chunk).where(Chunk.doc_id.in_(doc_ids_found)))
+    await db.execute(sql_delete(Document).where(Document.id.in_(doc_ids_found)))
+    await db.commit()
+
+    # ─── 第六步：后台异步清理 Milvus 向量 + 本地文件 + 缓存 ───
+    asyncio.create_task(_batch_cleanup_background(kb_chunk_map, cleanup_info, kb_ids_affected))
+
+    return {"deleted_count": len(doc_ids_found), "total_requested": len(body.doc_ids)}
+
+
+async def _batch_cleanup_background(
+    kb_chunk_map: dict[str, list[str]],
+    cleanup_info: list[dict],
+    kb_ids_affected: set[str],
+) -> None:
+    """后台清理 Milvus 向量、本地文件和缓存（不阻塞 API 响应）"""
+    # 删除 Milvus 向量
+    for kb_id, chunk_ids in kb_chunk_map.items():
         if chunk_ids:
             try:
                 milvus = _get_milvus()
-                await milvus.delete(doc.kb_id, chunk_ids)
+                for i in range(0, len(chunk_ids), 1000):
+                    batch = chunk_ids[i:i + 1000]
+                    await milvus.delete(kb_id, batch)
             except Exception as e:
-                logger.warning("批量删除 - 删除 Milvus 向量失败（可忽略）: %s", e)
+                logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
 
-        # 更新知识库文档计数
-        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == doc.kb_id))
-        kb = kb_result.scalar_one_or_none()
-        if kb and kb.doc_count > 0:
-            kb.doc_count -= 1
-
-        # 删除文档
-        await db.delete(doc)
-        await db.flush()
-
-        # 删除本地文件
-        file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+    # 删除本地文件
+    for info in cleanup_info:
+        file_path = _UPLOAD_DIR / f"{info['id']}.{info['file_type']}"
         if file_path.exists():
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
-        deleted_count += 1
-
-    # 清除受影响知识库的检索缓存
+    # 清除检索缓存
     from app.retrieval.cache import get_retrieval_cache
     cache = await get_retrieval_cache()
     if cache:
         for kb_id in kb_ids_affected:
             await cache.invalidate_kb(kb_id)
-
-    return {"deleted_count": deleted_count, "total_requested": len(body.doc_ids)}
 
 
 # ============================================================

@@ -555,6 +555,15 @@ class DocumentPipeline:
 
         async def _process_batch(batch_idx: int, batch: list[str]):
             nonlocal completed_count
+            # 每批开始前检查是否已取消
+            async with self.db_session_factory() as check_session:
+                r = await check_session.execute(
+                    select(Document.status).where(Document.id == doc_id)
+                )
+                st = r.scalar_one_or_none()
+                if st is None or st == "cancelled":
+                    raise CancelledError(f"文档 {doc_id} 已被取消或删除")
+
             async with semaphore:
                 dense = await self.embedder.provider.embed(batch)
                 sparse = await self.embedder.provider.embed_sparse(batch)

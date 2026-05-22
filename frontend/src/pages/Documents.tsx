@@ -120,7 +120,11 @@ function Documents() {
     queryKey: ['documents', kbId, currentFolderId],
     queryFn: () => documentApi.list(kbId!, currentFolderId) as Promise<DocumentItem[]>,
     enabled: !!kbId,
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const docs = query.state.data as DocumentItem[] | undefined
+      const hasProcessing = docs?.some((d) => d.status === 'processing' || d.status === 'pending')
+      return hasProcessing || uploadingFiles.length > 0 ? 2000 : 5000
+    },
   })
 
   // 获取面包屑
@@ -174,16 +178,30 @@ function Documents() {
   })
 
   // 上传文件
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const uploadMutation = useMutation({
     mutationFn: ({ file, localId }: { file: File; localId: string }) => {
       return documentApi.upload(kbId!, file, currentFolderId).then((res) => ({ res, localId }))
     },
     onSuccess: ({ res, localId }) => {
-      setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
       if (res?.status === 'duplicate') {
+        setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
         toast(res.error_message || '文件已存在（内容重复）')
+      } else {
+        // 标记为 uploaded，保留在列表中直到服务端数据确认包含该文件
+        setUploadingFiles((prev) =>
+          prev.map((f) => (f.id === localId ? { ...f, status: 'uploaded' as const } : f))
+        )
       }
-      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      // 防抖刷新：批量上传时多个 onSuccess 只触发一次 refetch
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current)
+      }
+      refreshTimerRef.current = setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+        refreshTimerRef.current = null
+      }, 800)
     },
     onError: (err, { localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
@@ -376,18 +394,34 @@ function Documents() {
   // 合并列表
   // ============================================================
 
+  // 当服务端数据返回后，清理已标记为 uploaded 且服务端已确认的本地条目
+  const serverFilenames = new Set(documents.map((d) => d.filename))
+  const idsToRemove = uploadingFiles
+    .filter((f) => f.status === 'uploaded' && serverFilenames.has(f.filename))
+    .map((f) => f.id)
+  if (idsToRemove.length > 0) {
+    setTimeout(() => {
+      setUploadingFiles((prev) => prev.filter((f) => !idsToRemove.includes(f.id)))
+    }, 0)
+  }
+
+  // 构建合并列表：本地条目（未被服务端确认的）+ 服务端文档
+  // uploaded 状态的文件显示为 "pending"（排队中），避免消失
+  const confirmedLocalIds = new Set(idsToRemove)
   const allFiles: MergedFile[] = [
-    ...uploadingFiles.map((f) => ({
-      id: f.id,
-      filename: f.filename,
-      file_size: f.file_size,
-      status: f.status,
-      error_message: null,
-      chunk_count: 0,
-      progress: 0,
-      progress_message: null,
-      isLocal: true,
-    })),
+    ...uploadingFiles
+      .filter((f) => !confirmedLocalIds.has(f.id))
+      .map((f) => ({
+        id: f.id,
+        filename: f.filename,
+        file_size: f.file_size,
+        status: f.status === 'uploaded' ? 'pending' : f.status,
+        error_message: null,
+        chunk_count: 0,
+        progress: 0,
+        progress_message: null,
+        isLocal: true,
+      })),
     ...documents.map((doc) => ({
       id: doc.id,
       filename: doc.filename,
