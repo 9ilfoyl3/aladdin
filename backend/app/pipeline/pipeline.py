@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 _OCR_CONCURRENCY = 4
 
 
+class CancelledError(Exception):
+    """文档处理被取消（文档已删除或用户主动取消）"""
+    pass
+
+
 class DocumentPipeline:
     """文档处理管道，编排 load → chunk → enrich → embed → index 全流程"""
 
@@ -92,8 +97,9 @@ class DocumentPipeline:
 
         async with self.db_session_factory() as session:
             try:
-                # 更新状态为 processing
+                # 更新状态为 processing（立即提交，让前端轮询能看到）
                 await self._update_status(session, doc_id, "processing")
+                await session.commit()
 
                 # ─── 1. Load 阶段 ───
                 current_stage = PipelineStage.LOAD
@@ -118,6 +124,7 @@ class DocumentPipeline:
                 )
 
                 # ─── 2. OCR 阶段 ───
+                await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.OCR
                 stripped_content = load_result.content.strip()
                 needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
@@ -185,6 +192,7 @@ class DocumentPipeline:
                     await tracker.skip_stage(PipelineStage.OCR)
 
                 # ─── 3. Chunk 阶段 ───
+                await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.CHUNK
                 await tracker.start_stage(PipelineStage.CHUNK, "正在切分文档")
                 stage_start = time.monotonic()
@@ -226,6 +234,7 @@ class DocumentPipeline:
                 )
 
                 # ─── 4. Embed 阶段 ───
+                await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.EMBED
                 await tracker.start_stage(
                     PipelineStage.EMBED,
@@ -237,7 +246,7 @@ class DocumentPipeline:
 
                 # 使用带进度回调的 embed 方法
                 embed_result = await self._embed_with_progress(
-                    enriched_children, tracker
+                    enriched_children, tracker, doc_id
                 )
 
                 embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
@@ -263,6 +272,7 @@ class DocumentPipeline:
                 print(f"[Pipeline] 文档 {doc_id} embedding 完成")
 
                 # ─── 5. Index 阶段 ───
+                await self._check_cancelled(doc_id)
                 current_stage = PipelineStage.INDEX
                 await tracker.start_stage(PipelineStage.INDEX, "正在写入索引")
                 stage_start = time.monotonic()
@@ -359,6 +369,12 @@ class DocumentPipeline:
                     doc_id, len(chunk_result.parent_chunks), child_count,
                 )
 
+            except CancelledError:
+                print(f"[Pipeline] 文档 {doc_id} 处理已取消（文档被删除）")
+                logger.info("文档 %s 处理已取消", doc_id)
+                await session.rollback()
+                # 不标记失败，不 re-raise（任务静默终止）
+
             except Exception as e:
                 import traceback
                 print(f"[Pipeline] 文档 {doc_id} 处理失败: {type(e).__name__}: {e}")
@@ -422,15 +438,17 @@ class DocumentPipeline:
         self,
         texts: list[str],
         tracker: ProgressTracker,
+        doc_id: str = "",
     ):
         """带进度追踪的 embed 调用
 
-        将文本按 embedder 的 batch_size 分批，逐批调用 embed，
-        每完成一批更新子进度。
+        逐批调用 embedder，每完成一批更新子进度到数据库，
+        前端轮询时能看到实时进度。
 
         Args:
             texts: 待向量化的文本列表
             tracker: 进度追踪器
+            doc_id: 文档 ID（用于日志）
 
         Returns:
             EmbedResult
@@ -443,7 +461,7 @@ class DocumentPipeline:
         batch_size = self.embedder.batch_size
         total_batches = (len(texts) + batch_size - 1) // batch_size
 
-        # 如果批次较少，直接调用原始 embed（无需逐批追踪）
+        # 批次较少时直接一次性处理
         if total_batches <= 2:
             result = await self.embedder.embed(texts)
             await tracker.update_sub_progress(
@@ -452,17 +470,71 @@ class DocumentPipeline:
             )
             return result
 
-        # 批次较多时，使用原始 embed 但在过程中更新子进度
-        # 由于 embedder.embed 内部已经做了并发分批，我们直接调用它
-        # 但在调用前后更新进度
-        result = await self.embedder.embed(texts)
+        # 批次较多时，逐批处理并实时更新进度
+        import asyncio
+        import math
 
-        # embed 完成后更新最终子进度
-        await tracker.update_sub_progress(
-            PipelineStage.EMBED, total_batches, total_batches,
-            f"正在生成向量 ({total_batches}/{total_batches} 批)"
-        )
-        return result
+        # 清洗和截断文本（复用 embedder 的逻辑）
+        sanitized = self.embedder._sanitize_texts(texts)
+        sanitized = self.embedder._truncate_texts(sanitized)
+
+        # 构建批次
+        batches = []
+        for i in range(0, len(sanitized), batch_size):
+            batches.append(sanitized[i:i + batch_size])
+
+        print(f"[Pipeline] 文档 {doc_id} embed 逐批处理: {total_batches} 批, batch_size={batch_size}, 并发={self.embedder.concurrency}")
+
+        # 并发处理，但每完成一批就更新进度
+        semaphore = asyncio.Semaphore(self.embedder.concurrency)
+        results: list[tuple[list[list[float]], list[dict[int, float]]] | None] = [None] * len(batches)
+        completed_count = 0
+        progress_lock = asyncio.Lock()
+
+        async def _process_batch(batch_idx: int, batch: list[str]):
+            nonlocal completed_count
+            async with semaphore:
+                dense = await self.embedder.provider.embed(batch)
+                sparse = await self.embedder.provider.embed_sparse(batch)
+                results[batch_idx] = (dense, sparse)
+
+            # 更新进度
+            async with progress_lock:
+                completed_count += 1
+                # 每 5 批或最后一批更新一次进度（避免过于频繁的 DB 写入）
+                if completed_count % 5 == 0 or completed_count == total_batches:
+                    await tracker.update_sub_progress(
+                        PipelineStage.EMBED, completed_count, total_batches,
+                        f"正在生成向量 ({completed_count}/{total_batches} 批)"
+                    )
+                # 日志：每 10% 输出一次
+                if total_batches > 10 and completed_count % max(1, total_batches // 10) == 0:
+                    print(f"[Pipeline] 文档 {doc_id} embed 进度: {completed_count}/{total_batches} 批 ({completed_count * 100 // total_batches}%)")
+
+        await asyncio.gather(*[_process_batch(i, batch) for i, batch in enumerate(batches)])
+
+        # 合并结果
+        all_dense: list[list[float]] = []
+        all_sparse: list[dict[int, float]] = []
+        for dense, sparse in results:
+            all_dense.extend(dense)
+            all_sparse.extend(sparse)
+
+        # 修复 NaN
+        has_nan = False
+        for idx, vec in enumerate(all_dense):
+            if any(math.isnan(v) or math.isinf(v) for v in vec):
+                has_nan = True
+                all_dense[idx] = self.embedder._fix_nan_vector(vec)
+        for idx, sp in enumerate(all_sparse):
+            if not sp or any(math.isnan(v) or math.isinf(v) for v in sp.values()):
+                has_nan = True
+                all_sparse[idx] = self.embedder._fix_nan_sparse(sp)
+        if has_nan:
+            logger.warning("检测到 embedding 结果包含 NaN，已修复")
+
+        print(f"[Pipeline] 文档 {doc_id} embed 完成，共 {len(all_dense)} 个向量")
+        return EmbedResult(dense_vectors=all_dense, sparse_vectors=all_sparse)
 
     async def _process_embedded_images(
         self, load_result: LoadResult, doc_id: str
@@ -617,3 +689,13 @@ class DocumentPipeline:
             doc.chunk_count = chunk_count
         if error_message is not None:
             doc.error_message = error_message
+
+    async def _check_cancelled(self, doc_id: str) -> None:
+        """检查文档是否已被取消/删除，是则抛出异常终止处理"""
+        async with self.db_session_factory() as session:
+            result = await session.execute(
+                select(Document.status).where(Document.id == doc_id)
+            )
+            status = result.scalar_one_or_none()
+            if status is None or status == "cancelled":
+                raise CancelledError(f"文档 {doc_id} 已被取消或删除")

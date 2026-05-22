@@ -137,13 +137,16 @@ async def _enqueue_or_fallback(
     if queue is not None:
         try:
             msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path)
-            await queue.enqueue(msg)
+            msg_id = await queue.enqueue(msg)
+            print(f"[Queue] 文档 {doc_id} 已入队 Redis Stream (msg_id={msg_id})")
             return
         except Exception as e:
+            print(f"[Queue] ⚠️ Redis 入队失败，降级为 create_task: {e}")
             logger.warning(
                 "Redis unavailable, falling back to in-process task: %s", e
             )
     else:
+        print(f"[Queue] ⚠️ Redis 不可用，降级为 create_task (doc_id={doc_id})")
         logger.warning("Redis unavailable, falling back to in-process task")
     # 降级：使用 asyncio.create_task
     asyncio.create_task(_run_pipeline_safe(file_path, doc_id, kb_id))
@@ -269,6 +272,7 @@ async def upload_document(
 
     await db.flush()
     await db.refresh(doc)
+    await db.commit()
 
     # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
     await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
@@ -360,11 +364,22 @@ async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/api/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
-    """删除文档（级联清理 chunks + Milvus 向量）"""
+    """删除文档（级联清理 chunks + Milvus 向量 + 取消处理中的任务）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
+
+    # 如果文档正在处理中，先标记为 cancelled（Pipeline 各阶段会检查此状态并终止）
+    if doc.status in ("pending", "processing"):
+        doc.status = "cancelled"
+        await db.flush()
+        await db.commit()
+        # 重新开启事务继续删除
+        result = await db.execute(select(Document).where(Document.id == doc_id))
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            return  # 已被 Pipeline 清理
 
     # 获取该文档的所有 chunk_id，用于清理 Milvus
     chunk_result = await db.execute(
@@ -740,6 +755,8 @@ async def upload_folder(
 
             # 更新知识库文档计数
             kb.doc_count = (kb.doc_count or 0) + 1
+            await db.flush()
+            await db.commit()
 
             # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
             await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)

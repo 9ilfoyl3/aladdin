@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.pipeline.queue import TaskMessage, TaskQueue
+from app.pipeline.pipeline import CancelledError
 from app.schema.db import Document
 
 if TYPE_CHECKING:
@@ -24,8 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("pipeline.worker")
 
-# 不可重试的错误类型：文件不存在、参数错误、权限不足
-NON_RETRYABLE_ERRORS = (FileNotFoundError, ValueError, PermissionError)
+# 不可重试的错误类型：文件不存在、参数错误、权限不足、任务取消
+NON_RETRYABLE_ERRORS = (FileNotFoundError, ValueError, PermissionError, CancelledError)
 
 
 class PipelineWorker:
@@ -130,12 +131,15 @@ class PipelineWorker:
         """
         # 幂等检查：文档已完成则跳过
         if await self._is_document_completed(msg.doc_id):
+            print(f"[Worker] 文档 {msg.doc_id} 已完成/取消/删除，跳过")
             logger.info(
                 "Document %s already completed, skipping (trace_id=%s)",
                 msg.doc_id, msg.trace_id,
             )
             await self._queue.ack(message_id)
             return
+
+        print(f"[Worker] 开始处理文档 {msg.doc_id} (trace_id={msg.trace_id})")
 
         # 通过 semaphore 控制并发
         async with self.semaphore:
@@ -213,13 +217,15 @@ class PipelineWorker:
             await self._queue.move_to_dlq(message_id, msg, error_str)
 
     async def _is_document_completed(self, doc_id: str) -> bool:
-        """检查文档是否已完成处理
+        """检查文档是否应跳过处理
+
+        跳过条件：文档已完成、已取消、或已被删除（不存在）。
 
         Args:
             doc_id: 文档 ID
 
         Returns:
-            True 如果文档状态为 completed
+            True 如果文档应跳过处理
         """
         try:
             async with self._db_session_factory() as session:
@@ -227,10 +233,15 @@ class PipelineWorker:
                     select(Document.status).where(Document.id == doc_id)
                 )
                 status = result.scalar_one_or_none()
-                return status == "completed"
+                # 文档不存在时可能是事务还没提交，不视为已删除
+                if status is None:
+                    return False
+                return status in ("completed", "cancelled")
         except Exception as e:
+            print(f"[Worker] ❌ 查询文档状态失败 {doc_id}: {e}")
             logger.warning(
                 "Failed to check document status for %s: %s", doc_id, e
             )
             # 无法确认状态时，继续处理（不跳过）
+            return False
             return False

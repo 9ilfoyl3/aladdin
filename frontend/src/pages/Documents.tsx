@@ -140,10 +140,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setShowNewFolder(false)
-      toast.success('文件夹已创建')
+      toast('文件夹已创建')
     },
     onError: (err) => {
-      toast.error(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -154,10 +154,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setRenamingFolder(null)
-      toast.success('已重命名')
+      toast('已重命名')
     },
     onError: (err) => {
-      toast.error(`重命名失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`重命名失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -166,10 +166,10 @@ function Documents() {
     mutationFn: (folderId: string) => folderApi.delete(folderId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
-      toast.success('文件夹已删除')
+      toast('文件夹已删除')
     },
     onError: (err) => {
-      toast.error(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -181,13 +181,13 @@ function Documents() {
     onSuccess: ({ res, localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
       if (res?.status === 'duplicate') {
-        toast.warning(res.error_message || '文件已存在（内容重复）')
+        toast(res.error_message || '文件已存在（内容重复）')
       }
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
     },
     onError: (err, { localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
-      toast.error(`上传失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`上传失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -196,10 +196,10 @@ function Documents() {
     mutationFn: (id: string) => documentApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
-      toast.success('文档已删除')
+      toast('文档已删除')
     },
     onError: (err) => {
-      toast.error(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -208,13 +208,13 @@ function Documents() {
     mutationFn: (docIds: string[]) => documentApi.batchDelete(docIds),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
-      toast.success(`已删除 ${data.deleted_count} 个文档`)
+      toast(`已删除 ${data.deleted_count} 个文档`)
       setSelectedIds(new Set())
       setSelectionMode(false)
       setShowDeleteConfirm(false)
     },
     onError: (err) => {
-      toast.error(`批量删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`批量删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
       setShowDeleteConfirm(false)
     },
   })
@@ -224,10 +224,10 @@ function Documents() {
     mutationFn: (id: string) => documentApi.retry(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
-      toast.success('已重新提交解析')
+      toast('已重新提交解析')
     },
     onError: (err) => {
-      toast.error(`重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      toast(`重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -384,6 +384,8 @@ function Documents() {
       status: f.status,
       error_message: null,
       chunk_count: 0,
+      progress: 0,
+      progress_message: null,
       isLocal: true,
     })),
     ...documents.map((doc) => ({
@@ -393,6 +395,8 @@ function Documents() {
       status: doc.status,
       error_message: doc.error_message,
       chunk_count: doc.chunk_count,
+      progress: doc.progress ?? 0,
+      progress_message: doc.progress_message ?? null,
       isLocal: false,
     })),
   ]
@@ -684,7 +688,7 @@ function Documents() {
                     <ContextMenuItem
                       onClick={() => {
                         navigator.clipboard.writeText(doc.filename)
-                        toast.success('已复制文件名')
+                        toast('已复制文件名')
                       }}
                     >
                       <Copy className="h-4 w-4 mr-2" />

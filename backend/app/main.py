@@ -61,32 +61,41 @@ async def _start_pipeline_worker(app: FastAPI) -> None:
     app.state.task_queue = task_queue
 
     if task_queue is not None:
-        # 创建 DocumentPipeline 实例
-        model_manager = get_model_manager()
-        milvus_client = MilvusClient(
-            host=settings.milvus_host, port=settings.milvus_port
-        )
-        pipeline = DocumentPipeline(
-            model_manager=model_manager,
-            milvus_client=milvus_client,
-            db_session_factory=async_session,
-        )
+        try:
+            # 创建 DocumentPipeline 实例
+            model_manager = get_model_manager()
+            milvus_client = MilvusClient(
+                host=settings.milvus_host, port=settings.milvus_port
+            )
+            pipeline = DocumentPipeline(
+                model_manager=model_manager,
+                milvus_client=milvus_client,
+                db_session_factory=async_session,
+            )
 
-        # 创建并启动 PipelineWorker
-        worker = PipelineWorker(
-            queue=task_queue,
-            pipeline=pipeline,
-            db_session_factory=async_session,
-            max_concurrent=settings.pipeline_max_concurrent,
-            max_retries=settings.pipeline_max_retries,
-        )
-        app.state.pipeline_worker = worker
+            # 创建并启动 PipelineWorker
+            worker = PipelineWorker(
+                queue=task_queue,
+                pipeline=pipeline,
+                db_session_factory=async_session,
+                max_concurrent=settings.pipeline_max_concurrent,
+                max_retries=settings.pipeline_max_retries,
+            )
+            app.state.pipeline_worker = worker
 
-        # 以后台任务方式启动 Worker
-        worker_task = asyncio.create_task(worker.start())
-        app.state.pipeline_worker_task = worker_task
-        logger.info("Pipeline worker initialized and started")
+            # 以后台任务方式启动 Worker
+            worker_task = asyncio.create_task(worker.start())
+            app.state.pipeline_worker_task = worker_task
+            print(f"[Worker] Pipeline worker initialized, max_concurrent={settings.pipeline_max_concurrent}")
+            logger.info("Pipeline worker initialized and started")
+        except Exception as e:
+            logger.error("Failed to start pipeline worker: %s", e, exc_info=True)
+            print(f"[Worker] ❌ Failed to start pipeline worker: {e}")
+            app.state.task_queue = task_queue  # 保留 queue 用于入队
+            app.state.pipeline_worker = None
+            app.state.pipeline_worker_task = None
     else:
+        print("[Worker] ⚠️ Redis unavailable, using fallback mode (asyncio.create_task)")
         logger.warning(
             "Redis unavailable, pipeline worker not started, using fallback mode"
         )

@@ -17,6 +17,8 @@ export interface DocumentItem {
   status: string
   error_message: string | null
   chunk_count: number
+  progress: number
+  progress_message: string | null
   created_at: string
   folder_id?: string | null
 }
@@ -37,6 +39,8 @@ export interface MergedFile {
   status: string
   error_message: string | null
   chunk_count: number
+  progress: number
+  progress_message: string | null
   isLocal: boolean
 }
 
@@ -170,10 +174,19 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
         )}
 
         {/* 非完成状态指示器 - 底部居中 */}
-        {doc.status !== 'completed' && doc.status !== 'uploading' && doc.status !== 'failed' && (
+        {doc.status === 'processing' && (
+          <div className="absolute bottom-0 inset-x-0">
+            <div className="h-1 bg-muted/60 rounded-b overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-500 ease-out"
+                style={{ width: `${doc.progress || 0}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {doc.status === 'pending' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
             <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
-              {doc.status === 'processing' && <Loader2 className="h-2 w-2 mr-0.5 animate-spin" />}
               {statusLabel(doc.status)}
             </Badge>
           </div>
