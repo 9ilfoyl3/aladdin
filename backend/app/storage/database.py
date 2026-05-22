@@ -42,24 +42,29 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def _migrate_db() -> None:
     """执行增量迁移（为已有表添加新列，兼容已运行的数据库）"""
-    async with engine.begin() as conn:
-        migrations = [
-            "ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT TRUE",
-            "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
-            "ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT TRUE",
-            "ALTER TABLE llm_configs ADD COLUMN thinking_enabled BOOLEAN DEFAULT FALSE",
-            # 文档表新增字段
-            "ALTER TABLE documents ADD COLUMN folder_id VARCHAR REFERENCES folders(id)",
-            # 文档表新增进度追踪字段
-            "ALTER TABLE documents ADD COLUMN progress INTEGER DEFAULT 0",
-            "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
-            "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
-        ]
-        for sql in migrations:
-            try:
+    migrations = [
+        "ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
+        "ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE llm_configs ADD COLUMN thinking_enabled BOOLEAN DEFAULT FALSE",
+        # 文档表新增字段
+        "ALTER TABLE documents ADD COLUMN folder_id VARCHAR REFERENCES folders(id)",
+        # 文档表新增进度追踪字段
+        "ALTER TABLE documents ADD COLUMN progress INTEGER DEFAULT 0",
+        "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
+        "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
+    ]
+    for sql in migrations:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(sql))
-            except Exception:
-                pass  # 列已存在，忽略
+        except Exception as e:
+            # 列已存在是正常的，其他错误需要关注
+            if "already exists" in str(e) or "DuplicateColumn" in str(e):
+                pass
+            else:
+                import logging
+                logging.getLogger(__name__).warning("Migration 跳过: %s | 原因: %s", sql.strip()[:60], e)
 
 
 async def init_db() -> None:

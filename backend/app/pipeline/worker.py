@@ -244,4 +244,3 @@ class PipelineWorker:
             )
             # 无法确认状态时，继续处理（不跳过）
             return False
-            return False
