@@ -18,10 +18,10 @@ infra:
 infra-down:
 	docker compose down
 
-# 同时启动前后端开发服务
+# 同时启动前后端 + Worker 开发服务
 dev:
-	@echo "启动前后端开发服务..."
-	@make -j2 dev-backend dev-frontend
+	@echo "启动前后端 + Worker 开发服务..."
+	@make -j3 dev-backend dev-frontend dev-worker
 
 # 启动后端开发服务
 dev-backend:

@@ -209,7 +209,39 @@
 
 ---
 
-## 五、文件类型扩展
+## 五、Worker 架构演进
+
+### 14. 任务队列框架评估与演进（Redis Streams → Celery/Dramatiq）
+- **现状**: gf-deployment 已实现 Worker 独立进程 + Redis Streams 消费，支持熔断/超时/健康检查
+- **当前方案优势**: 轻量、无额外依赖、对单一任务类型（文档处理）足够
+- **局限性**:
+  - 多任务类型路由需自行实现（如文档处理、Agent 工作流、定时清理分不同队列）
+  - 定时任务（Beat）无内置支持
+  - 任务编排（链式/并行/chord）需手写
+  - 监控面板需自建
+  - 水平扩展时 consumer 注册/注销需手动管理
+- **业界参考**:
+  - Dify: Celery + Redis Broker，api/worker/worker_beat 三服务分离，多队列路由（dataset/workflow/mail）
+  - RAGFlow: 自研 Task Executor，独立进程，通过 Redis 通信
+  - Haystack: 推荐 Celery 做 indexing pipeline 异步化
+- **演进触发条件**（满足任一即考虑迁移）:
+  - 需要定时任务调度（缓存清理、统计报表、数据同步）
+  - 需要多种任务类型优先级路由（文档处理 vs Agent 执行 vs 通知）
+  - Worker 实例 > 3 个，需要自动负载均衡和监控
+- **候选方案对比**:
+  | 方案 | 优势 | 劣势 |
+  |------|------|------|
+  | Celery | 生态最成熟、Beat/Flower/Canvas 全套、社区大 | 重、配置复杂、偶发内存泄漏 |
+  | Dramatiq | 轻量、API 更现代、性能好 | 生态小、无官方 Beat |
+  | arq | 纯 asyncio、极轻量、Redis 原生 | 功能少、无任务编排 |
+  | 维持 Redis Streams | 零依赖、完全可控 | 功能需自建、维护成本随复杂度增长 |
+- **建议路径**: 短期维持 Redis Streams（当前够用），中期如需 Beat/多队列则引入 arq 或 Dramatiq（asyncio 友好），长期如任务类型 > 5 种考虑 Celery
+- **优先级**: 低（当前架构满足需求，作为技术储备跟踪）
+- **预估工作量**: 评估 1 天，迁移 3-5 天
+
+---
+
+## 六、文件类型扩展
 
 ### 13. 音频文件上传解析（mp3/m4a/wav）
 - **文件**: 新建 `backend/app/pipeline/loaders/audio_loader.py`、修改 `loader.py`、`document.py`、前端 `Documents.tsx`
@@ -244,3 +276,4 @@
 10. #9 超长记录拆分
 11. #2 Embedding 配置化
 12. #12 大文件上传方案（当前优先级低，等有明确业务需求再实施）
+13. #14 任务队列框架演进（技术储备，触发条件满足时再迁移）
