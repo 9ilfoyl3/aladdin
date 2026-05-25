@@ -239,6 +239,8 @@ async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSess
             status=d.status,
             error_message=d.error_message,
             chunk_count=d.chunk_count,
+            progress=d.progress or 0,
+            progress_message=d.progress_message,
             created_at=d.created_at.isoformat() if d.created_at else "",
         )
         for d in docs
@@ -365,6 +367,8 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
         status=doc.status,
         error_message=doc.error_message,
         chunk_count=doc.chunk_count,
+        progress=doc.progress or 0,
+        progress_message=doc.progress_message,
         created_at=doc.created_at.isoformat() if doc.created_at else "",
     )
 
