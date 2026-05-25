@@ -216,19 +216,9 @@ OCRProvider (Abstract Base Class)
 
 ---
 
-## Embedding / Rerank Provider Selection Guide
+## Embedding / Rerank Service Configuration
 
-| Feature | `sentence-transformers` | `flag-embedding` | `remote` |
-|---------|------------------------|------------------|----------|
-| Cross-platform | ✅ Mac / Windows / Linux | ⚠️ Mac / Linux OK, Windows difficult | ✅ Any platform |
-| Requires local model | ✅ Download needed | ✅ Download needed | ❌ Not needed |
-| Dense vectors | ✅ Supported | ✅ Supported | ✅ Supported |
-| Sparse vectors | ❌ Placeholder values | ✅ Native lexical weights | ❌ Placeholder values |
-| Rerank | ✅ CrossEncoder | ✅ FlagReranker | ✅ Calls remote service |
-| Installation difficulty | Low | Medium | None (HTTP calls) |
-| Recommended for | Local dev, Windows | Production, best retrieval quality | Dedicated Embedding/Rerank services available |
-
-Environment variables determine the default configuration at first startup. After startup, multiple configurations (local/remote) can be dynamically added and switched on the frontend **Embedding** page without restart.
+The system calls external Embedding and Rerank services via HTTP API, supporting any OpenAI-compatible interface.
 
 ### Remote Service URL Rules
 
@@ -236,6 +226,12 @@ Environment variables determine the default configuration at first startup. Afte
 |---------------|-----------|---------|
 | OpenAI-compatible (TEI/Infinity/vLLM) | Fill to `/v1`, system auto-appends `/embeddings` or `/rerank` | `http://server:8080/v1` |
 | Custom interface | Fill complete endpoint path | `http://server:8001/ranking_score` |
+
+### Configuration Methods
+
+- **Environment variables**: `EMBED_PROVIDER=remote` + `EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY`
+- **Frontend page**: After startup, dynamically add/switch on the **Embedding Config** page, takes effect immediately without restart
+- Database configs with `is_active=True` take priority over environment variables
 
 ---
 
@@ -246,25 +242,27 @@ Environment variables determine the default configuration at first startup. Afte
 | `LLM_PROVIDER` | ollama | LLM provider (ollama / vllm) |
 | `LLM_BASE_URL` | http://localhost:11434 | LLM service URL |
 | `LLM_MODEL` | qwen2.5:7b | LLM model name |
-| `LLM_API_KEY` | - | API key (required for remote services) |
-| `EMBED_PROVIDER` | sentence-transformers | Embedding backend (sentence-transformers / flag-embedding / remote) |
-| `EMBED_MODEL` | BAAI/bge-m3 | Embedding model name or local path |
-| `EMBED_DEVICE` | cpu | Inference device (cuda / cpu / mps) |
-| `EMBED_BASE_URL` | - | Remote Embedding service URL (for remote provider) |
-| `EMBED_API_KEY` | - | Remote Embedding service key (for remote provider) |
-| `RERANK_PROVIDER` | sentence-transformers | Rerank backend (sentence-transformers / flag-embedding / remote) |
+| `LLM_API_KEY` | - | API key |
+| `EMBED_PROVIDER` | remote | Embedding backend (remote recommended) |
+| `EMBED_BASE_URL` | - | Embedding service URL |
+| `EMBED_MODEL` | BAAI/bge-m3 | Embedding model name |
+| `EMBED_API_KEY` | - | Embedding service key |
+| `RERANK_PROVIDER` | remote | Rerank backend (remote recommended) |
+| `RERANK_BASE_URL` | - | Rerank service URL |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank model |
-| `RERANK_DEVICE` | cpu | Inference device (cuda / cpu / mps) |
-| `RERANK_BASE_URL` | - | Remote Rerank service URL (for remote provider) |
-| `RERANK_API_KEY` | - | Remote Rerank service key (for remote provider) |
-| `DATABASE_URL` | postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin | PostgreSQL connection URL |
+| `RERANK_API_KEY` | - | Rerank service key |
+| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL connection URL |
 | `MILVUS_HOST` | localhost | Milvus address |
 | `MILVUS_PORT` | 19530 | Milvus port |
+| `REDIS_URL` | redis://localhost:6379/0 | Redis connection URL (task queue + cache) |
 | `AGENT_MAX_ITERATIONS` | 3 | Agent max iteration count |
 | `AGENT_TIMEOUT` | 30.0 | Agent timeout (seconds) |
 | `PARENT_CHUNK_SIZE` | 1500 | Parent chunk size (characters) |
 | `CHILD_CHUNK_SIZE` | 300 | Child chunk size (characters) |
 | `CHUNK_OVERLAP` | 50 | Child chunk overlap (characters) |
+| `PIPELINE_MAX_CONCURRENT` | 3 | Worker max concurrent document processing |
+| `PIPELINE_MAX_RETRIES` | 3 | Document processing max retries |
+| `PIPELINE_TASK_TIMEOUT_MINUTES` | 30 | Single document processing timeout (minutes) |
 
 ---
 

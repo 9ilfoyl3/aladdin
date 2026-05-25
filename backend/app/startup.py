@@ -140,7 +140,9 @@ async def load_ocr_manager() -> OCRManager | None:
             result = await session.execute(select(OCRConfig))
             configs = result.scalars().all()
         if configs:
+            logger.info("load_ocr_manager: 找到 %d 条 OCR 配置", len(configs))
             return OCRManager(configs)
+        logger.info("load_ocr_manager: 数据库中无 OCR 配置")
         return None
     except Exception as e:
         logger.warning("加载 OCR 配置失败: %s", e)
