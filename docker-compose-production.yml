@@ -5,6 +5,7 @@ services:
   # ============ 基础设施 ============
 
   etcd:
+    container_name: arag-etcd
     image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.25}
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -22,6 +23,7 @@ services:
     restart: unless-stopped
 
   minio:
+    container_name: arag-minio
     image: ${IMAGE_MINIO:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
     environment:
       MINIO_ACCESS_KEY: minioadmin
@@ -37,6 +39,7 @@ services:
     restart: unless-stopped
 
   milvus:
+    container_name: arag-milvus
     image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.4.6}
     command: ["milvus", "run", "standalone"]
     environment:
@@ -57,6 +60,7 @@ services:
     restart: unless-stopped
 
   postgres:
+    container_name: arag-postgres
     image: ${IMAGE_POSTGRES:-postgres:16-alpine}
     environment:
       POSTGRES_DB: aladdin
@@ -76,7 +80,9 @@ services:
   # ============ 应用服务 ============
 
   redis:
+    container_name: arag-redis
     image: ${IMAGE_REDIS:-redis:7-alpine}
+    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
     expose:
       - "6379"
     volumes:
@@ -89,6 +95,7 @@ services:
     restart: unless-stopped
 
   backend:
+    container_name: arag-backend
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
     ports:
       - "8000:8000"
@@ -124,6 +131,7 @@ services:
     restart: unless-stopped
 
   worker:
+    container_name: arag-worker
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
     command: ["python", "-m", "app.worker_main"]
     environment:
@@ -161,6 +169,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    container_name: arag-frontend
     image: ${IMAGE_FRONTEND:-aladdin-frontend:latest}
     ports:
       - "${FRONTEND_PORT:-8888}:80"
