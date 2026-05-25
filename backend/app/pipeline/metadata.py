@@ -92,8 +92,17 @@ class MetadataExtractor:
         file_type = doc_metadata.get("file_type", "")
         chunker_type = doc_metadata.get("chunker_type", "hierarchical")
 
-        # 拼接全文用于章节路径提取
-        full_text = "\n".join(parent_chunks) if parent_chunks else ""
+        # 判断是否需要章节路径提取（CSV 预切分等场景跳过，避免 O(n²) 全文扫描）
+        # 当每个 parent 只有一个 child 且数量 > 100 时，认为是预切分场景
+        skip_section_path = (
+            len(parent_chunks) > 100
+            and all(len(children) == 1 for children in parent_child_map.values())
+        )
+
+        # 拼接全文用于章节路径提取（仅在需要时）
+        full_text = ""
+        if not skip_section_path and parent_chunks:
+            full_text = "\n".join(parent_chunks)
 
         metadata_list: list[ChunkMetadata] = []
         for child_idx, child_text in enumerate(child_chunks):
@@ -102,8 +111,10 @@ class MetadataExtractor:
             if file_type == "pdf" and page_texts:
                 page_num = self._detect_page_num(child_text, page_texts)
 
-            # 提取章节路径
-            section_path = self._extract_section_path(child_text, full_text)
+            # 提取章节路径（预切分场景跳过）
+            section_path = []
+            if not skip_section_path and full_text:
+                section_path = self._extract_section_path(child_text, full_text)
 
             # 判断元素类型
             element_type = self._detect_element_type(child_text)

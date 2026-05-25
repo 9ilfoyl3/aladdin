@@ -370,7 +370,7 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
-async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
+async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """重新识别文档（清除旧数据后重新处理）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
@@ -398,7 +398,7 @@ async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     doc.chunk_count = 0
     await db.flush()
 
-    # 重新触发管道
+    # 重新触发管道（优先入队 Redis Stream）
     file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
     if not file_path.exists():
         doc.status = "failed"
@@ -406,7 +406,17 @@ async def retry_document(doc_id: str, db: AsyncSession = Depends(get_db)):
         await db.flush()
         raise HTTPException(status_code=400, detail="原始文件已丢失")
 
-    asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+    # 尝试入队 Redis Stream，降级为 create_task
+    queue = _get_task_queue(request)
+    if queue is not None:
+        try:
+            msg = TaskMessage(doc_id=doc_id, kb_id=doc.kb_id, file_path=str(file_path))
+            await queue.enqueue(msg)
+        except Exception as e:
+            logger.warning("Redis 入队失败，降级为 create_task: %s", e)
+            asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+    else:
+        asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
 
     return DocumentResponse(
         id=doc.id,
@@ -440,19 +450,14 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
         if doc is None:
             return  # 已被 Pipeline 清理
 
-    # 获取该文档的所有 chunk_id，用于清理 Milvus
-    chunk_result = await db.execute(
-        select(Chunk.id).where(Chunk.doc_id == doc_id)
-    )
-    chunk_ids = [row[0] for row in chunk_result.all()]
-
     # 删除 Milvus 中的向量
-    if chunk_ids:
-        try:
-            milvus = _get_milvus()
-            await milvus.delete(doc.kb_id, chunk_ids)
-        except Exception as e:
-            logger.warning("删除 Milvus 向量失败（可忽略）: %s", e)
+    # 使用 doc_id 表达式删除（覆盖 Pipeline 可能已写入但 DB 未 commit 的孤儿向量）
+    try:
+        milvus = _get_milvus()
+        if await milvus.has_collection(doc.kb_id):
+            await milvus.delete_by_doc_id(doc.kb_id, doc_id)
+    except Exception as e:
+        logger.warning("删除 Milvus 向量失败（可忽略）: %s", e)
 
     # 更新知识库文档计数
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == doc.kb_id))
@@ -559,16 +564,20 @@ async def _batch_cleanup_background(
     kb_ids_affected: set[str],
 ) -> None:
     """后台清理 Milvus 向量、本地文件和缓存（不阻塞 API 响应）"""
-    # 删除 Milvus 向量
-    for kb_id, chunk_ids in kb_chunk_map.items():
-        if chunk_ids:
-            try:
-                milvus = _get_milvus()
-                for i in range(0, len(chunk_ids), 1000):
-                    batch = chunk_ids[i:i + 1000]
-                    await milvus.delete(kb_id, batch)
-            except Exception as e:
-                logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
+    # 删除 Milvus 向量（使用 doc_id 表达式删除，覆盖孤儿向量）
+    # 按 kb_id 分组，对每个文档用 delete_by_doc_id 确保清理干净
+    kb_doc_map: dict[str, list[str]] = {}
+    for info in cleanup_info:
+        kb_doc_map.setdefault(info["kb_id"], []).append(info["id"])
+
+    for kb_id, doc_ids in kb_doc_map.items():
+        try:
+            milvus = _get_milvus()
+            if await milvus.has_collection(kb_id):
+                for doc_id in doc_ids:
+                    await milvus.delete_by_doc_id(kb_id, doc_id)
+        except Exception as e:
+            logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
 
     # 删除本地文件
     for info in cleanup_info:

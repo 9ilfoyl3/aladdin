@@ -322,15 +322,21 @@ class DocumentPipeline:
                     doc_metadata=load_result.metadata,
                     page_texts=load_result.page_texts if load_result.page_texts else None,
                 )
+                print(f"[Pipeline] 文档 {doc_id} 元数据提取完成，共 {len(metadata_list)} 条")
 
                 # 使用 ContextualEmbedder 构造上下文增强的 embedding 输入
+                # 构建子→父反向索引（O(1) 查找，避免 O(n²) 遍历）
+                child_to_parent = self._build_child_to_parent_map(chunk_result.parent_child_map)
                 ctx_embedder = ContextualEmbedder()
                 embed_texts = []
                 for child_idx, (child_text, meta) in enumerate(zip(enriched_children, metadata_list)):
-                    parent_idx = self._find_parent(chunk_result.parent_child_map, child_idx)
+                    parent_idx = child_to_parent.get(child_idx)
                     parent_text = chunk_result.parent_chunks[parent_idx] if parent_idx is not None else None
                     embed_text = ctx_embedder.build_embed_text(child_text, meta, parent_text)
                     embed_texts.append(embed_text)
+                print(f"[Pipeline] 文档 {doc_id} 上下文增强构造完成，共 {len(embed_texts)} 个文本，准备调用 _embed_with_progress")
+                import sys
+                sys.stdout.flush()
 
                 # 使用增强后的文本进行 embedding
                 embed_result = await self._embed_with_progress(
@@ -392,7 +398,7 @@ class DocumentPipeline:
                 for child_idx, child_text in enumerate(enriched_children):
                     child_id = str(uuid.uuid4())
 
-                    parent_idx = self._find_parent(chunk_result.parent_child_map, child_idx)
+                    parent_idx = child_to_parent.get(child_idx)
                     parent_id = parent_ids[parent_idx] if parent_idx is not None else None
 
                     # 构造 chunk_metadata JSON
@@ -413,7 +419,7 @@ class DocumentPipeline:
                     milvus_data.append({
                         "chunk_id": child_id,
                         "doc_id": doc_id,
-                        "content": child_text[:65535],
+                        "content": self._truncate_utf8(child_text, 60000),
                         "dense_vector": embed_result.dense_vectors[child_idx],
                         "sparse_vector": embed_result.sparse_vectors[child_idx],
                         "parent_id": parent_id or "",
@@ -477,6 +483,16 @@ class DocumentPipeline:
                 print(f"[Pipeline] 文档 {doc_id} 处理已取消（文档被删除）")
                 logger.info("文档 %s 处理已取消", doc_id)
                 await session.rollback()
+
+                # 清理可能已写入 Milvus 的孤儿向量
+                # （Index 阶段分批写入时被取消，部分批次已写入 Milvus 但 DB 已 rollback）
+                try:
+                    await self._cleanup_milvus_on_cancel(kb_id, doc_id)
+                except Exception as cleanup_err:
+                    logger.warning(
+                        "文档 %s 取消后清理 Milvus 失败（非致命）: %s",
+                        doc_id, cleanup_err,
+                    )
                 # 不标记失败，不 re-raise（任务静默终止）
 
             except Exception as e:
@@ -588,41 +604,75 @@ class DocumentPipeline:
             batches.append(sanitized[i:i + batch_size])
 
         print(f"[Pipeline] 文档 {doc_id} embed 逐批处理: {total_batches} 批, batch_size={batch_size}, 并发={self.embedder.concurrency}")
+        import sys
+        sys.stdout.flush()
 
         # 并发处理，但每完成一批就更新进度
         semaphore = asyncio.Semaphore(self.embedder.concurrency)
         results: list[tuple[list[list[float]], list[dict[int, float]]] | None] = [None] * len(batches)
         completed_count = 0
         progress_lock = asyncio.Lock()
+        _cancelled = False  # 共享取消标志，让所有批次协程快速退出
+
+        # 获取 provider 引用（避免在并发中反复通过 property 获取）
+        provider = self.embedder.provider
+        print(f"[Pipeline] 文档 {doc_id} provider 类型: {type(provider).__name__}, 开始提交批次任务")
+        sys.stdout.flush()
 
         async def _process_batch(batch_idx: int, batch: list[str]):
-            nonlocal completed_count
-            # 每批开始前检查是否已取消
-            async with self.db_session_factory() as check_session:
-                r = await check_session.execute(
-                    select(Document.status).where(Document.id == doc_id)
-                )
-                st = r.scalar_one_or_none()
-                if st is None or st == "cancelled":
-                    raise CancelledError(f"文档 {doc_id} 已被取消或删除")
+            nonlocal completed_count, _cancelled
+
+            # 快速退出：如果已取消，不再发送请求
+            if _cancelled:
+                return
 
             async with semaphore:
-                dense = await self.embedder.provider.embed(batch)
-                sparse = await self.embedder.provider.embed_sparse(batch)
+                # 获得 semaphore 后再次检查（可能在等待期间被取消）
+                if _cancelled:
+                    return
+                if batch_idx == 0:
+                    print(f"[Pipeline] 文档 {doc_id} 第一批进入 semaphore，开始调用 embed...")
+                    sys.stdout.flush()
+                dense = await provider.embed(batch)
+                if _cancelled:
+                    return
+                if batch_idx == 0:
+                    print(f"[Pipeline] 文档 {doc_id} 第一批 embed 返回，dense 长度: {len(dense)}")
+                    sys.stdout.flush()
+                sparse = await provider.embed_sparse(batch)
+                if _cancelled:
+                    return
                 results[batch_idx] = (dense, sparse)
+
+            # 让出事件循环
+            await asyncio.sleep(0)
 
             # 更新进度
             async with progress_lock:
                 completed_count += 1
-                # 每 5 批或最后一批更新一次进度（避免过于频繁的 DB 写入）
+                print(f"[Embedder] 批次 {completed_count}/{total_batches} 完成 ({completed_count * 100 // total_batches}%，本批 {len(batch)} 个文本)")
+                # 每 5 批或最后一批更新一次 DB 进度（避免过于频繁的 DB 写入）
                 if completed_count % 5 == 0 or completed_count == total_batches:
                     await tracker.update_sub_progress(
                         PipelineStage.EMBED, completed_count, total_batches,
                         f"正在生成向量 ({completed_count}/{total_batches} 批)"
                     )
-                # 日志：每 10% 输出一次
-                if total_batches > 10 and completed_count % max(1, total_batches // 10) == 0:
-                    print(f"[Pipeline] 文档 {doc_id} embed 进度: {completed_count}/{total_batches} 批 ({completed_count * 100 // total_batches}%)")
+
+                # 每 5 批检查一次是否已取消（平衡响应速度和 DB 查询开销）
+                if completed_count % 5 == 0:
+                    try:
+                        async with self.db_session_factory() as check_session:
+                            r = await check_session.execute(
+                                select(Document.status).where(Document.id == doc_id)
+                            )
+                            st = r.scalar_one_or_none()
+                            if st is None or st == "cancelled":
+                                _cancelled = True
+                                raise CancelledError(f"文档 {doc_id} 已被取消或删除")
+                    except CancelledError:
+                        raise
+                    except Exception:
+                        pass  # 取消检查失败不影响主流程
 
         await asyncio.gather(*[_process_batch(i, batch) for i, batch in enumerate(batches)])
 
@@ -783,6 +833,43 @@ class DocumentPipeline:
             if child_idx in children:
                 return parent_idx
         return None
+
+    async def _cleanup_milvus_on_cancel(self, kb_id: str, doc_id: str) -> None:
+        """取消时清理 Milvus 中可能已写入的孤儿向量
+
+        Index 阶段分批写入 Milvus，如果中途被取消，已写入的批次会成为孤儿。
+        通过 doc_id 过滤表达式删除该文档的所有向量。
+        """
+        try:
+            if not await self.milvus.has_collection(kb_id):
+                return
+            # 使用 doc_id 表达式删除该文档的所有向量
+            await self.milvus.delete_by_doc_id(kb_id, doc_id)
+            logger.info("文档 %s 取消后清理 Milvus 向量完成", doc_id)
+            print(f"[Pipeline] 文档 {doc_id} 取消后清理 Milvus 孤儿向量完成")
+        except Exception as e:
+            logger.warning("文档 %s 取消后清理 Milvus 失败: %s", doc_id, e)
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int = 60000) -> str:
+        """按 UTF-8 字节数截断字符串，确保不超过 Milvus VarChar 字节限制。
+
+        Milvus 的 max_length 实际按 UTF-8 字节数计算，中文字符占 3 字节，
+        因此不能简单按 Python 字符数截断。
+        """
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _build_child_to_parent_map(parent_child_map: dict[int, list[int]]) -> dict[int, int]:
+        """构建子→父的反向索引，O(n) 构建，O(1) 查找"""
+        child_to_parent = {}
+        for parent_idx, children in parent_child_map.items():
+            for child_idx in children:
+                child_to_parent[child_idx] = parent_idx
+        return child_to_parent
 
     @staticmethod
     async def _update_status(

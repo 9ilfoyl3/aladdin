@@ -50,9 +50,20 @@ class MilvusClient:
         self._alias = alias
 
     def _connect(self) -> None:
-        """建立连接（如果尚未连接）"""
+        """建立连接（如果尚未连接），支持断线重连"""
         if not connections.has_connection(self._alias):
             connections.connect(alias=self._alias, host=self._host, port=self._port)
+        else:
+            # 验证连接是否仍然有效，无效则重连
+            try:
+                utility.list_collections(using=self._alias, timeout=5)
+            except Exception:
+                logger.warning("Milvus 连接失效，尝试重连...")
+                try:
+                    connections.disconnect(self._alias)
+                except Exception:
+                    pass
+                connections.connect(alias=self._alias, host=self._host, port=self._port)
 
     @staticmethod
     def _collection_name(kb_id: str) -> str:
@@ -88,6 +99,10 @@ class MilvusClient:
     async def delete(self, kb_id: str, chunk_ids: list[str]) -> None:
         """按 chunk_id 列表删除数据"""
         await asyncio.to_thread(self._delete_sync, kb_id, chunk_ids)
+
+    async def delete_by_doc_id(self, kb_id: str, doc_id: str) -> None:
+        """按 doc_id 删除该文档的所有向量（用于取消/清理孤儿数据）"""
+        await asyncio.to_thread(self._delete_by_doc_id_sync, kb_id, doc_id)
 
     async def drop_collection(self, kb_id: str) -> None:
         """删除整个 collection"""
@@ -146,14 +161,53 @@ class MilvusClient:
 
         logger.info("Collection %s 创建完成", name)
 
+    @staticmethod
+    def _truncate_to_byte_limit(text: str, max_bytes: int = 60000) -> str:
+        """按 UTF-8 字节数截断字符串，确保不超过 Milvus VarChar 字节限制。
+
+        Milvus 的 max_length 实际按 UTF-8 字节数计算，中文字符占 3 字节，
+        因此不能简单按 Python 字符数截断。
+        """
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        # 截断字节后解码，errors='ignore' 避免截断到多字节字符中间
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
     def _insert_sync(self, kb_id: str, data: list[dict]) -> int:
-        """同步插入数据"""
+        """同步插入数据，带轻量重试（避免网络瞬断浪费 embedding 计算）"""
         self._connect()
         name = self._collection_name(kb_id)
+        # 截断 content 字段，按 UTF-8 字节数限制，防止超过 Milvus max_length（字节）限制
+        for record in data:
+            if "content" in record:
+                record["content"] = self._truncate_to_byte_limit(record["content"], 60000)
         collection = Collection(name=name, using=self._alias)
-        result = collection.insert(data)
-        collection.flush()
-        return result.insert_count
+
+        # 轻量重试：网络瞬断时最多重试 2 次
+        last_error = None
+        for attempt in range(3):
+            try:
+                result = collection.insert(data)
+                collection.flush()
+                return result.insert_count
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                # 数据层面的错误（如字段超长）不重试，直接抛出
+                if "invalid parameter" in error_str or "type mismatch" in error_str:
+                    raise
+                if attempt < 2:
+                    logger.warning(
+                        "Milvus insert 失败 (attempt %d/3): %s，重试中...",
+                        attempt + 1, e,
+                    )
+                    import time
+                    time.sleep(1)
+                    # 重连后重试
+                    self._connect()
+                    collection = Collection(name=name, using=self._alias)
+        raise last_error
 
     def _search_dense_sync(
         self, kb_id: str, vector: list[float], top_k: int,
@@ -216,6 +270,27 @@ class MilvusClient:
         collection.flush()
 
         logger.info("Collection %s 删除 %d 条记录", name, len(chunk_ids))
+
+    def _delete_by_doc_id_sync(self, kb_id: str, doc_id: str) -> None:
+        """按 doc_id 删除该文档的所有向量"""
+        self._connect()
+        name = self._collection_name(kb_id)
+
+        if not utility.has_collection(name, using=self._alias):
+            return
+
+        collection = Collection(name=name, using=self._alias)
+        # 确保 collection 已加载（delete 操作需要 loaded 状态）
+        try:
+            collection.load()
+        except Exception:
+            pass  # 可能已经 loaded，忽略错误
+
+        expr = f'doc_id == "{doc_id}"'
+        collection.delete(expr)
+        collection.flush()
+
+        logger.info("Collection %s 按 doc_id=%s 删除向量", name, doc_id)
 
     def _drop_collection_sync(self, kb_id: str) -> None:
         """同步删除 collection"""

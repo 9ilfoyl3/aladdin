@@ -49,11 +49,14 @@ class RemoteEmbedder(EmbedProvider):
         Returns:
             稠密向量列表
         """
+        import sys
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         client = self._get_client()
+        print(f"[RemoteEmbedder] 发送请求: {len(texts)} 个文本, url={self.base_url}/embeddings, timeout={self.timeout}s")
+        sys.stdout.flush()
         resp = await client.post(
             f"{self.base_url}/embeddings",
             headers=headers,
@@ -61,6 +64,8 @@ class RemoteEmbedder(EmbedProvider):
         )
         resp.raise_for_status()
         data = resp.json()
+        print(f"[RemoteEmbedder] 请求返回: status={resp.status_code}, 向量数={len(data['data'])}")
+        sys.stdout.flush()
         # OpenAI 格式：data[].embedding
         return [item["embedding"] for item in data["data"]]
 

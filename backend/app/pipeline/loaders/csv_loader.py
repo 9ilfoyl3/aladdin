@@ -173,6 +173,9 @@ class CsvLoader(BaseLoader):
             clean_value = value.replace("\n", " ").replace("\r", " ").strip()
             if not clean_value:
                 continue  # 跳过空值，减少噪音
+            # 截断超长值，避免单行 chunk 超过 embedding 模型输入限制
+            if len(clean_value) > 500:
+                clean_value = clean_value[:500] + "...(截断)"
             lines.append(f"{clean_name}: {clean_value}")
 
         return "\n".join(lines)
