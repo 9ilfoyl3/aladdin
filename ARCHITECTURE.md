@@ -216,19 +216,9 @@ OCRProvider (抽象基类)
 
 ---
 
-## Embedding / Rerank Provider 选择指南
+## Embedding / Rerank 服务配置
 
-| 配置项 | `sentence-transformers` | `flag-embedding` | `remote` |
-|--------|------------------------|------------------|----------|
-| 跨平台 | ✅ Mac / Windows / Linux | ⚠️ Mac / Linux 可用，Windows 困难 | ✅ 任意平台 |
-| 需要本地模型 | ✅ 需要下载 | ✅ 需要下载 | ❌ 不需要 |
-| Embedding 稠密向量 | ✅ 支持 | ✅ 支持 | ✅ 支持 |
-| Embedding 稀疏向量 | ❌ 占位值 | ✅ 原生 lexical weights | ❌ 占位值 |
-| Rerank 精排 | ✅ CrossEncoder | ✅ FlagReranker | ✅ 调用远程服务 |
-| 安装难度 | 低 | 中 | 无（HTTP 调用） |
-| 推荐场景 | 本地开发、Windows | 生产部署、追求最佳效果 | 有独立 Embedding/Rerank 服务 |
-
-环境变量决定首次启动时的默认配置。启动后可在前端 **Embedding** 页面动态添加多个配置（本地/远程），一键切换启用，无需重启。
+系统通过 HTTP API 调用外部 Embedding 和 Rerank 服务，支持任意 OpenAI 兼容接口。
 
 ### 远程服务地址填写规则
 
@@ -236,6 +226,12 @@ OCRProvider (抽象基类)
 |---------|-------------|------|
 | OpenAI 兼容（TEI/Infinity/vLLM） | 填到 `/v1`，系统自动拼接 `/embeddings` 或 `/rerank` | `http://server:8080/v1` |
 | 自定义接口 | 填完整端点路径 | `http://server:8001/ranking_score` |
+
+### 配置方式
+
+- **环境变量**：`EMBED_PROVIDER=remote` + `EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY`
+- **前端页面**：启动后在 **Embedding 配置** 页面动态添加/切换，立即生效无需重启
+- 数据库中 `is_active=True` 的配置优先级高于环境变量
 
 ---
 
@@ -246,25 +242,27 @@ OCRProvider (抽象基类)
 | `LLM_PROVIDER` | ollama | LLM 提供者（ollama / vllm） |
 | `LLM_BASE_URL` | http://localhost:11434 | LLM 服务地址 |
 | `LLM_MODEL` | qwen2.5:7b | LLM 模型名称 |
-| `LLM_API_KEY` | - | API 密钥（远端服务需要） |
-| `EMBED_PROVIDER` | sentence-transformers | Embedding 后端（sentence-transformers / flag-embedding / remote） |
-| `EMBED_MODEL` | BAAI/bge-m3 | Embedding 模型名称或本地路径 |
-| `EMBED_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
-| `EMBED_BASE_URL` | - | 远程 Embedding 服务地址（remote provider 使用） |
-| `EMBED_API_KEY` | - | 远程 Embedding 服务密钥（remote provider 使用） |
-| `RERANK_PROVIDER` | sentence-transformers | Rerank 后端（sentence-transformers / flag-embedding / remote） |
+| `LLM_API_KEY` | - | API 密钥 |
+| `EMBED_PROVIDER` | remote | Embedding 后端（remote 推荐） |
+| `EMBED_BASE_URL` | - | Embedding 服务地址 |
+| `EMBED_MODEL` | BAAI/bge-m3 | Embedding 模型名称 |
+| `EMBED_API_KEY` | - | Embedding 服务密钥 |
+| `RERANK_PROVIDER` | remote | Rerank 后端（remote 推荐） |
+| `RERANK_BASE_URL` | - | Rerank 服务地址 |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型 |
-| `RERANK_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
-| `RERANK_BASE_URL` | - | 远程 Rerank 服务地址（remote provider 使用） |
-| `RERANK_API_KEY` | - | 远程 Rerank 服务密钥（remote provider 使用） |
-| `DATABASE_URL` | postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin | PostgreSQL 连接地址 |
+| `RERANK_API_KEY` | - | Rerank 服务密钥 |
+| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL 连接地址 |
 | `MILVUS_HOST` | localhost | Milvus 地址 |
 | `MILVUS_PORT` | 19530 | Milvus 端口 |
+| `REDIS_URL` | redis://localhost:6379/0 | Redis 连接地址（任务队列 + 缓存） |
 | `AGENT_MAX_ITERATIONS` | 3 | Agent 最大迭代次数 |
 | `AGENT_TIMEOUT` | 30.0 | Agent 超时时间（秒） |
 | `PARENT_CHUNK_SIZE` | 1500 | 父块大小（字符） |
 | `CHILD_CHUNK_SIZE` | 300 | 子块大小（字符） |
 | `CHUNK_OVERLAP` | 50 | 子块重叠（字符） |
+| `PIPELINE_MAX_CONCURRENT` | 3 | Worker 最大并发文档处理数 |
+| `PIPELINE_MAX_RETRIES` | 3 | 文档处理最大重试次数 |
+| `PIPELINE_TASK_TIMEOUT_MINUTES` | 30 | 单文档处理超时（分钟） |
 
 ---
 
