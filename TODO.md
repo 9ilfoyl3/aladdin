@@ -255,25 +255,172 @@
 
 ---
 
+## 七、对标 WeKnora 的新方向（参考腾讯开源 WeKnora v0.6）
+
+> WeKnora（维娜拉）是腾讯开源的 LLM 知识管理框架，围绕 RAG 快速问答、ReAct Agent 智能推理、Wiki 自动生成三大核心能力构建。
+> 以下方向基于对 WeKnora 架构和特性的分析，结合 Aladdin 现状提炼出可借鉴的改进点。
+
+### 15. Rerank 分数阈值 + 兜底回复机制
+- **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`
+- **现状**: rerank 后无分数阈值过滤，即使所有结果与 query 完全不相关，仍返回 top_k 条结果给 LLM，容易产生幻觉
+- **WeKnora 做法**:
+  - 检索阈值可在对话策略中配置（知识库级别），低于阈值的结果直接丢弃
+  - 当有效结果为空时，返回预设的"兜底回复"（如"知识库中未找到相关信息，请尝试换个问法"）
+  - 兜底回复支持自定义模板，可按知识库配置不同的兜底话术
+  - Rerank 前还会做"段落清洗"——去除候选文本中的页眉页脚残留、连续空行、页码标记等噪音，提升 rerank 模型的判断准确率
+- **目标**:
+  - `_rerank` 方法增加 `min_score` 参数（默认 0.15），低于阈值的结果丢弃
+  - 知识库 config 中增加 `retrieval_threshold` 和 `fallback_reply` 字段
+  - chat API 检测到有效结果为空时，在 system prompt 中注入"无相关信息"提示，引导 LLM 诚实回答
+  - rerank 前对候选 content 做轻量清洗（strip 连续空行、去除纯页码行）
+- **优先级**: P0（改动最小，效果最直接，防止幻觉）
+- **预估工作量**: 0.5-1 天
+
+### 16. BM25 全文检索（第三路召回）
+- **文件**: `backend/app/storage/milvus.py`、`backend/app/retrieval/`、`backend/app/pipeline/pipeline.py`
+- **现状**: 检索只有 Dense + Sparse（BGE-M3 sparse vector）两路。Sparse vector 基于 subword tokenizer，对中文精确关键词匹配（人名、案号、合同编号）效果不如传统 BM25
+- **WeKnora 做法**:
+  - 三路检索架构：BM25 稀疏召回 + Dense 稠密召回 + GraphRAG 图谱增强
+  - BM25 通过 Elasticsearch 实现，使用 jieba 中文分词器，对精确关键词匹配效果显著优于 subword 级别的 sparse vector
+  - 三路结果通过可配置权重的 RRF 融合，不同知识库可以调整各路权重（如法律文档加大 BM25 权重，技术文档加大 Dense 权重）
+  - v0.3.0 引入增强索引技术，BM25 检索延迟 120ms，吞吐 850 queries/s
+- **目标**:
+  - 利用 Milvus 2.4+ 原生 BM25 全文检索能力（`TextMatch` / `FullTextSearch`），无需引入 Elasticsearch
+  - Collection schema 增加 `content` 字段的全文索引（`enable_analyzer=True`）
+  - 新建 `BM25Retriever`，检索时生成 BM25 查询
+  - `HybridRetriever` 扩展为三路融合：Dense + Sparse + BM25，RRF 参数可配置
+  - 知识库 config 中增加 `retrieval_weights` 字段，允许按场景调整各路权重
+- **优先级**: P1（对精确匹配场景提升大，Milvus 原生支持无额外运维成本）
+- **预估工作量**: 2-3 天
+
+### 17. 端到端检索评测体系
+- **文件**: 新建 `backend/app/evaluation/`、修改 `backend/app/api/retrieval.py`
+- **现状**: 只有 `/api/retrieval/test` 单条测试接口，无批量评测、无量化指标
+- **WeKnora 做法**:
+  - 内置端到端测试模块，支持检索+生成全链路可视化评估
+  - 评估指标：召回命中率（Recall@K）、BLEU、ROUGE 生成质量指标
+  - 支持上传 QA 测试集（问题 + 期望命中的文档/chunk），自动计算各项指标
+  - 提供 A/B 测试能力：对比不同检索策略（如调整 chunk size、RRF k 值、rerank 阈值）的效果差异
+  - v0.3.0 报告 MAP 0.82、F1 0.79（多轮对话场景）
+  - 评测结果可视化面板，展示每条 query 的命中/未命中详情
+- **目标**:
+  - 新建评测 API：`POST /api/evaluation/run`，接受 `[{query, expected_doc_ids, expected_content_keywords}]` 格式的测试集
+  - 自动计算 Recall@5/10/20、MRR（Mean Reciprocal Rank）、命中率
+  - 支持对比模式：同一测试集在不同参数配置下运行，输出对比报告
+  - 前端增加"评测"页面，展示历史评测结果和趋势图
+  - 后续可接入 RAGAS 框架做 Faithfulness/Answer Relevancy 评估
+- **优先级**: P1（量化优化效果的基础设施，没有评测就是盲调）
+- **预估工作量**: 3-4 天
+
+### 18. 分块调试面板（可视化）
+- **文件**: 前端新建 `frontend/src/pages/ChunkDebug.tsx`、后端增强 `/api/documents/{doc_id}/chunks`
+- **现状**: 有 ChunkViewer 展示切片列表，但无法直观看到分块策略效果、元数据分布、embedding 质量
+- **WeKnora 做法**:
+  - v0.5.2 引入"自适应三层分块 + 实时调试面板"
+  - 调试面板功能：上传文档后实时预览分块结果，每个 chunk 展示元数据（章节路径、页码、元素类型）
+  - 支持调整分块参数（chunk size、overlap）后重新预览，无需重新入库
+  - 展示 chunk 间的父子关系树状图
+  - 展示 embedding 相似度热力图（chunk 之间的语义距离）
+  - 支持选中某个 chunk 后模拟检索，查看该 chunk 在不同 query 下的排名
+- **目标**:
+  - 后端 `/api/documents/{doc_id}/chunks` 增加返回 `chunk_metadata`（章节路径、页码、元素类型、字符数）
+  - 前端 ChunkViewer 增强：展示父子块树状结构、元数据标签、chunk 长度分布柱状图
+  - 新增"模拟检索"功能：输入 query，高亮命中的 chunk，展示各 chunk 的相似度分数
+  - 后续可加：分块参数调整预览（dry-run 模式，不实际入库）
+- **优先级**: P2（调试工具，帮助理解系统行为和调优参数）
+- **预估工作量**: 2-3 天
+
+### 19. Langfuse 全链路可观测性集成
+- **文件**: 新建 `backend/app/observability/`、修改 `backend/app/agent/orchestrator.py`、`backend/app/retrieval/hybrid.py`
+- **现状**: 有 PipelineLogger 结构化日志 + trace_id，但缺少 Token 消耗追踪、Agent 决策链路可视化、检索延迟分布统计
+- **WeKnora 做法**:
+  - 无缝集成 Langfuse（开源可观测性平台），通过 Docker Profile 一键启动
+  - 追踪维度：ReAct 循环每一步（路由/改写/检索/反思）、每次 LLM 调用的 input/output tokens、工具调用耗时、任务流水线各阶段
+  - 提供 Trace 视图：完整展示一次对话从 query 到 answer 的全链路，包括中间的检索结果、LLM prompt、Agent 决策
+  - 支持按 trace_id 关联 pipeline 入库和检索两个阶段的日志
+  - Token 消耗统计：按模型、按知识库、按时间维度聚合，用于成本控制
+  - 异常检测：自动标记延迟异常的 trace（如某次检索耗时 > P99）
+- **目标**:
+  - 引入 Langfuse Python SDK（`langfuse`），在 Agent 编排和检索链路中埋点
+  - 每次 LLM 调用记录：model、input_tokens、output_tokens、latency、prompt_template
+  - 每次检索记录：query、kb_id、mode、result_count、latency、top_score
+  - Agent 编排记录：完整的 routing→rewriting→retrieval→reflection 链路
+  - docker-compose 增加 langfuse profile，一键启动可观测性服务
+  - 后续可加：成本报表页面、异常告警
+- **优先级**: P2（生产环境必备，但不影响功能正确性）
+- **预估工作量**: 2-3 天
+
+### 20. 轻量级 GraphRAG（知识图谱增强检索）
+- **文件**: 新建 `backend/app/pipeline/graph_extractor.py`、`backend/app/retrieval/graph.py`、修改 `backend/app/schema/db.py`
+- **现状**: 纯向量检索，无法回答跨文档关联问题（如"A 公司和 B 公司的关系"）和全局性问题（如"这批合同涉及哪些方？"）
+- **WeKnora 做法**:
+  - 完整的 GraphRAG 实现，基于 Neo4j 知识图谱
+  - 入库阶段：用 LLM 从文档中提取实体（人名、机构、金额、日期等）和关系（属于、签署、涉及等），构建知识图谱
+  - 检索阶段：三路之一，通过图遍历找到与 query 相关的实体及其关联节点，补充向量检索可能遗漏的跨文档信息
+  - Wiki 模式：Agent 从原始文档自动生成结构化、相互链接的 Markdown Wiki 页面及可视化知识图谱
+  - v0.5.0 正式发布 Wiki 模式，支持知识图谱可视化浏览
+  - 图谱数据支持增量更新（新文档入库时只提取新实体/关系，不重建全图）
+- **目标**（分阶段）:
+  - **Phase 1: 轻量实体提取（无 Neo4j）**
+    - 入库时用 LLM 从每个 parent chunk 中提取关键实体（人名、机构、金额、日期）
+    - 实体存入 PostgreSQL 的 `entities` 表（entity_name, entity_type, doc_id, chunk_id）
+    - 检索时：先从 query 中提取实体关键词，在 entities 表中查找关联的 chunk_id，作为补充候选加入 RRF 融合
+  - **Phase 2: 关系图谱（引入图数据库）**
+    - 引入 Neo4j 或 PostgreSQL 的 AGE 扩展
+    - 提取实体间关系，构建知识图谱
+    - 检索时支持图遍历（1-2 跳），找到间接关联的信息
+  - **Phase 3: Wiki 自动生成**
+    - Agent 驱动，从知识图谱自动生成结构化 Wiki 页面
+    - 支持知识图谱可视化浏览
+- **优先级**: P3（长期方向，Phase 1 可作为中期目标）
+- **预估工作量**: Phase 1: 3-4 天，Phase 2: 5-7 天，Phase 3: 7-10 天
+
+### 21. 数据源连接器（飞书/Notion/语雀自动同步）
+- **文件**: 新建 `backend/app/connectors/`
+- **现状**: 只支持手动上传文件，不支持从外部平台自动同步知识
+- **WeKnora 做法**:
+  - 支持飞书、Notion、语雀等外部平台的知识库自动同步
+  - 支持增量同步和全量同步两种模式
+  - 连接器凭据使用 AES-256-GCM 加密存储
+  - 同步任务通过 MQ 异步执行，支持定时触发
+  - v0.4.0 引入 Notion 连接器，v0.5.2 引入语雀连接器
+  - 同步状态可视化：展示最近同步时间、同步文档数、失败记录
+- **目标**:
+  - 设计统一的 Connector 接口（`list_documents`、`fetch_content`、`check_updates`）
+  - 优先实现飞书文档连接器（企业内网场景最常用）
+  - 支持定时同步（cron 表达式）和手动触发
+  - 同步记录持久化，支持增量更新（只同步变更的文档）
+- **优先级**: P3（企业级需求，当前手动上传已满足基本场景）
+- **预估工作量**: 每个连接器 3-5 天
+
+---
+
 ## 优先级排序建议
 
 **P0（检索质量基础）**:
-1. #4 Chunk 元数据增强（Step 1）
-2. #5 元数据过滤检索
-3. #8 Embedding 上下文增强
+1. #15 Rerank 分数阈值 + 兜底回复（改动最小，防幻觉）
+2. #4 Chunk 元数据增强（Step 1）
+3. #5 元数据过滤检索
+4. #8 Embedding 上下文增强
 
 **P1（准度提升）**:
-4. #7 文档预处理（去噪 Step 1）
-5. #6 多知识库联合检索
-6. #10 RAG 评估体系
+5. #16 BM25 全文检索（第三路召回，精确匹配提升）
+6. #17 端到端检索评测体系（量化优化的基础）
+7. #7 文档预处理（去噪 Step 1）
+8. #6 多知识库联合检索
+9. #10 RAG 评估体系
 
-**P2（工程完善）**:
-7. #3 数据库迁移管理
-8. #1 CSV 大文件流式读取
-9. #13 音频文件支持
+**P2（工程完善 + 可观测性）**:
+10. #18 分块调试面板
+11. #19 Langfuse 全链路可观测性
+12. #3 数据库迁移管理
+13. #1 CSV 大文件流式读取
+14. #13 音频文件支持
 
-**P3（锦上添花）**:
-10. #9 超长记录拆分
-11. #2 Embedding 配置化
-12. #12 大文件上传方案（当前优先级低，等有明确业务需求再实施）
-13. #14 任务队列框架演进（技术储备，触发条件满足时再迁移）
+**P3（长期方向）**:
+15. #20 轻量级 GraphRAG（Phase 1 实体提取）
+16. #21 数据源连接器（飞书/Notion）
+17. #9 超长记录拆分
+18. #2 Embedding 配置化
+19. #12 大文件上传方案
+20. #14 任务队列框架演进
