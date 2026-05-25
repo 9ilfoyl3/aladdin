@@ -43,6 +43,7 @@ if (-not $SkipInfra) {
 Write-Host "`n[5] 复制配置文件..." -ForegroundColor Cyan
 Copy-Item docker-compose-production.yml "$OUT\docker-compose.yml"
 Copy-Item backend\.env.example "$OUT\.env.example"
+Copy-Item frontend\nginx.conf "$OUT\nginx.conf"
 
 Write-Host "`n=== 完成 ===" -ForegroundColor Green
 $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)

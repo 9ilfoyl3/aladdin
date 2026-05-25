@@ -14,15 +14,15 @@ New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 Write-Host "`n[1] 构建后端镜像..." -ForegroundColor Cyan
 if ($GPU) {
     Write-Host "  模式: GPU（CUDA + FlagEmbedding）"
-    docker build --no-cache -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+    docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
 } else {
     Write-Host "  模式: 远程（轻量）"
-    docker build --no-cache -t aladdin-backend:latest backend/
+    docker build -t aladdin-backend:latest backend/
 }
 if ($LASTEXITCODE -ne 0) { Write-Host "后端构建失败！" -ForegroundColor Red; exit 1 }
 
 Write-Host "`n[2] 构建前端镜像..." -ForegroundColor Cyan
-docker build --no-cache -t aladdin-frontend:latest frontend/
+docker build -t aladdin-frontend:latest frontend/
 if ($LASTEXITCODE -ne 0) { Write-Host "前端构建失败！" -ForegroundColor Red; exit 1 }
 
 Write-Host "`n[3] 导出应用镜像..." -ForegroundColor Cyan
