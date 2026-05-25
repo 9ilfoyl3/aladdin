@@ -15,6 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.orchestrator import AgentOrchestrator, AgentResult
 from app.agent.executor import RetrievalExecutor
+from app.agent.planner import QueryPlanner
 from app.agent.reflector import Reflector
 from app.agent.rewriter import QueryRewriter
 from app.agent.router import QueryRouter
@@ -129,7 +130,12 @@ async def _get_node_llm(node_name: str, fallback_llm: LLMProvider) -> LLMProvide
 
 # RAG 系统提示词模板
 _SYSTEM_PROMPT = """你是一个知识库问答助手。请根据以下检索到的参考内容回答用户问题。
-如果参考内容中没有相关信息，请如实告知用户。不要编造信息。
+
+规则：
+1. 基于参考内容回答，不要编造信息
+2. 如果参考内容不足以回答问题，如实告知用户
+3. 回答应结构清晰，必要时使用编号或分点
+4. 引用具体内容时，标注来源编号（如 [1]、[2]）
 
 参考内容：
 {context}"""
@@ -301,6 +307,10 @@ async def _retrieve_chunks(
             rerank_provider=manager.reranker,
             db_session_factory=async_session,
         )
+
+        # v2: 使用 Planner（意图拆分），复用 rewriter_llm
+        planner = QueryPlanner(rewriter_llm)
+
         orchestrator = AgentOrchestrator(
             router=QueryRouter(router_llm),
             rewriter=QueryRewriter(rewriter_llm),
@@ -309,6 +319,7 @@ async def _retrieve_chunks(
             retriever=hybrid_retriever,
             max_iterations=settings.agent_max_iterations,
             timeout=settings.agent_timeout,
+            planner=planner,
         )
 
         # 构建进度回调：将事件放入队列

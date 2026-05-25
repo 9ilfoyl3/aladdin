@@ -33,37 +33,52 @@ class ReflectionVerdict:
     reasoning: str = ""  # 评估推理过程
 
 
-_SYSTEM_PROMPT = """你是一个专业的检索质量评估器。你需要从多个维度评估检索结果是否能充分回答用户查询。
+_SYSTEM_PROMPT = """你是一个检索质量评估器。评估检索结果是否能充分回答用户的查询。
 
-评估维度：
-1. **相关性 (relevance)**：检索结果与查询的语义相关程度。0 表示完全无关，1 表示高度相关。
-2. **覆盖度 (coverage)**：检索结果是否包含了能直接回答查询的具体信息。0 表示完全未覆盖，1 表示完全覆盖。
-   - 对于"谁"类问题，结果中必须包含具体的人名/机构名才算覆盖
-   - 对于"什么时候"类问题，结果中必须包含具体日期才算覆盖
-   - 对于"多少"类问题，结果中必须包含具体数字才算覆盖
-   - 仅仅出现关键词但没有给出答案，覆盖度应该很低
-3. **一致性 (consistency)**：多条检索结果之间是否存在事实矛盾。1 表示完全一致，0 表示严重矛盾。
+## 评估维度
 
-综合判定规则：
-- 当 relevance >= 0.6 且 coverage >= 0.6 且 consistency >= 0.5 时，判定为充分
-- 否则判定为不充分，并生成 1-3 个针对性的追加查询来补充缺失信息
+1. **相关性 (relevance)**：检索结果与查询的语义匹配程度 (0~1)
+   - 1.0：结果直接回答了查询的核心问题
+   - 0.5：结果与查询主题相关但未直接回答
+   - 0.0：结果与查询完全无关
 
-生成追加查询的策略：
-- 使用不同的关键词组合
-- 尝试从文档可能的表述角度出发
-- 对于法律文书，尝试检索"当事人信息"、"起诉状"、"判决书"等特定段落
+2. **覆盖度 (coverage)**：检索结果是否包含了回答查询所需的关键信息 (0~1)
+   - 对于事实性问题（谁/什么时候/多少），结果中必须包含具体答案（人名/日期/数字）
+   - 对于解释性问题（为什么/怎么做），结果中必须包含因果关系或步骤
+   - 仅出现关键词但未给出实质答案，覆盖度应低于 0.4
+   - 如果查询包含多个子问题，每个子问题都需要被覆盖
 
-请严格以 JSON 格式回答，不要输出其他内容：
+3. **一致性 (consistency)**：多条结果之间是否存在事实矛盾 (0~1)
+   - 1.0：所有结果一致
+   - 0.5：存在细节差异但不影响核心结论
+   - 0.0：核心事实相互矛盾
+
+## 判定规则
+
+- relevance >= 0.6 且 coverage >= 0.6 且 consistency >= 0.5 → 充分
+- 否则 → 不充分，需要生成追加查询
+
+## 追加查询生成策略
+
+当判定不充分时，生成 1-3 个追加查询：
+- 使用与原始查询不同的表述方式和关键词
+- 从文档可能的实际表述角度出发（想象文档中这段信息是怎么写的）
+- 针对缺失的具体信息点生成查询
+- 查询应该是概念性问题或陈述，不要堆砌关键词
+
+## 输出格式
+
+严格以 JSON 格式输出：
 {
   "relevance": 0.8,
   "coverage": 0.7,
   "consistency": 0.9,
   "sufficient": true,
-  "reasoning": "简要说明判断依据",
+  "reasoning": "简要说明判断依据（一句话）",
   "follow_up_queries": []
 }
 
-如果不充分，follow_up_queries 应包含 1-3 个具体的追加查询。"""
+不充分时 follow_up_queries 必须包含 1-3 个追加查询。"""
 
 
 # 快速判定阈值（基于 sigmoid 归一化后的 rerank 分数）
@@ -78,15 +93,19 @@ class Reflector:
         self.llm = llm
 
     async def evaluate(
-        self, query: str, results: list[RetrievalResult]
+        self, query: str, results: list[RetrievalResult],
+        intent_names: list[str] | None = None,
     ) -> ReflectionVerdict:
         """评估检索结果质量，决定是否需要追加检索
 
         两级策略：先用分数快判，不确定时再调 LLM。
+        当提供 intent_names 时（v2 多意图模式），禁用快速判定，
+        强制使用 LLM 深度评估以检查每个意图的覆盖情况。
 
         Args:
             query: 用户原始查询
             results: 当前已检索到的结果列表
+            intent_names: 可选的意图名称列表（v2 模式传入）
 
         Returns:
             ReflectionVerdict 包含多维度评分、是否充分及追加查询
@@ -102,6 +121,10 @@ class Reflector:
                 reasoning="无检索结果",
             )
 
+        # 多意图模式：跳过快速判定，强制 LLM 深度评估
+        if intent_names and len(intent_names) > 1:
+            return await self._evaluate_with_intents(query, results, intent_names)
+
         # === 快速判定：基于 sigmoid 分数分布 ===
         fast_verdict = self._fast_evaluate(query, results)
         if fast_verdict is not None:
@@ -112,6 +135,53 @@ class Reflector:
 
         prompt = [
             {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": f"用户查询：{query}\n\n检索结果：\n{context_text}"},
+        ]
+
+        response = await self.llm.generate(prompt)
+        return self._parse_response(response, query)
+
+    async def _evaluate_with_intents(
+        self, query: str, results: list[RetrievalResult], intent_names: list[str]
+    ) -> ReflectionVerdict:
+        """多意图感知评估：检查每个意图是否都被覆盖
+
+        不使用快速判定，因为高分结果可能只覆盖了部分意图。
+        """
+        context_text = self._build_context(results)
+        intents_text = "\n".join(f"  - {name}" for name in intent_names)
+
+        intent_prompt = f"""你是一个专业的检索质量评估器。用户的查询包含多个独立的信息需求（意图），
+你需要评估检索结果是否覆盖了所有意图。
+
+用户查询包含以下意图：
+{intents_text}
+
+评估维度：
+1. **相关性 (relevance)**：检索结果与查询的整体语义相关程度 (0~1)
+2. **覆盖度 (coverage)**：检索结果是否覆盖了所有意图 (0~1)
+   - 如果只覆盖了部分意图，覆盖度应该按比例降低
+   - 例如有 2 个意图但只覆盖了 1 个，覆盖度最多 0.5
+3. **一致性 (consistency)**：多条结果之间是否矛盾 (0~1)
+
+综合判定规则：
+- 当所有意图都有对应的检索结果时，才判定为充分
+- 如果某个意图完全没有被覆盖，必须判定为不充分
+- 不充分时，生成 1-3 个针对未覆盖意图的追加查询
+
+请严格以 JSON 格式回答：
+{{
+  "relevance": 0.8,
+  "coverage": 0.5,
+  "consistency": 0.9,
+  "sufficient": false,
+  "reasoning": "检索结果主要覆盖了XX意图，但YY意图缺少相关结果",
+  "uncovered_intents": ["未覆盖的意图名称"],
+  "follow_up_queries": ["针对未覆盖意图的追加查询"]
+}}"""
+
+        prompt = [
+            {"role": "system", "content": intent_prompt},
             {"role": "user", "content": f"用户查询：{query}\n\n检索结果：\n{context_text}"},
         ]
 

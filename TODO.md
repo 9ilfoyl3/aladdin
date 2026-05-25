@@ -375,6 +375,38 @@
 - **优先级**: P3（长期方向，Phase 1 可作为中期目标）
 - **预估工作量**: Phase 1: 3-4 天，Phase 2: 5-7 天，Phase 3: 7-10 天
 
+### 22. ReAct Agent 模式（完整 Tool Calling 架构，对标 WeKnora v0.6）
+- **文件**: 新建 `backend/app/agent/react_engine.py`、修改 `backend/app/agent/orchestrator.py`、`backend/app/api/chat.py`
+- **现状**: Agent 模式使用固定管道（Planner→Executor→Reflector），虽然 v2 已支持意图拆分和分组检索，但检索策略仍由管道预设，LLM 无法动态决定搜索次数和角度
+- **WeKnora 做法**:
+  - 完整的 ReAct（Reasoning + Acting）循环：LLM 作为 Agent 自主决定调用什么工具
+  - `knowledge_search` 是一个 Tool，Agent 可以传入 1-5 个语义查询，自己决定搜什么
+  - Agent 可以在一次对话中多次调用 `knowledge_search`，每次用不同角度
+  - 支持 `grep_chunks`（正则精确匹配）+ `knowledge_search`（语义检索）+ `list_knowledge_chunks`（深度阅读）三级工具链
+  - MMR（Maximal Marginal Relevance）去冗余，确保结果多样性
+  - Agent 自己做"反思"：通过 `thinking` tool 或内部推理判断信息是否充分
+  - Progressive RAG 系统提示词：引导 Agent 按"侦察→规划→执行→反思"循环工作
+  - 支持 `final_answer` 工具强制终止循环，避免无限迭代
+  - 全链路 Langfuse 可观测性追踪
+- **目标**（分阶段）:
+  - **Phase 1: Function Calling 基础设施**
+    - 实现 LLM Provider 的 function calling / tool use 接口（Ollama 和 vLLM 均支持）
+    - 定义 `knowledge_search`、`list_chunks`、`final_answer` 三个核心 Tool Schema
+    - 实现 ReAct 循环引擎：解析 LLM 的 tool_call → 执行 → 将结果注入上下文 → 继续生成
+  - **Phase 2: Progressive RAG Agent**
+    - 移植 WeKnora 的 Progressive RAG 系统提示词（适配中文法律场景）
+    - 实现"侦察→规划→执行→反思"的 Agent 工作流
+    - 支持 Agent 动态决定检索策略（语义 vs 关键词 vs 混合）
+    - 增加 MMR 多样性控制
+  - **Phase 3: 高级能力**
+    - 支持 MCP 工具集成（外部工具调用）
+    - 支持 Web Search 作为知识库检索的补充
+    - Agent Skills 机制（可配置的专业技能模板）
+    - 人机审批（高风险工具调用前确认）
+- **优先级**: P2（当前 v2 Planner 方案已解决多意图问题，ReAct 是更彻底的长期方案）
+- **预估工作量**: Phase 1: 3-4 天，Phase 2: 4-5 天，Phase 3: 5-7 天
+- **前置依赖**: LLM 需支持 function calling（Ollama qwen2.5 已支持，vLLM 原生支持）
+
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`
 - **现状**: 只支持手动上传文件，不支持从外部平台自动同步知识
@@ -413,14 +445,16 @@
 **P2（工程完善 + 可观测性）**:
 10. #18 分块调试面板
 11. #19 Langfuse 全链路可观测性
-12. #3 数据库迁移管理
-13. #1 CSV 大文件流式读取
-14. #13 音频文件支持
+12. #22 ReAct Agent 模式（Phase 1: Function Calling 基础设施）
+13. #3 数据库迁移管理
+14. #1 CSV 大文件流式读取
+15. #13 音频文件支持
 
 **P3（长期方向）**:
-15. #20 轻量级 GraphRAG（Phase 1 实体提取）
-16. #21 数据源连接器（飞书/Notion）
-17. #9 超长记录拆分
-18. #2 Embedding 配置化
-19. #12 大文件上传方案
-20. #14 任务队列框架演进
+16. #20 轻量级 GraphRAG（Phase 1 实体提取）
+17. #22 ReAct Agent 模式（Phase 2-3: 完整 Agent 能力）
+18. #21 数据源连接器（飞书/Notion）
+19. #9 超长记录拆分
+20. #2 Embedding 配置化
+21. #12 大文件上传方案
+22. #14 任务队列框架演进

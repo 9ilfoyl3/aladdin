@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.executor import RetrievalExecutor
 from app.agent.orchestrator import AgentOrchestrator
+from app.agent.planner import QueryPlanner
 from app.agent.reflector import Reflector
 from app.agent.rewriter import QueryRewriter
 from app.agent.router import QueryRouter
@@ -150,6 +151,7 @@ async def _stream_retrieval_test(body: RetrievalTestRequest):
         retriever=hybrid_retriever,
         max_iterations=settings.agent_max_iterations,
         timeout=settings.agent_timeout,
+        planner=QueryPlanner(llm),
     )
 
     # 使用队列推送进度
