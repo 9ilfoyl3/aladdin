@@ -32,11 +32,11 @@ docker save aladdin-backend:latest aladdin-frontend:latest -o "$OUT\app.tar"
 if (-not $SkipInfra) {
     Write-Host "`n[4] 拉取并导出中间件（ARM64）..." -ForegroundColor Cyan
     docker pull --platform linux/arm64 postgres:16-alpine
-    docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
+    docker pull --platform linux/arm64 milvusdb/milvus:v2.5.4
     docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.25
     docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
     docker pull --platform linux/arm64 redis:7-alpine
-    docker save postgres:16-alpine milvusdb/milvus:v2.4.6 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z redis:7-alpine -o "$OUT\infra.tar"
+    docker save postgres:16-alpine milvusdb/milvus:v2.5.4 quay.io/coreos/etcd:v3.5.25 minio/minio:RELEASE.2024-05-28T17-19-04Z redis:7-alpine -o "$OUT\infra.tar"
 }
 
 # 配置文件

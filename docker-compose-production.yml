@@ -94,11 +94,38 @@ services:
       retries: 3
     restart: unless-stopped
 
+  infinity:
+    container_name: arag-infinity
+    image: ${IMAGE_INFINITY:-infinity:cpu}
+    command:
+      - v2
+      - --engine
+      - optimum
+      - --device
+      - cpu
+      - --model-id
+      - /models/bge-m3
+      - --model-id
+      - /models/bge-reranker-v2-m3
+      - --port
+      - "7997"
+    expose:
+      - "7997"
+    volumes:
+      - ${MODEL_DIR:-./models}:/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
   backend:
     container_name: arag-backend
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
