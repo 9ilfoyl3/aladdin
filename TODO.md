@@ -464,20 +464,19 @@
 - **优先级**: P2（当前 BGE-reranker-v2-m3 + 文件名前缀已基本够用）
 - **预估工作量**: 1-2 天
 
-### 27. WeKnora 风格的 Contextual Rewrite（检索时查询增强）
-- **文件**: 修改 `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`
-- **现状**: 检索时直接用用户原始查询（或 Planner 生成的查询）去搜索，没有结合对话上下文做查询增强
-- **WeKnora 做法**:
-  - 在检索前对查询做 contextual rewrite：结合对话历史消解指代、补全省略
-  - 改写后的查询保留核心实体和关键词，不生成元指令
-  - 改写结果用于检索，原始查询用于 Rerank（双查询策略）
-  - 支持意图分类：greeting/chitchat 直接回复不走检索，kb_search 才进入检索流程
+### 27. Embedding 上下文增强（Contextual Embedding）
+- **文件**: 修改 `backend/app/pipeline/pipeline.py`、`backend/app/pipeline/embedder.py`
+- **现状**: Dense embedding 用原始 chunk content 生成向量，不包含文档级上下文信息。当用户查询包含文档名但 chunk 内容不含文档名时，语义检索无法匹配
+- **RAGFlow / LlamaIndex 做法**:
+  - 生成 embedding 时，输入文本为 `{章节路径}: {chunk content}`（如"电影产业促进法 > 第三章 > 第二十五条: 依照本法规定..."）
+  - 存储的 content 保持原文不变（展示给用户的不受影响）
+  - 只影响 Dense 向量的生成，BM25 和 Rerank 不受影响
 - **目标**:
-  - 检索时用改写后的查询做召回（提升召回率）
-  - Rerank 时用原始查询做精排（保持精度）
-  - 双查询策略：召回用宽查询，精排用窄查询
-- **优先级**: P2（单轮对话场景不需要，多轮对话场景提升明显）
-- **预估工作量**: 1 天
+  - 在 embedding 输入时拼接章节路径/文档标题（当前已有 ContextualEmbedder 模块）
+  - 评估对检索精度的影响（可能对某些场景有帮助，某些场景引入噪音）
+  - 可配置开关，按知识库决定是否启用
+- **优先级**: P3（当前 BM25 content 前缀已解决文档归属问题，Dense embedding 增强收益有限）
+- **预估工作量**: 0.5 天
 
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`
