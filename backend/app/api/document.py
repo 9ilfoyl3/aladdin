@@ -437,34 +437,23 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
 
 @router.delete("/api/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
-    """删除文档（级联清理 chunks + Milvus 向量 + 取消处理中的任务）"""
+    """删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
 
+    # 收集清理所需信息（在删除 DB 记录前）
+    kb_id = doc.kb_id
+    file_type = doc.file_type
+
     # 如果文档正在处理中，先标记为 cancelled（Pipeline 各阶段会检查此状态并终止）
     if doc.status in ("pending", "processing"):
         doc.status = "cancelled"
         await db.flush()
-        await db.commit()
-        # 重新开启事务继续删除
-        result = await db.execute(select(Document).where(Document.id == doc_id))
-        doc = result.scalar_one_or_none()
-        if doc is None:
-            return  # 已被 Pipeline 清理
-
-    # 删除 Milvus 中的向量
-    # 使用 doc_id 表达式删除（覆盖 Pipeline 可能已写入但 DB 未 commit 的孤儿向量）
-    try:
-        milvus = _get_milvus()
-        if await milvus.has_collection(doc.kb_id):
-            await milvus.delete_by_doc_id(doc.kb_id, doc_id)
-    except Exception as e:
-        logger.warning("删除 Milvus 向量失败（可忽略）: %s", e)
 
     # 更新知识库文档计数
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == doc.kb_id))
+    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = kb_result.scalar_one_or_none()
     if kb and kb.doc_count > 0:
         kb.doc_count -= 1
@@ -473,10 +462,27 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(doc)
     await db.flush()
 
+    # 后台异步清理 Milvus 向量 + 本地文件 + 缓存（不阻塞 API 响应）
+    asyncio.create_task(_doc_cleanup_background(doc_id, kb_id, file_type))
+
+
+async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> None:
+    """单文档删除后台清理：Milvus 向量、物理文件、缩略图、缓存"""
+    # 删除 Milvus 中的向量
+    try:
+        milvus = _get_milvus()
+        if await milvus.has_collection(kb_id):
+            await milvus.delete_by_doc_id(kb_id, doc_id)
+    except Exception as e:
+        logger.warning("删除 Milvus 向量失败（可忽略）: %s", e)
+
     # 删除本地文件
-    file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
+    file_path = _UPLOAD_DIR / f"{doc_id}.{file_type}"
     if file_path.exists():
-        os.remove(file_path)
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
 
     # 删除缩略图缓存
     _delete_thumbnail(doc_id)
@@ -485,7 +491,7 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     from app.retrieval.cache import get_retrieval_cache
     cache = await get_retrieval_cache()
     if cache:
-        await cache.invalidate_kb(doc.kb_id)
+        await cache.invalidate_kb(kb_id)
 
 
 # ============================================================

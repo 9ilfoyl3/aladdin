@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.validators import NameValidationError, validate_folder_name
-from app.schema.db import Chunk, Document, Folder, KnowledgeBase
+from app.schema.db import Document, Folder, KnowledgeBase
 from app.storage.database import get_db
 from app.storage.milvus import MilvusClient
 from app.config import get_settings
@@ -219,7 +219,7 @@ async def update_folder(
 
 @router.delete("/api/folders/{folder_id}", status_code=204)
 async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
-    """删除文件夹（级联删除子文件夹、文档、Milvus 向量和物理文件）"""
+    """删除文件夹（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
@@ -227,7 +227,7 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
 
     kb_id = folder.kb_id
 
-    # 递归收集该文件夹及所有子文件夹下的文档
+    # 递归收集该文件夹及所有子文件夹下的文档信息（用于后台清理）
     all_doc_ids: list[str] = []
     all_doc_info: list[dict] = []  # {"id": ..., "file_type": ...}
     folder_ids_to_check = [folder_id]
@@ -249,14 +249,6 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
         for (sub_id,) in sub_result.all():
             folder_ids_to_check.append(sub_id)
 
-    # 收集所有 chunk_ids（用于删除 Milvus 向量）
-    chunk_ids: list[str] = []
-    if all_doc_ids:
-        chunk_result = await db.execute(
-            select(Chunk.id).where(Chunk.doc_id.in_(all_doc_ids))
-        )
-        chunk_ids = [row[0] for row in chunk_result.all()]
-
     # 更新知识库文档计数
     if all_doc_ids:
         kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
@@ -264,14 +256,24 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
         if kb:
             kb.doc_count = max(0, (kb.doc_count or 0) - len(all_doc_ids))
 
+    # 标记正在处理的文档为 cancelled
+    if all_doc_ids:
+        from sqlalchemy import update as sql_update
+        await db.execute(
+            sql_update(Document)
+            .where(Document.id.in_(all_doc_ids))
+            .where(Document.status.in_(("pending", "processing")))
+            .values(status="cancelled")
+        )
+
     # 删除文件夹（ORM cascade 会自动删除子文件夹、文档和 chunks）
     await db.delete(folder)
     await db.flush()
 
-    # 后台异步清理 Milvus 向量和物理文件
-    if chunk_ids or all_doc_info:
+    # 后台异步清理 Milvus 向量和物理文件（不阻塞 API 响应）
+    if all_doc_ids or all_doc_info:
         asyncio.create_task(
-            _folder_cleanup_background(kb_id, chunk_ids, all_doc_info)
+            _folder_cleanup_background(kb_id, all_doc_ids, all_doc_info)
         )
 
 
@@ -344,18 +346,18 @@ async def _is_descendant(db: AsyncSession, folder_id: str, ancestor_id: str) -> 
 
 
 async def _folder_cleanup_background(
-    kb_id: str, chunk_ids: list[str], doc_info_list: list[dict]
+    kb_id: str, doc_ids: list[str], doc_info_list: list[dict]
 ) -> None:
     """后台清理 Milvus 向量和物理文件（不阻塞 API 响应）"""
-    # 删除 Milvus 向量
-    if chunk_ids:
+    # 使用 doc_id 表达式删除 Milvus 向量（无需预先收集 chunk_ids，更快更可靠）
+    if doc_ids:
         try:
             settings = get_settings()
             milvus = MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
-            for i in range(0, len(chunk_ids), 1000):
-                batch = chunk_ids[i:i + 1000]
-                await milvus.delete(kb_id, batch)
-            logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 条", len(chunk_ids))
+            if await milvus.has_collection(kb_id):
+                for doc_id in doc_ids:
+                    await milvus.delete_by_doc_id(kb_id, doc_id)
+            logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 个文档", len(doc_ids))
         except Exception as e:
             logger.warning("文件夹删除 - Milvus 向量清理失败: %s", e)
 

@@ -155,7 +155,7 @@ async def update_knowledge_base(
 
 @router.delete("/{kb_id}", status_code=204)
 async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
-    """删除知识库（级联清理 Milvus collection + 物理文件）"""
+    """删除知识库（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = result.scalar_one_or_none()
     if kb is None:
@@ -167,29 +167,28 @@ async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
     )
     doc_info_list = [{"id": row[0], "file_type": row[1]} for row in doc_result.all()]
 
-    # 删除 Milvus collection
-    try:
-        milvus = _get_milvus()
-        await milvus.drop_collection(kb_id)
-    except Exception as e:
-        logger.warning("删除 Milvus collection 失败（可忽略）: %s", e)
-
     # 级联删除 SQLite 数据（ORM cascade 会自动处理 folders、documents 和 chunks）
     await db.delete(kb)
     await db.flush()
 
-    # 后台异步清理物理文件和缓存
-    if doc_info_list:
-        import asyncio
-        asyncio.create_task(_kb_cleanup_background(kb_id, doc_info_list))
+    # 后台异步清理 Milvus collection + 物理文件 + 缓存（不阻塞 API 响应）
+    import asyncio
+    asyncio.create_task(_kb_cleanup_background(kb_id, doc_info_list))
 
 
 async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
-    """后台清理物理文件和缓存（不阻塞 API 响应）"""
+    """后台清理 Milvus collection + 物理文件 + 缓存（不阻塞 API 响应）"""
     import os
     from pathlib import Path
 
     upload_dir = Path("data/uploads")
+
+    # 删除 Milvus collection（耗时操作，放后台）
+    try:
+        milvus = _get_milvus()
+        await milvus.drop_collection(kb_id)
+    except Exception as e:
+        logger.warning("知识库删除 - 删除 Milvus collection 失败（可忽略）: %s", e)
 
     # 删除物理文件
     for info in doc_info_list:
@@ -200,7 +199,7 @@ async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
             except Exception as e:
                 logger.warning("知识库删除 - 删除文件失败 %s: %s", file_path, e)
 
-    logger.info("知识库 %s 删除 - 物理文件清理完成，共 %d 个", kb_id, len(doc_info_list))
+    logger.info("知识库 %s 删除 - 后台清理完成，共 %d 个文件", kb_id, len(doc_info_list))
 
     # 清除检索缓存
     try:
