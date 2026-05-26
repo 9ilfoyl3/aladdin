@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import ReactMarkdown from 'react-markdown'
-import rehypeRaw from 'rehype-raw'
+import { Streamdown } from 'streamdown'
+import { cjk } from '@streamdown/cjk'
 import { FileText, Copy } from 'lucide-react'
 import { documentApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -102,9 +102,9 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
                   </div>
                   {/* 切片内容 */}
                   <div className="px-4 py-3 text-sm leading-relaxed max-h-64 overflow-auto prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0 [&_table]:text-xs [&_table]:w-full [&_table]:border-collapse [&_table]:rounded-md [&_table]:overflow-hidden [&_td]:border [&_td]:border-border/50 [&_td]:px-2.5 [&_td]:py-1.5 [&_th]:border [&_th]:border-border/50 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:bg-muted/40 [&_th]:font-medium [&_tr:nth-child(even)_td]:bg-muted/20 [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_mark]:bg-primary/15 [&_mark]:text-inherit [&_mark]:rounded-sm [&_mark]:px-0.5">
-                    <ReactMarkdown rehypePlugins={[rehypeRaw]}>
+                    <Streamdown mode="static" plugins={{ cjk: cjk }}>
                       {highlightChildren(chunk.content, chunk.children)}
-                    </ReactMarkdown>
+                    </Streamdown>
                   </div>
                 </div>
               ))}

@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Send, ChevronDown, Bot, Database, Cpu, FileText, Library } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
+import { Streamdown } from 'streamdown'
+import { cjk } from '@streamdown/cjk'
 import { knowledgeBaseApi, llmConfigApi } from '@/lib/api'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
@@ -367,7 +368,12 @@ function Chat() {
                       {msg.content ? (
                         <div className="px-4 py-3 text-sm leading-relaxed">
                           <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-                            <ReactMarkdown>{msg.content}</ReactMarkdown>
+                            <Streamdown
+                              plugins={{ cjk: cjk }}
+                              isAnimating={isStreaming && idx === messages.length - 1}
+                            >
+                              {msg.content}
+                            </Streamdown>
                           </div>
                         </div>
                       ) : (
