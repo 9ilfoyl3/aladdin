@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   Database,
   MessageSquare,
@@ -25,6 +25,9 @@ const navItems = [
 
 // 布局组件：侧边栏 + 主内容区
 function Layout() {
+  const location = useLocation()
+  const isChat = location.pathname === '/chat'
+
   return (
     <div className="flex h-screen">
       {/* 侧边栏 */}
@@ -54,7 +57,7 @@ function Layout() {
       </aside>
 
       {/* 主内容区 */}
-      <main className="flex-1 overflow-auto p-6 bg-background">
+      <main className={cn('flex-1 overflow-auto bg-background', !isChat && 'p-6')}>
         <Outlet />
       </main>
     </div>

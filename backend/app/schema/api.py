@@ -39,6 +39,9 @@ class ChatCompletionRequest(BaseModel):
     kb_ids: Optional[list[str]] = Field(
         default=None, description="多知识库联合检索，指定多个知识库 ID 列表"
     )
+    session_id: Optional[str] = Field(
+        default=None, description="会话 ID，传入后自动加载历史上下文并保存消息"
+    )
     temperature: Optional[float] = Field(default=None, description="生成温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
 

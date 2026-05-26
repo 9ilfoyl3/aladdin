@@ -174,3 +174,36 @@ class AgentNodeConfig(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class ChatSession(Base):
+    """对话会话表"""
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), default="新对话")
+    kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    model_config_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # 关联
+    messages: Mapped[list["ChatMessageRecord"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", order_by="ChatMessageRecord.created_at"
+    )
+
+
+class ChatMessageRecord(Base):
+    """对话消息记录表"""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user | assistant
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    references: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 检索引用来源
+    agent_steps: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # Agent 思考步骤
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # 关联
+    session: Mapped["ChatSession"] = relationship(back_populates="messages")
+

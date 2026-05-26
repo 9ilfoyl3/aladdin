@@ -346,3 +346,45 @@ export const ocrConfigApi = {
     request<OCRTestResult>(`/ocr-configs/${id}/test`, { method: 'POST' }),
 }
 
+
+
+// 会话相关接口类型
+export interface SessionItem {
+  id: string
+  title: string
+  kb_id: string | null
+  model_config_id: string | null
+  message_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SessionMessageItem {
+  id: string
+  role: string
+  content: string
+  references: unknown[] | null
+  agent_steps: { step: string; detail: string }[] | null
+  created_at: string
+}
+
+// 会话管理接口
+export const sessionApi = {
+  list: () => request<SessionItem[]>('/sessions'),
+  create: (data: { title?: string; kb_id?: string; model_config_id?: string }) =>
+    request<SessionItem>('/sessions', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: { title?: string }) =>
+    request<SessionItem>(`/sessions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/sessions/${id}`, { method: 'DELETE' }),
+  getMessages: (id: string) =>
+    request<SessionMessageItem[]>(`/sessions/${id}/messages`),
+  clearMessages: (id: string) =>
+    request<void>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+}
