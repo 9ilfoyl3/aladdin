@@ -450,6 +450,32 @@
 - **优先级**: P2（当前法条场景重复问题不严重，文档型知识库更需要）
 - **预估工作量**: 0.5 天
 
+### 28. RRF 自适应权重融合（Post-hoc Adaptive Fusion）
+- **文件**: 修改 `backend/app/retrieval/hybrid.py`
+- **现状**: 三路检索（Dense + Sparse + BM25）使用 uniform RRF 融合，各路权重相同。对于精确关键词查询（案号、人名），BM25 应该权重更高；对于语义理解查询（争议焦点），Dense 应该权重更高。当前 uniform 权重会让各路互相稀释
+- **设计思路**:
+  - 不预判查询类型（规则无法穷举），而是让三路检索结果的**分数分布**自动决定权重
+  - 先用 uniform RRF 拿到三路各自的结果，然后根据各路 top-K 分数分布特征动态调整权重
+  - 信号：某路 top-1 分数远高于 top-10（分数衰减陡峭）→ 该路有高置信命中 → 权重拉高
+  - 信号：某路 top-10 分数都很平（无明显头部）→ 该路没找到强相关的 → 权重降低
+  - 三路分数需先做 min-max 归一化到同一尺度后再计算 confidence
+- **计算方式**:
+  ```python
+  def compute_adaptive_weight(scores: list[float]) -> float:
+      top1 = scores[0]
+      top10 = scores[min(9, len(scores) - 1)]
+      spread = top1 - top10  # 分数跨度作为置信度信号
+      confidence = top1 * 0.6 + spread * 0.4
+      return max(confidence, 0.01)  # 最低保底，不完全压制任何一路
+  # 三路权重 = 各自 confidence 归一化
+  ```
+- **优势**:
+  - 零延迟（纯数值计算），不需要额外 LLM 调用
+  - 不需要规则维护，对任何查询类型自动适应
+  - 对任何领域、任何语言都适用
+- **优先级**: P1（对"又要语义又要关键词"的混合场景提升最直接）
+- **预估工作量**: 1 天
+
 ### 26. Reranker 模型升级 + 远程 Rerank API 支持
 - **文件**: 修改 `backend/app/models/rerank/`、`backend/app/config.py`
 - **现状**: 使用 BGE-reranker-v2-m3（本地部署），对于语义高度相似的候选（如"第三十条"vs"第三十一条"）区分度有限
