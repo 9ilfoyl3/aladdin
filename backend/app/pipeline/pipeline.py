@@ -373,6 +373,14 @@ class DocumentPipeline:
 
                 print(f"[Pipeline] 文档 {doc_id} 开始写入索引，父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}")
 
+                # 获取文档文件名，用于 BM25 content 前缀增强
+                doc_result = await session.execute(
+                    select(Document.filename).where(Document.id == doc_id)
+                )
+                doc_filename = doc_result.scalar_one_or_none() or ""
+                # 去掉文件扩展名，只保留文档名称
+                doc_title = Path(doc_filename).stem if doc_filename else ""
+
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
                     parent_ids.append(str(uuid.uuid4()))
@@ -419,7 +427,12 @@ class DocumentPipeline:
                     milvus_data.append({
                         "chunk_id": child_id,
                         "doc_id": doc_id,
-                        "content": self._truncate_utf8(child_text, 60000),
+                        # BM25 content 增强：加文件名前缀，帮助 BM25 和 Rerank 区分同结构文档
+                        # Dense embedding 不受影响（使用原始 content 生成向量）
+                        "content": self._truncate_utf8(
+                            f"[{doc_title}] {child_text}" if doc_title else child_text,
+                            60000,
+                        ),
                         "dense_vector": embed_result.dense_vectors[child_idx],
                         "sparse_vector": embed_result.sparse_vectors[child_idx],
                         "parent_id": parent_id or "",

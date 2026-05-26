@@ -25,6 +25,7 @@ from app.models.provider import LLMProvider
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
 from app.retrieval.base import RetrievalResult
+from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.filter import RetrievalFilter
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.multi_kb import KBRetrievalConfig, MultiKBRetriever, MultiKBSearchResult
@@ -156,6 +157,8 @@ def _build_context(chunks: list[RetrievalResult], max_tokens: int | None = None)
         chunks: 检索结果列表（已按相关性排序）
         max_tokens: 上下文最大 token 数，None 表示不限制
     """
+    import re
+
     if not chunks:
         return "（未找到相关内容）"
     parts = []
@@ -163,7 +166,11 @@ def _build_context(chunks: list[RetrievalResult], max_tokens: int | None = None)
     # 按 2 字符/token 估算
     max_chars = max_tokens * 2 if max_tokens else None
     for i, chunk in enumerate(chunks, 1):
-        entry = f"[{i}] {chunk.content}"
+        # 去掉 BM25 content 前缀 [filename]
+        content = chunk.content
+        if content and content.startswith("["):
+            content = re.sub(r'^\[[^\]]*\]\s*', '', content)
+        entry = f"[{i}] {content}"
         if max_chars and total_chars + len(entry) > max_chars:
             break
         parts.append(entry)
@@ -192,6 +199,13 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
         child = chunk.child_content[:500] if chunk.child_content else ""
         parent = chunk.content[:1500] if chunk.content else ""
 
+        # 去掉 BM25 content 前缀 [filename] （入库时为 BM25 检索加的文件名前缀）
+        import re
+        if child and child.startswith("["):
+            child = re.sub(r'^\[[^\]]*\]\s*', '', child)
+        if parent and parent.startswith("["):
+            parent = re.sub(r'^\[[^\]]*\]\s*', '', parent)
+
         # 如果截断后 child 和 parent 相同（子块就是父块本身），清空 child 避免前端误判
         if child and parent and child == parent:
             child = ""
@@ -213,6 +227,25 @@ def _get_milvus_client() -> MilvusClient:
     """获取 Milvus 客户端实例"""
     settings = get_settings()
     return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+
+
+def _build_hybrid_retriever() -> HybridRetriever:
+    """构建三路混合检索器（Dense + Sparse + BM25）
+
+    BM25 检索器对旧 schema collection 自动降级为空结果，不影响现有功能。
+    """
+    manager = get_model_manager()
+    milvus = _get_milvus_client()
+    vector_retriever = VectorRetriever(manager.embedder, milvus)
+    sparse_retriever = SparseRetriever(manager.embedder, milvus)
+    bm25_retriever = BM25Retriever(milvus)
+    return HybridRetriever(
+        vector_retriever=vector_retriever,
+        sparse_retriever=sparse_retriever,
+        rerank_provider=manager.reranker,
+        db_session_factory=async_session,
+        bm25_retriever=bm25_retriever,
+    )
 
 
 async def _get_retrieval_mode(kb_id: str, request_mode: str | None) -> str:
@@ -243,12 +276,7 @@ async def _retrieve_multi_kb(
     milvus = _get_milvus_client()
     vector_retriever = VectorRetriever(manager.embedder, milvus)
     sparse_retriever = SparseRetriever(manager.embedder, milvus)
-    hybrid_retriever = HybridRetriever(
-        vector_retriever=vector_retriever,
-        sparse_retriever=sparse_retriever,
-        rerank_provider=manager.reranker,
-        db_session_factory=async_session,
-    )
+    hybrid_retriever = _build_hybrid_retriever()
 
     # 使用 MultiKBRetriever 执行联合检索
     multi_kb = MultiKBRetriever(hybrid_retriever)
@@ -299,14 +327,7 @@ async def _retrieve_chunks(
         rewriter_llm = await _get_node_llm("rewriter", llm)
         reflector_llm = await _get_node_llm("reflector", llm)
 
-        vector_retriever = VectorRetriever(manager.embedder, milvus)
-        sparse_retriever = SparseRetriever(manager.embedder, milvus)
-        hybrid_retriever = HybridRetriever(
-            vector_retriever=vector_retriever,
-            sparse_retriever=sparse_retriever,
-            rerank_provider=manager.reranker,
-            db_session_factory=async_session,
-        )
+        hybrid_retriever = _build_hybrid_retriever()
 
         # v2: 使用 Planner（意图拆分），复用 rewriter_llm
         planner = QueryPlanner(rewriter_llm)
@@ -332,14 +353,7 @@ async def _retrieve_chunks(
 
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
-        vector_retriever = VectorRetriever(manager.embedder, milvus)
-        sparse_retriever = SparseRetriever(manager.embedder, milvus)
-        hybrid_retriever = HybridRetriever(
-            vector_retriever=vector_retriever,
-            sparse_retriever=sparse_retriever,
-            rerank_provider=manager.reranker,
-            db_session_factory=async_session,
-        )
+        hybrid_retriever = _build_hybrid_retriever()
         results = await hybrid_retriever.search(query, kb_id, top_k=30, expr=expr)
         # 写入缓存
         if cache:

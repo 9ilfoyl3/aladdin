@@ -1,7 +1,12 @@
 """混合检索器
 
-结合稠密向量检索与稀疏向量检索，通过 RRF 融合排序，
-再经 Rerank 精排，最后执行父块扩展以返回完整上下文。
+结合三路检索：稠密向量 + 稀疏向量 + BM25 全文检索，
+通过 RRF 融合排序，再经 Rerank 精排，最后执行父块扩展以返回完整上下文。
+
+参考 WeKnora / RAGFlow 的三路检索架构：
+- Dense（语义相似度）：擅长理解意图和语义匹配
+- Sparse（BGE-M3 稀疏向量）：擅长 subword 级别的模糊匹配
+- BM25（全文检索）：擅长精确关键词匹配（条款编号、人名、案号等）
 """
 
 import asyncio
@@ -18,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class HybridRetriever(BaseRetriever):
-    """混合检索器：稠密 + 稀疏 + RRF 融合 + Rerank + 父块扩展"""
+    """混合检索器：稠密 + 稀疏 + BM25 三路融合 + Rerank + 父块扩展"""
 
     def __init__(
         self,
@@ -26,9 +31,11 @@ class HybridRetriever(BaseRetriever):
         sparse_retriever: BaseRetriever,
         rerank_provider: RerankProvider,
         db_session_factory: async_sessionmaker[AsyncSession],
+        bm25_retriever: BaseRetriever | None = None,
     ):
         self.vector_retriever = vector_retriever
         self.sparse_retriever = sparse_retriever
+        self.bm25_retriever = bm25_retriever
         self.reranker = rerank_provider
         self.db_session_factory = db_session_factory
 
@@ -37,43 +44,65 @@ class HybridRetriever(BaseRetriever):
     ) -> list[RetrievalResult]:
         """执行混合检索
 
-        流程：并行稠密+稀疏检索 → RRF 融合 → Rerank 精排 → 父块扩展
+        流程：并行三路检索 → RRF 融合 → Rerank 精排 → 父块扩展
+
+        三路检索（参考 WeKnora / RAGFlow）：
+        - Dense：语义相似度，每路取 top_k * 3
+        - Sparse：BGE-M3 稀疏向量，每路取 top_k * 3
+        - BM25：全文检索（精确关键词匹配），每路取 top_k * 3
 
         Args:
             expr: Milvus pre-filter 表达式，传递给子检索器进行元数据过滤
-            skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果（用于批量合并后统一 rerank）
+            skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果
         """
         skip_rerank = kwargs.pop("skip_rerank", False)
         expanded_k = top_k * 3
 
-        # 1. 并行执行稠密检索和稀疏检索
-        dense_results, sparse_results = await asyncio.gather(
+        # 1. 并行执行三路检索
+        tasks = [
             self.vector_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
             self.sparse_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
-        )
-        print(f"[Retrieval] 稠密检索: {len(dense_results)} 条, 稀疏检索: {len(sparse_results)} 条")
+        ]
+        # BM25 是可选的（兼容旧 schema collection）
+        has_bm25 = self.bm25_retriever is not None
+        if has_bm25:
+            tasks.append(self.bm25_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs))
 
-        # 2. RRF 融合两路结果
-        fused = self._rrf_fusion([dense_results, sparse_results])
+        results_list = await asyncio.gather(*tasks)
+
+        dense_results = results_list[0]
+        sparse_results = results_list[1]
+        bm25_results = results_list[2] if has_bm25 else []
+
+        print(f"[Retrieval] 稠密检索: {len(dense_results)} 条, "
+              f"稀疏检索: {len(sparse_results)} 条, "
+              f"BM25 检索: {len(bm25_results)} 条")
+
+        # 2. RRF 融合多路结果
+        all_results = [dense_results, sparse_results]
+        if bm25_results:
+            all_results.append(bm25_results)
+
+        fused = self._rrf_fusion(all_results)
         print(f"[Retrieval] RRF 融合后: {len(fused)} 条")
 
         if not fused:
             return []
 
-        # 快速模式：跳过 rerank，直接返回 RRF 融合结果（供 executor 批量合并后统一 rerank）
+        # 快速模式：跳过 rerank，直接返回 RRF 融合结果
         if skip_rerank:
             return fused
 
-        # 3. Rerank 精排（只取融合结果前 top_k*2 条送入 rerank，减少计算量）
+        # 3. Rerank 精排（取融合结果前 top_k*2 条送入 rerank）
         rerank_candidates = fused[: top_k * 2]
         try:
             reranked = await self._rerank(query, rerank_candidates, top_k)
-            print(f"[Retrieval] Rerank 后（阈值过滤）: {len(reranked)} 条")
+            print(f"[Retrieval] Rerank 后: {len(reranked)} 条")
         except Exception as e:
             logger.warning("Reranker 异常，跳过重排序: %s", e)
             reranked = fused[:top_k]
 
-        # 4. 父块扩展：用父块内容替换子块内容
+        # 4. 父块扩展
         expanded = await self._expand_parent(reranked)
 
         logger.debug("HybridRetriever 在 kb=%s 中检索到 %d 条结果", kb_id, len(expanded))

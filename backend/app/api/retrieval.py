@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
+from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.vector import VectorRetriever
@@ -106,14 +107,16 @@ async def _sync_retrieval_test(body: RetrievalTestRequest) -> RetrievalTestRespo
         retriever = VectorRetriever(manager.embedder, milvus)
         results = await retriever.search(body.query, body.knowledge_base_id, top_k=body.top_k)
     else:
-        # hybrid 模式
+        # hybrid 模式（三路：Dense + Sparse + BM25）
         vector_retriever = VectorRetriever(manager.embedder, milvus)
         sparse_retriever = SparseRetriever(manager.embedder, milvus)
+        bm25_retriever = BM25Retriever(milvus)
         hybrid_retriever = HybridRetriever(
             vector_retriever=vector_retriever,
             sparse_retriever=sparse_retriever,
             rerank_provider=manager.reranker,
             db_session_factory=async_session,
+            bm25_retriever=bm25_retriever,
         )
         results = await hybrid_retriever.search(body.query, body.knowledge_base_id, top_k=body.top_k)
 
@@ -137,11 +140,13 @@ async def _stream_retrieval_test(body: RetrievalTestRequest):
     llm = await _get_llm_for_retrieval(body.model_config_id)
     vector_retriever = VectorRetriever(manager.embedder, milvus)
     sparse_retriever = SparseRetriever(manager.embedder, milvus)
+    bm25_retriever = BM25Retriever(milvus)
     hybrid_retriever = HybridRetriever(
         vector_retriever=vector_retriever,
         sparse_retriever=sparse_retriever,
         rerank_provider=manager.reranker,
         db_session_factory=async_session,
+        bm25_retriever=bm25_retriever,
     )
     orchestrator = AgentOrchestrator(
         router=QueryRouter(llm),

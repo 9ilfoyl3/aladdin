@@ -1,4 +1,10 @@
-"""Milvus 向量数据库操作封装"""
+"""Milvus 向量数据库操作封装
+
+支持三路检索：
+- Dense（稠密向量，COSINE 相似度）
+- Sparse（BGE-M3 稀疏向量，IP 内积）
+- BM25（全文检索，Milvus 2.5+ 原生支持）
+"""
 
 import asyncio
 import logging
@@ -9,25 +15,39 @@ from pymilvus import (
     CollectionSchema,
     DataType,
     FieldSchema,
+    Function,
+    FunctionType,
     connections,
     utility,
 )
 
 logger = logging.getLogger(__name__)
 
-# Collection 字段定义
+# Collection 字段定义（v2 schema，支持 BM25 全文检索）
 _FIELDS = [
     FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, is_primary=True, max_length=64),
     FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=64),
-    FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+    FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535,
+               enable_analyzer=True,
+               analyzer_params={"type": "chinese"}),
     FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=1024),
     FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
+    # BM25 输出字段：由 Milvus Function 自动生成，不需要手动插入
+    FieldSchema(name="bm25_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
     FieldSchema(name="parent_id", dtype=DataType.VARCHAR, max_length=64),
     FieldSchema(name="chunk_index", dtype=DataType.INT64),
     # scalar 字段，用于 pre-filter 过滤检索
     FieldSchema(name="file_type", dtype=DataType.VARCHAR, max_length=20),
     FieldSchema(name="element_type", dtype=DataType.VARCHAR, max_length=20),
 ]
+
+# BM25 Function：自动将 content 文本转换为 BM25 稀疏向量
+_BM25_FUNCTION = Function(
+    name="bm25_fn",
+    input_field_names=["content"],
+    output_field_names=["bm25_vector"],
+    function_type=FunctionType.BM25,
+)
 
 # 索引配置
 _DENSE_INDEX_PARAMS = {
@@ -38,6 +58,10 @@ _DENSE_INDEX_PARAMS = {
 _SPARSE_INDEX_PARAMS = {
     "index_type": "SPARSE_INVERTED_INDEX",
     "metric_type": "IP",
+}
+_BM25_INDEX_PARAMS = {
+    "index_type": "AUTOINDEX",
+    "metric_type": "BM25",
 }
 
 
@@ -96,6 +120,17 @@ class MilvusClient:
         """稀疏向量搜索"""
         return await asyncio.to_thread(self._search_sparse_sync, kb_id, sparse_vector, top_k, expr)
 
+    async def search_bm25(
+        self, kb_id: str, query_text: str, top_k: int = 10,
+        expr: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """BM25 全文检索（Milvus 2.5+ 原生支持）
+
+        直接传入文本查询，Milvus 内部自动分词并计算 BM25 分数。
+        对于旧 schema（无 bm25_vector 字段）的 collection，返回空列表。
+        """
+        return await asyncio.to_thread(self._search_bm25_sync, kb_id, query_text, top_k, expr)
+
     async def delete(self, kb_id: str, chunk_ids: list[str]) -> None:
         """按 chunk_id 列表删除数据"""
         await asyncio.to_thread(self._delete_sync, kb_id, chunk_ids)
@@ -128,7 +163,7 @@ class MilvusClient:
     # ------------------------------------------------------------------
 
     def _create_collection_sync(self, kb_id: str) -> None:
-        """同步创建 collection + 索引"""
+        """同步创建 collection + 索引（v2 schema，含 BM25 全文检索）"""
         self._connect()
         name = self._collection_name(kb_id)
 
@@ -136,7 +171,11 @@ class MilvusClient:
             logger.info("Collection %s 已存在，跳过创建", name)
             return
 
-        schema = CollectionSchema(fields=_FIELDS, description=f"知识库 {kb_id} 的向量集合")
+        schema = CollectionSchema(
+            fields=_FIELDS,
+            description=f"知识库 {kb_id} 的向量集合",
+            functions=[_BM25_FUNCTION],
+        )
         collection = Collection(name=name, schema=schema, using=self._alias)
 
         # 创建稠密向量索引
@@ -144,10 +183,15 @@ class MilvusClient:
             field_name="dense_vector",
             index_params=_DENSE_INDEX_PARAMS,
         )
-        # 创建稀疏向量索引
+        # 创建稀疏向量索引（BGE-M3 sparse）
         collection.create_index(
             field_name="sparse_vector",
             index_params=_SPARSE_INDEX_PARAMS,
+        )
+        # 创建 BM25 全文检索索引
+        collection.create_index(
+            field_name="bm25_vector",
+            index_params=_BM25_INDEX_PARAMS,
         )
         # 创建 scalar 索引，用于 pre-filter 过滤检索
         collection.create_index(
@@ -159,7 +203,7 @@ class MilvusClient:
             index_name="idx_element_type",
         )
 
-        logger.info("Collection %s 创建完成", name)
+        logger.info("Collection %s 创建完成（v2 schema，含 BM25）", name)
 
     @staticmethod
     def _truncate_to_byte_limit(text: str, max_bytes: int = 60000) -> str:
@@ -256,6 +300,48 @@ class MilvusClient:
         results = collection.search(**search_kwargs)
 
         return self._parse_search_results(results)
+
+    def _search_bm25_sync(
+        self, kb_id: str, query_text: str, top_k: int,
+        expr: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """同步 BM25 全文检索
+
+        使用 Milvus 2.5 原生 BM25 功能，直接传入文本查询。
+        对于旧 schema（无 bm25_vector 字段）的 collection，返回空列表。
+        """
+        self._connect()
+        name = self._collection_name(kb_id)
+
+        if not utility.has_collection(name, using=self._alias):
+            return []
+
+        collection = Collection(name=name, using=self._alias)
+
+        # 检查 collection 是否有 bm25_vector 字段（兼容旧 schema）
+        field_names = [f.name for f in collection.schema.fields]
+        if "bm25_vector" not in field_names:
+            logger.debug("Collection %s 无 bm25_vector 字段，跳过 BM25 检索", name)
+            return []
+
+        collection.load()
+
+        search_kwargs: dict[str, Any] = {
+            "data": [query_text],
+            "anns_field": "bm25_vector",
+            "param": {"metric_type": "BM25"},
+            "limit": top_k,
+            "output_fields": ["chunk_id", "doc_id", "content", "parent_id", "chunk_index", "file_type", "element_type"],
+        }
+        if expr is not None:
+            search_kwargs["expr"] = expr
+
+        try:
+            results = collection.search(**search_kwargs)
+            return self._parse_search_results(results)
+        except Exception as e:
+            logger.warning("BM25 检索失败（可能是旧 schema collection）: %s", e)
+            return []
 
     def _delete_sync(self, kb_id: str, chunk_ids: list[str]) -> None:
         """同步删除指定 chunk"""

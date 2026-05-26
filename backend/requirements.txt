@@ -10,7 +10,7 @@ sqlalchemy>=2.0.35
 asyncpg>=0.29.0
 aiosqlite>=0.20.0
 greenlet>=3.0.0
-pymilvus>=2.4.7
+pymilvus>=2.5.0
 
 # Redis
 redis>=5.0.0

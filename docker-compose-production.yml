@@ -40,7 +40,7 @@ services:
 
   milvus:
     container_name: arag-milvus
-    image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.4.6}
+    image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.5.4}
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
