@@ -280,7 +280,7 @@ async def _retrieve_multi_kb(
 
     # 使用 MultiKBRetriever 执行联合检索
     multi_kb = MultiKBRetriever(hybrid_retriever)
-    multi_result: MultiKBSearchResult = await multi_kb.search(query, kb_configs, top_k=30, filters=filter_obj)
+    multi_result: MultiKBSearchResult = await multi_kb.search(query, kb_configs, top_k=10, filters=filter_obj)
     return multi_result.results, multi_result.degraded
 
 
@@ -315,7 +315,7 @@ async def _retrieve_chunks(
     if mode == "direct":
         # 直检索：仅稠密向量
         retriever = VectorRetriever(manager.embedder, milvus)
-        results = await retriever.search(query, kb_id, top_k=30, expr=expr)
+        results = await retriever.search(query, kb_id, top_k=10, expr=expr)
         # 写入缓存
         if cache:
             await cache.set(kb_id, query, mode, results)
@@ -354,7 +354,7 @@ async def _retrieve_chunks(
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
         hybrid_retriever = _build_hybrid_retriever()
-        results = await hybrid_retriever.search(query, kb_id, top_k=30, expr=expr)
+        results = await hybrid_retriever.search(query, kb_id, top_k=10, expr=expr)
         # 写入缓存
         if cache:
             await cache.set(kb_id, query, mode, results)

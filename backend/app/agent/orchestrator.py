@@ -218,7 +218,7 @@ class AgentOrchestrator:
         print(f"[Agent-v2] 完成: 共 {iterations} 轮迭代, 最终 {len(all_results)} 条结果")
 
         # 4. 多样性合并：确保每个意图组都有最低配额的结果
-        final_results = self._merge_with_diversity(plan.intent_groups, intent_results, top_k=30)
+        final_results = self._merge_with_diversity(plan.intent_groups, intent_results, top_k=10)
 
         return AgentResult(chunks=final_results, iterations=iterations)
 
@@ -393,7 +393,7 @@ class AgentOrchestrator:
         print(f"[Agent] 完成: 共 {iterations} 轮迭代, 最终 {len(results)} 条结果")
 
         results.sort(key=lambda x: x.score, reverse=True)
-        results = results[:30]
+        results = results[:10]
 
         return AgentResult(chunks=results, iterations=iterations)
 
@@ -401,5 +401,5 @@ class AgentOrchestrator:
         self, query: str, kb_id: str, degraded: bool = False, expr: str | None = None,
     ) -> AgentResult:
         """快路径：直接使用 retriever 检索"""
-        results = await self.retriever.search(query, kb_id, top_k=30, expr=expr)
+        results = await self.retriever.search(query, kb_id, top_k=10, expr=expr)
         return AgentResult(chunks=results, iterations=0, degraded=degraded)

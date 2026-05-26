@@ -47,26 +47,30 @@ class HybridRetriever(BaseRetriever):
         流程：并行三路检索 → RRF 融合 → Rerank 精排 → 父块扩展
 
         三路检索（参考 WeKnora / RAGFlow）：
-        - Dense：语义相似度，每路取 top_k * 3
-        - Sparse：BGE-M3 稀疏向量，每路取 top_k * 3
-        - BM25：全文检索（精确关键词匹配），每路取 top_k * 3
+        - Dense：语义相似度，每路取 128 条候选
+        - Sparse：BGE-M3 稀疏向量，每路取 128 条候选
+        - BM25：全文检索（精确关键词匹配），每路取 128 条候选
+
+        Rerank 候选池固定 50 条（reranker 处理 50 条以内性能最优）。
+        最终返回 top_k 条精选结果。
 
         Args:
             expr: Milvus pre-filter 表达式，传递给子检索器进行元数据过滤
             skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果
         """
         skip_rerank = kwargs.pop("skip_rerank", False)
-        expanded_k = top_k * 3
+        # 每路召回固定 128 条，确保候选池足够大
+        recall_k = 128
 
         # 1. 并行执行三路检索
         tasks = [
-            self.vector_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
-            self.sparse_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs),
+            self.vector_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs),
+            self.sparse_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs),
         ]
         # BM25 是可选的（兼容旧 schema collection）
         has_bm25 = self.bm25_retriever is not None
         if has_bm25:
-            tasks.append(self.bm25_retriever.search(query, kb_id, top_k=expanded_k, expr=expr, **kwargs))
+            tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
 
         results_list = await asyncio.gather(*tasks)
 
@@ -93,8 +97,8 @@ class HybridRetriever(BaseRetriever):
         if skip_rerank:
             return fused
 
-        # 3. Rerank 精排（取融合结果前 top_k*2 条送入 rerank）
-        rerank_candidates = fused[: top_k * 2]
+        # 3. Rerank 精排（固定取 top-50 送入 rerank，平衡精度和性能）
+        rerank_candidates = fused[:50]
         try:
             reranked = await self._rerank(query, rerank_candidates, top_k)
             print(f"[Retrieval] Rerank 后: {len(reranked)} 条")
