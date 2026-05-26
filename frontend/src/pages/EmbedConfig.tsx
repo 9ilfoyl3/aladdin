@@ -20,6 +20,7 @@ interface FormData {
   base_url: string
   api_key: string
   timeout: string
+  sparse_enabled: boolean
   is_active: boolean
 }
 
@@ -33,6 +34,7 @@ const emptyForm: FormData = {
   base_url: '',
   api_key: '',
   timeout: '60',
+  sparse_enabled: true,
   is_active: false,
 }
 
@@ -61,6 +63,7 @@ function EmbedConfig() {
       base_url: data.provider === 'remote' ? data.base_url : undefined,
       api_key: data.provider === 'remote' ? data.api_key : undefined,
       timeout: parseFloat(data.timeout) || 60,
+      sparse_enabled: data.config_type === 'embedding' ? data.sparse_enabled : undefined,
       is_active: data.is_active,
     }),
     onSuccess: () => {
@@ -113,6 +116,7 @@ function EmbedConfig() {
         api_key: form.provider === 'remote' ? form.api_key : undefined,
         timeout: parseFloat(form.timeout) || 60,
         config_id: editingItem?.id,
+        sparse_enabled: form.config_type === 'embedding' ? form.sparse_enabled : undefined,
       })
       setTestResult(result)
     } catch {
@@ -159,6 +163,7 @@ function EmbedConfig() {
       base_url: item.base_url || '',
       api_key: '',
       timeout: String(item.timeout),
+      sparse_enabled: item.sparse_enabled,
       is_active: item.is_active,
     })
     setTestResult(null)
@@ -182,6 +187,7 @@ function EmbedConfig() {
         device: form.device,
         base_url: form.provider === 'remote' ? form.base_url : null,
         timeout: parseFloat(form.timeout) || 60,
+        sparse_enabled: form.config_type === 'embedding' ? form.sparse_enabled : undefined,
         is_active: form.is_active,
       }
       if (form.api_key) payload.api_key = form.api_key
@@ -234,6 +240,12 @@ function EmbedConfig() {
             <div className="flex justify-between">
               <span>地址</span>
               <span className="truncate max-w-[180px]">{item.base_url}</span>
+            </div>
+          )}
+          {item.config_type === 'embedding' && (
+            <div className="flex justify-between">
+              <span>Sparse 向量</span>
+              <span>{item.sparse_enabled ? '已启用' : '未启用'}</span>
             </div>
           )}
         </div>
@@ -458,6 +470,21 @@ function EmbedConfig() {
                   />
                 </div>
               </>
+            )}
+
+            {form.config_type === 'embedding' && (
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="sparse_enabled"
+                  checked={form.sparse_enabled}
+                  onChange={(e) => setForm({ ...form, sparse_enabled: e.target.checked })}
+                  className="rounded"
+                />
+                <Label htmlFor="sparse_enabled" className="text-sm font-normal">
+                  启用 Sparse 向量（需远程服务支持 /embed_sparse 端点，如 TEI 部署的 BGE-M3）
+                </Label>
+              </div>
             )}
 
             <div className="flex items-center gap-2">

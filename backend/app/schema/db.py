@@ -156,6 +156,8 @@ class EmbedConfig(Base):
     base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timeout: Mapped[float] = mapped_column(Float, default=60.0)
+    # sparse 向量支持（仅 embedding 类型有效）
+    sparse_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # 状态
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)  # 当前是否启用
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

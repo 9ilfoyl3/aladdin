@@ -38,6 +38,7 @@ class ModelManager:
                 base_url=config.embed_base_url,
                 model=config.embed_model,
                 api_key=config.embed_api_key,
+                sparse_enabled=config.embed_sparse_enabled,
             )
         elif config.embed_provider == "flag-embedding":
             from app.models.embedding.bge_m3 import BgeM3Embedder
@@ -76,6 +77,7 @@ class ModelManager:
                 model=kwargs.get("model_name", "BAAI/bge-m3"),
                 api_key=kwargs.get("api_key", ""),
                 timeout=kwargs.get("timeout", 60.0),
+                sparse_enabled=kwargs.get("sparse_enabled", True),
             )
         elif provider == "local":
             local_provider = kwargs.get("local_provider", "sentence-transformers")

@@ -1,10 +1,14 @@
 """远程 Embedding API Provider
 
-通过 HTTP 调用外部 Embedding 服务（兼容 OpenAI /v1/embeddings 接口格式）。
-适用于目标环境已部署独立 Embedding 服务的场景（如 TEI、Infinity、vLLM 等）。
+通过 HTTP 调用外部 Embedding 服务，支持：
+- Dense 向量：兼容 OpenAI /v1/embeddings 接口格式
+- Sparse 向量：兼容 TEI /embed_sparse 接口格式（BGE-M3 lexical weights）
+
+适用于目标环境已部署独立 Embedding 服务的场景（如 TEI、Infinity 等）。
 """
 
 import logging
+import sys
 
 import httpx
 
@@ -14,9 +18,21 @@ logger = logging.getLogger(__name__)
 
 
 class RemoteEmbedder(EmbedProvider):
-    """远程 Embedding Provider，调用外部 OpenAI 兼容 API"""
+    """远程 Embedding Provider，支持 Dense + Sparse 双路输出
 
-    def __init__(self, base_url: str, model: str = "BAAI/bge-m3", api_key: str = "", timeout: float = 60.0):
+    Dense 调用 OpenAI 兼容的 /embeddings 端点；
+    Sparse 调用 TEI 兼容的 /embed_sparse 端点（需服务端支持）。
+    当远程服务不支持 sparse 时自动降级为占位值。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str = "BAAI/bge-m3",
+        api_key: str = "",
+        timeout: float = 60.0,
+        sparse_enabled: bool = True,
+    ):
         """初始化远程 Embedding Provider
 
         Args:
@@ -24,12 +40,16 @@ class RemoteEmbedder(EmbedProvider):
             model: 模型名称，传给远程服务
             api_key: API 密钥（可选）
             timeout: 请求超时时间（秒）
+            sparse_enabled: 是否启用 sparse 向量（调用 /embed_sparse 端点）
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.sparse_enabled = sparse_enabled
         self._client: httpx.AsyncClient | None = None
+        # sparse 端点可用性缓存：None=未探测, True=可用, False=不可用
+        self._sparse_available: bool | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
         """获取复用的 httpx 客户端，支持连接池"""
@@ -40,6 +60,25 @@ class RemoteEmbedder(EmbedProvider):
             )
         return self._client
 
+    def _get_headers(self) -> dict[str, str]:
+        """构造请求头"""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _get_sparse_url(self) -> str:
+        """获取 sparse 端点 URL
+
+        TEI 格式：base_url 去掉 /v1 后缀，拼接 /embed_sparse
+        例如：http://server:8080/v1 → http://server:8080/embed_sparse
+              http://server:8080 → http://server:8080/embed_sparse
+        """
+        base = self.base_url
+        if base.endswith("/v1"):
+            base = base[:-3]
+        return f"{base}/embed_sparse"
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """调用远程服务生成稠密向量
 
@@ -49,13 +88,9 @@ class RemoteEmbedder(EmbedProvider):
         Returns:
             稠密向量列表
         """
-        import sys
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
+        headers = self._get_headers()
         client = self._get_client()
-        print(f"[RemoteEmbedder] 发送请求: {len(texts)} 个文本, url={self.base_url}/embeddings, timeout={self.timeout}s")
+        print(f"[RemoteEmbedder] Dense 请求: {len(texts)} 个文本, url={self.base_url}/embeddings")
         sys.stdout.flush()
         resp = await client.post(
             f"{self.base_url}/embeddings",
@@ -64,18 +99,132 @@ class RemoteEmbedder(EmbedProvider):
         )
         resp.raise_for_status()
         data = resp.json()
-        print(f"[RemoteEmbedder] 请求返回: status={resp.status_code}, 向量数={len(data['data'])}")
+        print(f"[RemoteEmbedder] Dense 返回: status={resp.status_code}, 向量数={len(data['data'])}")
         sys.stdout.flush()
         # OpenAI 格式：data[].embedding
         return [item["embedding"] for item in data["data"]]
 
     async def embed_sparse(self, texts: list[str]) -> list[dict[int, float]]:
-        """生成稀疏向量（远程服务通常不提供，返回占位值）
+        """调用远程服务生成稀疏向量（BGE-M3 lexical weights）
+
+        兼容 TEI /embed_sparse 端点格式：
+        - 请求：{"inputs": ["text1", "text2"], "model": "..."}
+        - 响应：[[{"index": 12345, "value": 0.82}, ...], [...]]
+
+        当远程服务不支持 sparse 端点时，自动降级为占位值并缓存状态，
+        后续调用不再尝试请求，避免重复超时。
 
         Args:
             texts: 待编码文本列表
 
         Returns:
-            占位稀疏向量列表
+            稀疏向量列表，每个元素为 {token_id: weight} 字典
         """
-        return [{0: 1e-30} for _ in texts]
+        # 未启用 sparse 或已探测到不可用，直接返回占位值
+        if not self.sparse_enabled or self._sparse_available is False:
+            return [{0: 1e-30} for _ in texts]
+
+        headers = self._get_headers()
+        client = self._get_client()
+        sparse_url = self._get_sparse_url()
+
+        try:
+            print(f"[RemoteEmbedder] Sparse 请求: {len(texts)} 个文本, url={sparse_url}")
+            sys.stdout.flush()
+            resp = await client.post(
+                sparse_url,
+                headers=headers,
+                json={"inputs": texts, "model": self.model},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            # 标记 sparse 端点可用
+            if self._sparse_available is None:
+                self._sparse_available = True
+                print("[RemoteEmbedder] Sparse 端点探测成功，已启用稀疏向量")
+                sys.stdout.flush()
+
+            # 解析响应
+            sparse_vectors = self._parse_sparse_response(data, len(texts))
+            print(f"[RemoteEmbedder] Sparse 返回: {len(sparse_vectors)} 个向量")
+            sys.stdout.flush()
+            return sparse_vectors
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 405, 501):
+                # 端点不存在或不支持，标记为不可用
+                self._sparse_available = False
+                logger.warning(
+                    "远程服务不支持 /embed_sparse 端点 (HTTP %d)，已降级为占位值",
+                    e.response.status_code,
+                )
+                return [{0: 1e-30} for _ in texts]
+            raise
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # 网络问题不标记为永久不可用（可能是临时故障）
+            logger.warning("Sparse 端点请求失败（网络问题），本次降级: %s", e)
+            return [{0: 1e-30} for _ in texts]
+
+    def _parse_sparse_response(self, data: list | dict, expected_count: int) -> list[dict[int, float]]:
+        """解析 sparse 响应，兼容多种格式
+
+        支持的格式：
+        1. TEI 格式：[[{"index": 123, "value": 0.8}, ...], ...]
+        2. 字典列表格式：[{"token_id": weight, ...}, ...]
+        3. 嵌套在 data 字段中：{"data": [...]}
+        """
+        # 如果响应包裹在 data 字段中
+        if isinstance(data, dict):
+            data = data.get("data", data.get("results", []))
+
+        if not isinstance(data, list):
+            logger.warning("Sparse 响应格式异常，返回占位值")
+            return [{0: 1e-30} for _ in range(expected_count)]
+
+        sparse_vectors: list[dict[int, float]] = []
+
+        for item in data:
+            if isinstance(item, list):
+                # TEI 格式：[{"index": 123, "value": 0.8}, ...]
+                vec: dict[int, float] = {}
+                for entry in item:
+                    if isinstance(entry, dict):
+                        idx = entry.get("index", entry.get("token_id", 0))
+                        val = entry.get("value", entry.get("weight", 0.0))
+                        if val > 0:
+                            vec[int(idx)] = float(val)
+                sparse_vectors.append(vec if vec else {0: 1e-30})
+            elif isinstance(item, dict):
+                # 直接是 {token_id: weight} 字典
+                vec = {int(k): float(v) for k, v in item.items() if float(v) > 0}
+                sparse_vectors.append(vec if vec else {0: 1e-30})
+            else:
+                sparse_vectors.append({0: 1e-30})
+
+        # 补齐数量（防止响应数量不匹配）
+        while len(sparse_vectors) < expected_count:
+            sparse_vectors.append({0: 1e-30})
+
+        return sparse_vectors[:expected_count]
+
+    async def check_sparse_support(self) -> bool:
+        """主动探测远程服务是否支持 sparse 端点
+
+        用于配置测试时验证服务能力。
+
+        Returns:
+            True 表示支持，False 表示不支持
+        """
+        if not self.sparse_enabled:
+            return False
+
+        try:
+            result = await self.embed_sparse(["测试"])
+            # 检查返回的是否是真实 sparse 向量（非占位值）
+            if result and result[0] != {0: 1e-30}:
+                return True
+            # 如果返回占位值，可能是探测失败
+            return self._sparse_available is True
+        except Exception:
+            return False

@@ -230,6 +230,7 @@ export interface EmbedConfigItem {
   base_url: string | null
   api_key_set: boolean
   timeout: number
+  sparse_enabled: boolean
   is_active: boolean
   created_at: string
   updated_at: string
@@ -245,6 +246,7 @@ export interface EmbedCurrentConfig {
   embed_model: string
   embed_device: string
   embed_base_url: string
+  embed_sparse_enabled: boolean
   rerank_provider: string
   rerank_model: string
   rerank_device: string
@@ -266,6 +268,7 @@ export const embedConfigApi = {
     base_url?: string
     api_key?: string
     timeout?: number
+    sparse_enabled?: boolean
     is_active?: boolean
   }) =>
     request<EmbedConfigItem>('/embed-configs', {
@@ -289,6 +292,7 @@ export const embedConfigApi = {
     api_key?: string
     timeout?: number
     config_id?: string
+    sparse_enabled?: boolean
   }) =>
     request<EmbedTestResult>('/embed-configs/test', {
       method: 'POST',

@@ -34,6 +34,8 @@ class EmbedConfigCreate(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     timeout: float = 60.0
+    # sparse 向量支持（仅 embedding 类型有效）
+    sparse_enabled: bool = True
     # 状态
     is_active: bool = False
 
@@ -47,6 +49,7 @@ class EmbedConfigUpdate(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     timeout: Optional[float] = None
+    sparse_enabled: Optional[bool] = None
     is_active: Optional[bool] = None
 
 
@@ -62,6 +65,7 @@ class EmbedConfigResponse(BaseModel):
     base_url: Optional[str] = None
     api_key_set: bool
     timeout: float
+    sparse_enabled: bool
     is_active: bool
     created_at: str
     updated_at: str
@@ -78,6 +82,7 @@ class EmbedTestRequest(BaseModel):
     timeout: float = 60.0
     config_type: str = "embedding"  # embedding | rerank
     config_id: Optional[str] = None  # 编辑已有配置时传入，用于在 api_key 为空时回退到已保存的密钥
+    sparse_enabled: bool = True  # 是否测试 sparse 端点
 
 
 class EmbedTestResponse(BaseModel):
@@ -102,6 +107,7 @@ def _to_response(config: EmbedConfig) -> EmbedConfigResponse:
         base_url=config.base_url,
         api_key_set=bool(config.api_key),
         timeout=config.timeout,
+        sparse_enabled=config.sparse_enabled,
         is_active=config.is_active,
         created_at=config.created_at.isoformat() if config.created_at else "",
         updated_at=config.updated_at.isoformat() if config.updated_at else "",
@@ -121,6 +127,7 @@ def _reload_provider(config: EmbedConfig) -> None:
             "base_url": config.base_url or "",
             "api_key": config.api_key or "",
             "timeout": config.timeout,
+            "sparse_enabled": config.sparse_enabled,
         }
         if config.config_type == "embedding":
             manager.reload_embedder(provider=config.provider, **kwargs)
@@ -155,6 +162,7 @@ class EmbedCurrentResponse(BaseModel):
     embed_model: str
     embed_device: str
     embed_base_url: str
+    embed_sparse_enabled: bool
     rerank_provider: str
     rerank_model: str
     rerank_device: str
@@ -171,6 +179,7 @@ async def get_current_embed_config():
         embed_model=settings.embed_model,
         embed_device=settings.embed_device,
         embed_base_url=settings.embed_base_url,
+        embed_sparse_enabled=settings.embed_sparse_enabled,
         rerank_provider=settings.rerank_provider,
         rerank_model=settings.rerank_model,
         rerank_device=settings.rerank_device,
@@ -205,6 +214,7 @@ async def create_embed_config(body: EmbedConfigCreate, db: AsyncSession = Depend
         base_url=body.base_url,
         api_key=body.api_key or None,
         timeout=body.timeout,
+        sparse_enabled=body.sparse_enabled,
         is_active=body.is_active,
     )
     db.add(config)
@@ -286,14 +296,23 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
                     model=body.model_name,
                     api_key=body.api_key or "",
                     timeout=body.timeout,
+                    sparse_enabled=body.sparse_enabled,
                 )
                 result = await embedder.embed(["测试文本"])
-                if result and len(result[0]) > 0:
-                    return EmbedTestResponse(
-                        success=True,
-                        message=f"连接成功，向量维度: {len(result[0])}"
-                    )
-                return EmbedTestResponse(success=False, message="返回结果为空")
+                if not result or len(result[0]) == 0:
+                    return EmbedTestResponse(success=False, message="Dense 返回结果为空")
+
+                msg = f"Dense 连接成功，向量维度: {len(result[0])}"
+
+                # 测试 sparse 端点
+                if body.sparse_enabled:
+                    sparse_ok = await embedder.check_sparse_support()
+                    if sparse_ok:
+                        msg += "；Sparse 端点可用 ✓"
+                    else:
+                        msg += "；Sparse 端点不可用（将降级为 BM25 兜底）"
+
+                return EmbedTestResponse(success=True, message=msg)
             else:
                 from app.models.rerank.remote import RemoteReranker
                 reranker = RemoteReranker(
@@ -359,4 +378,5 @@ async def test_saved_embed_config(config_id: str, db: AsyncSession = Depends(get
         api_key=config.api_key,
         timeout=config.timeout,
         config_type=config.config_type,
+        sparse_enabled=config.sparse_enabled,
     ), db=db)
