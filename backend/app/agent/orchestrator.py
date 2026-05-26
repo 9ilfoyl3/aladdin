@@ -98,29 +98,28 @@ class AgentOrchestrator:
         self, query: str, kb_id: str, on_progress: ProgressCallback | None,
         expr: str | None = None,
     ) -> AgentResult:
-        """v2 编排逻辑：意图拆分 → 分组并行检索 → 意图感知反思"""
+        """v2 编排逻辑：Router 快判 → simple 走快路径 / complex 调 Planner 意图拆分"""
         self.executor.reset_cache()
 
-        # 1. 规划：意图拆分 + 查询生成
+        # 1. Router 快速判定复杂度
         await self._emit(on_progress, "routing", "正在分析问题类型...")
 
-        plan = await self.planner.plan(query)
-        print(f"[Agent-v2] 规划完成: complexity={plan.complexity}, "
-              f"intent_groups={len(plan.intent_groups)}")
+        route = await self.router.classify(query)
+        print(f"[Agent-v2] 路由判定: query={query!r} -> route={route}")
 
-        if plan.complexity == "simple":
+        if route == "simple":
             await self._emit(on_progress, "routing_done", "简单查询，直接检索")
             return await self._fast_path(query, kb_id, expr=expr)
 
+        await self._emit(on_progress, "routing_done", "判定为复杂查询，启动深度检索")
+
+        # 2. Complex 查询：调 Planner 做意图拆分 + 查询生成
+        plan = await self.planner.plan(query)
+        print(f"[Agent-v2] 规划完成: intent_groups={len(plan.intent_groups)}")
+
         # 展示规划结果
         intents_text = "、".join(f"「{g.intent}」" for g in plan.intent_groups)
-        await self._emit(on_progress, "routing_done", f"判定为复杂查询，识别到 {len(plan.intent_groups)} 个意图：{intents_text}")
-
-        all_queries = []
-        for g in plan.intent_groups:
-            all_queries.extend(g.queries)
-        queries_text = "、".join(f"「{q}」" for q in all_queries)
-        await self._emit(on_progress, "rewriting_done", f"查询改写为：{queries_text}")
+        await self._emit(on_progress, "rewriting_done", f"识别到 {len(plan.intent_groups)} 个意图：{intents_text}")
 
         # 2. 分组并行检索
         all_chunk_ids: set[str] = set()

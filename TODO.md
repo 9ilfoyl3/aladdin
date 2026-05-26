@@ -407,6 +407,34 @@
 - **预估工作量**: Phase 1: 3-4 天，Phase 2: 4-5 天，Phase 3: 5-7 天
 - **前置依赖**: LLM 需支持 function calling（Ollama qwen2.5 已支持，vLLM 原生支持）
 
+### 23. 多轮对话 Query Rewrite（指代消解 + 意图分类，参考 WeKnora）
+- **文件**: 新建 `backend/app/agent/query_rewrite.py`、修改 `backend/app/api/chat.py`
+- **现状**: 多轮对话中用户说"它的第25条是什么"，系统无法理解"它"指代的是上一轮提到的法律名称，导致检索失败
+- **WeKnora 做法**:
+  - 在对话入口（chat API 层）增加 Query Rewrite 步骤，在消息进入 Agent 之前先做指代消解
+  - 结合对话历史，将代词（它、这个、那个）替换为明确的实体
+  - 同时做意图分类（greeting / kb_search / follow_up / chitchat 等），非检索意图直接跳过 Agent
+  - 输出结构化 JSON：`{rewrite_query, intent}`
+  - 改写后的查询保留核心实体和关键词，不生成元指令（如"请搜索..."）
+- **目标**:
+  - 在 chat API 层增加 rewrite 步骤，对多轮对话做指代消解
+  - 意图分类：greeting/chitchat 直接回复，kb_search 进入检索流程
+  - 改写后的 query 传给 Agent/检索层，替代原始 user message
+- **优先级**: P1（多轮对话体验的基础）
+- **预估工作量**: 1-2 天
+
+### 24. Agent 编排优化：Router + Rewriter 并行（替代 Planner 单次调用）
+- **文件**: 修改 `backend/app/agent/orchestrator.py`、`backend/app/agent/planner.py`
+- **现状**: Planner 合并了路由判断和查询改写为一次 LLM 调用，对 simple 查询浪费（改写部分用不上），且用户等待时只看到"正在分析问题类型..."
+- **目标**:
+  - 拆分 Planner 为 Router（轻量，只判断 simple/complex）+ IntentRewriter（重量，意图拆分+查询生成）
+  - Router 和 IntentRewriter 并行启动，Router 先返回就先推送进度
+  - simple 查询：Router 完成后立即取消 IntentRewriter，直接走快路径检索
+  - complex 查询：等 IntentRewriter 完成，继续分组检索
+  - 前端进度体验优化：simple 查询 1-2 秒内开始检索，不再等改写
+- **优先级**: P1（用户体验优化）
+- **预估工作量**: 1 天
+
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`
 - **现状**: 只支持手动上传文件，不支持从外部平台自动同步知识

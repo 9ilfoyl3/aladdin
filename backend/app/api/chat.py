@@ -324,17 +324,17 @@ async def _retrieve_chunks(
     elif mode == "agent":
         # Agent 模式：完整编排，各节点加载独立 LLM
         router_llm = await _get_node_llm("router", llm)
-        rewriter_llm = await _get_node_llm("rewriter", llm)
+        planner_llm = await _get_node_llm("planner", llm)
         reflector_llm = await _get_node_llm("reflector", llm)
 
         hybrid_retriever = _build_hybrid_retriever()
 
-        # v2: 使用 Planner（意图拆分），复用 rewriter_llm
-        planner = QueryPlanner(rewriter_llm)
+        # v2: Router 快判 + Planner 意图拆分
+        planner = QueryPlanner(planner_llm)
 
         orchestrator = AgentOrchestrator(
             router=QueryRouter(router_llm),
-            rewriter=QueryRewriter(rewriter_llm),
+            rewriter=QueryRewriter(planner_llm),
             executor=RetrievalExecutor(hybrid_retriever, embedder=manager.embedder),
             reflector=Reflector(reflector_llm),
             retriever=hybrid_retriever,

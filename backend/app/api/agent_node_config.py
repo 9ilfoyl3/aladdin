@@ -13,20 +13,20 @@ from app.storage.database import get_db
 router = APIRouter(prefix="/api/agent-node-configs", tags=["Agent Node Config"])
 
 # 有效节点名称
-VALID_NODE_NAMES = ("router", "rewriter", "reflector")
+VALID_NODE_NAMES = ("router", "planner", "reflector")
 
 
 class AgentNodeConfigUpdate(BaseModel):
     router_model_id: Optional[str] = None
-    rewriter_model_id: Optional[str] = None
+    planner_model_id: Optional[str] = None
     reflector_model_id: Optional[str] = None
 
 
 class AgentNodeConfigResponse(BaseModel):
     router_model_id: Optional[str] = None
     router_model_name: Optional[str] = None
-    rewriter_model_id: Optional[str] = None
-    rewriter_model_name: Optional[str] = None
+    planner_model_id: Optional[str] = None
+    planner_model_name: Optional[str] = None
     reflector_model_id: Optional[str] = None
     reflector_model_name: Optional[str] = None
 

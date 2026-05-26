@@ -147,7 +147,7 @@ function Models() {
     if (nodeConfig) {
       setNodeForm({
         router_model_id: nodeConfig.router_model_id,
-        rewriter_model_id: nodeConfig.rewriter_model_id,
+        planner_model_id: nodeConfig.planner_model_id,
         reflector_model_id: nodeConfig.reflector_model_id,
       })
     }
@@ -166,7 +166,7 @@ function Models() {
     // null 值转换为空字符串以清除绑定
     const payload: AgentNodeConfigUpdate = {
       router_model_id: nodeForm.router_model_id === null ? '' : nodeForm.router_model_id,
-      rewriter_model_id: nodeForm.rewriter_model_id === null ? '' : nodeForm.rewriter_model_id,
+      planner_model_id: nodeForm.planner_model_id === null ? '' : nodeForm.planner_model_id,
       reflector_model_id: nodeForm.reflector_model_id === null ? '' : nodeForm.reflector_model_id,
     }
     nodeConfigMutation.mutate(payload)
@@ -303,13 +303,13 @@ function Models() {
                 <RefreshCw className="h-4 w-4 text-amber-600" />
               </div>
               <div>
-                <h3 className="font-medium text-sm leading-tight">查询改写</h3>
-                <p className="text-[11px] text-muted-foreground">优化查询，提升召回质量</p>
+                <h3 className="font-medium text-sm leading-tight">意图规划</h3>
+                <p className="text-[11px] text-muted-foreground">拆分多意图查询，生成检索计划</p>
               </div>
             </div>
             <Select
-              value={nodeForm.rewriter_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
+              value={nodeForm.planner_model_id || '__none__'}
+              onValueChange={(val) => setNodeForm({ ...nodeForm, planner_model_id: val === '__none__' ? null : val })}
             >
               <SelectTrigger className="h-8 text-sm">
                 <SelectValue />

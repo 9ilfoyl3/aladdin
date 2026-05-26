@@ -196,15 +196,15 @@ export const llmConfigApi = {
 export interface AgentNodeConfigResponse {
   router_model_id: string | null
   router_model_name: string | null
-  rewriter_model_id: string | null
-  rewriter_model_name: string | null
+  planner_model_id: string | null
+  planner_model_name: string | null
   reflector_model_id: string | null
   reflector_model_name: string | null
 }
 
 export interface AgentNodeConfigUpdate {
   router_model_id?: string | null
-  rewriter_model_id?: string | null
+  planner_model_id?: string | null
   reflector_model_id?: string | null
 }
 
