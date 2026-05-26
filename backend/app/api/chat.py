@@ -42,7 +42,7 @@ from app.schema.api import (
     StreamChoice,
     UsageInfo,
 )
-from app.schema.db import AgentNodeConfig, KnowledgeBase, LLMConfig
+from app.schema.db import AgentNodeConfig, KnowledgeBase, LLMConfig, ChatSession, ChatMessageRecord
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient
 
@@ -51,6 +51,64 @@ from sqlalchemy import select
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# 历史上下文最大轮数（每轮 = 1 user + 1 assistant）
+MAX_HISTORY_ROUNDS = 10
+
+
+async def _load_session_history(session_id: str) -> list[dict]:
+    """从数据库加载会话历史消息，返回最近 N 轮对话
+
+    只保留最近 MAX_HISTORY_ROUNDS 轮（user+assistant 各一条算一轮），
+    避免上下文过长超出 LLM token 限制。
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            select(ChatMessageRecord)
+            .where(ChatMessageRecord.session_id == session_id)
+            .order_by(ChatMessageRecord.created_at)
+        )
+        messages = result.scalars().all()
+
+    if not messages:
+        return []
+
+    # 转换为 dict 列表
+    history = [{"role": m.role, "content": m.content} for m in messages]
+
+    # 截取最近 N 轮（2N 条消息）
+    max_messages = MAX_HISTORY_ROUNDS * 2
+    if len(history) > max_messages:
+        history = history[-max_messages:]
+
+    return history
+
+
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None) -> None:
+    """保存一条消息到会话"""
+    msg = ChatMessageRecord(
+        id=str(uuid.uuid4()),
+        session_id=session_id,
+        role=role,
+        content=content,
+        references=references,
+        agent_steps=agent_steps,
+    )
+    async with async_session() as session:
+        session.add(msg)
+        await session.commit()
+
+
+async def _auto_title_session(session_id: str, user_query: str) -> None:
+    """自动为新会话生成标题（取用户第一条消息的前 30 个字符）"""
+    async with async_session() as session:
+        result = await session.execute(
+            select(ChatSession).where(ChatSession.id == session_id)
+        )
+        chat_session = result.scalar_one_or_none()
+        if chat_session and chat_session.title == "新对话":
+            chat_session.title = user_query[:30] + ("..." if len(user_query) > 30 else "")
+            await session.commit()
 
 
 async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None, bool]:
@@ -137,6 +195,11 @@ _SYSTEM_PROMPT = """你是一个知识库问答助手。请根据以下检索到
 2. 如果参考内容不足以回答问题，如实告知用户
 3. 回答应结构清晰，必要时使用编号或分点
 4. 引用具体内容时，标注来源编号（如 [1]、[2]）
+5. 根据用户意图选择回答方式：
+   - 如果用户在寻找/筛选/列举内容（如"有哪些..."、"帮我找..."、"哪些是..."），
+     从参考内容中筛选出符合条件的结果并逐一列举，说明每条为什么符合条件
+   - 如果用户在问一个具体问题，直接基于参考内容回答该问题
+6. 当参考内容包含多个文档/条目时，注意区分不同来源，不要混淆
 
 参考内容：
 {context}"""
@@ -362,16 +425,29 @@ async def _retrieve_chunks(
 
 
 def _build_messages(
-    request: ChatCompletionRequest, context: str, has_context: bool
+    request: ChatCompletionRequest, context: str, has_context: bool,
+    history: list[dict] | None = None,
 ) -> list[dict]:
-    """构建发送给 LLM 的消息列表（有检索结果时注入上下文）"""
+    """构建发送给 LLM 的消息列表（有检索结果时注入上下文，支持历史对话）
+
+    Args:
+        request: 请求体
+        context: 检索到的参考内容
+        has_context: 是否有检索结果
+        history: 历史对话消息列表 [{"role": "user", "content": "..."}, ...]
+    """
     user_messages = [
         {"role": msg.role, "content": msg.content} for msg in request.messages
     ]
+    messages = []
     if has_context:
         system_msg = {"role": "system", "content": _SYSTEM_PROMPT.format(context=context)}
-        return [system_msg] + user_messages
-    return user_messages
+        messages.append(system_msg)
+    # 插入历史对话（在 system 之后、当前用户消息之前）
+    if history:
+        messages.extend(history)
+    messages.extend(user_messages)
+    return messages
 
 
 async def _stream_response(
@@ -385,6 +461,8 @@ async def _stream_response(
     thinking_enabled: bool = False,
     expr: str | None = None,
     kb_ids: list[str] | None = None,
+    history: list[dict] | None = None,
+    session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -392,6 +470,7 @@ async def _stream_response(
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
     degraded = False
+    agent_steps_collected: list[dict] = []
 
     if kb_ids:
         # 多知识库联合检索
@@ -411,10 +490,11 @@ async def _stream_response(
             _retrieve_chunks(query, kb_id, mode, llm, progress_queue=progress_queue, expr=expr)
         )
 
-        # 持续读取进度事件并推送给前端
+        # 持续读取进度事件并推送给前端，同时收集步骤
         while not retrieve_task.done():
             try:
                 event = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+                agent_steps_collected.append({"step": event.get("step", ""), "detail": event.get("detail", "")})
                 yield json.dumps(event, ensure_ascii=False)
             except asyncio.TimeoutError:
                 continue
@@ -425,6 +505,7 @@ async def _stream_response(
         # 排空队列中剩余的事件
         while not progress_queue.empty():
             event = progress_queue.get_nowait()
+            agent_steps_collected.append({"step": event.get("step", ""), "detail": event.get("detail", "")})
             yield json.dumps(event, ensure_ascii=False)
 
     elif kb_id:
@@ -438,7 +519,7 @@ async def _stream_response(
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context)
+    messages = _build_messages(request, context, has_context, history=history)
     llm_degraded = False
 
     # 发送第一个 chunk（包含 role）
@@ -454,9 +535,11 @@ async def _stream_response(
         llm_kwargs["enable_thinking"] = True
     else:
         llm_kwargs["enable_thinking"] = False
+    full_response = ""
     try:
         if stream_enabled:
             async for token in llm.stream(messages, **llm_kwargs):
+                full_response += token
                 chunk_data = ChatCompletionChunk(
                     id=completion_id,
                     choices=[StreamChoice(delta=DeltaContent(content=token))],
@@ -465,6 +548,7 @@ async def _stream_response(
         else:
             # 非流式生成：一次性获取完整回复，然后分段推送
             result = await llm.generate(messages, **llm_kwargs)
+            full_response = result
             chunk_size = 4
             for i in range(0, len(result), chunk_size):
                 chunk_data = ChatCompletionChunk(
@@ -475,6 +559,7 @@ async def _stream_response(
     except Exception as e:
         logger.warning("LLM 流式生成失败，降级为纯检索结果: %s", e)
         llm_degraded = True
+        full_response = context
         # 降级：直接输出检索上下文
         fallback_chunk = ChatCompletionChunk(
             id=completion_id,
@@ -501,6 +586,17 @@ async def _stream_response(
     }
     yield json.dumps(meta_event, ensure_ascii=False)
 
+    # 保存消息到会话（如果指定了 session_id）
+    if session_id and full_response:
+        try:
+            await _save_message(session_id, "user", query)
+            refs_data = [ref.model_dump() for ref in references] if references else None
+            steps_data = agent_steps_collected if agent_steps_collected else None
+            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data)
+            await _auto_title_session(session_id, query)
+        except Exception as e:
+            logger.warning("保存会话消息失败: %s", e)
+
 
 @router.post("/v1/chat/completions")
 @router.post("/api/chat/completions")
@@ -525,7 +621,16 @@ async def chat_completions(request: ChatCompletionRequest):
     # 获取 LLM 实例（根据 model_config_id 动态选择）
     llm, stream_enabled, max_context_tokens, thinking_enabled = await _get_llm_for_request(request.model_config_id)
 
-    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}")
+    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}, session={request.session_id}")
+
+    # 加载会话历史上下文
+    history: list[dict] | None = None
+    if request.session_id:
+        try:
+            history = await _load_session_history(request.session_id)
+        except Exception as e:
+            logger.warning("加载会话历史失败: %s", e)
+            history = None
 
     # 构造过滤条件
     filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
@@ -541,7 +646,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id),
             media_type="text/event-stream",
         )
 
@@ -561,7 +666,7 @@ async def chat_completions(request: ChatCompletionRequest):
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context)
+    messages = _build_messages(request, context, has_context, history=history)
 
     # 尝试 LLM 生成，失败时降级为纯检索结果
     llm_degraded = False
@@ -584,6 +689,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     # 构建响应
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    references = await _build_references(chunks)
     response = ChatCompletionResponse(
         id=completion_id,
         choices=[
@@ -596,12 +702,22 @@ async def chat_completions(request: ChatCompletionRequest):
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
         ),
-        references=await _build_references(chunks),
+        references=references,
         metadata={
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
             "llm_degraded": llm_degraded,
         },
     )
+
+    # 保存消息到会话（如果指定了 session_id）
+    if request.session_id and answer:
+        try:
+            await _save_message(request.session_id, "user", user_query)
+            refs_data = [ref.model_dump() for ref in references] if references else None
+            await _save_message(request.session_id, "assistant", answer, references=refs_data)
+            await _auto_title_session(request.session_id, user_query)
+        except Exception as e:
+            logger.warning("保存会话消息失败: %s", e)
 
     return response

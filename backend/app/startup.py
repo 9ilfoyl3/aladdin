@@ -47,6 +47,7 @@ async def load_embed_configs() -> None:
                     base_url=settings.embed_base_url or None,
                     api_key=settings.embed_api_key or None,
                     timeout=60.0,
+                    sparse_enabled=settings.embed_sparse_enabled,
                     is_active=True,
                 )
                 session.add(default_embed)
@@ -106,9 +107,11 @@ async def load_embed_configs() -> None:
                 base_url=embed_config.base_url or "",
                 api_key=embed_config.api_key or "",
                 timeout=embed_config.timeout,
+                sparse_enabled=embed_config.sparse_enabled,
             )
             logger.info(
-                "Embedding 配置已加载: %s (%s)", embed_config.name, embed_config.base_url
+                "Embedding 配置已加载: %s (%s, sparse=%s)",
+                embed_config.name, embed_config.base_url, embed_config.sparse_enabled,
             )
 
         if rerank_config:

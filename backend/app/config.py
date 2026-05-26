@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     embed_device: str = "cpu"  # cuda | cpu | mps
     embed_base_url: str = ""  # remote provider 使用
     embed_api_key: str = ""  # remote provider 使用
+    embed_sparse_enabled: bool = True  # 是否启用 sparse 向量（远程服务需支持 /embed_sparse 端点）
 
     # Rerank
     rerank_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding | remote

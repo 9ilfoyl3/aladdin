@@ -53,6 +53,8 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN progress INTEGER DEFAULT 0",
         "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
+        # Embedding 配置表新增 sparse 支持字段
+        "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
     ]
     for sql in migrations:
         try:

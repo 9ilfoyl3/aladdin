@@ -98,7 +98,7 @@ class AgentOrchestrator:
         self, query: str, kb_id: str, on_progress: ProgressCallback | None,
         expr: str | None = None,
     ) -> AgentResult:
-        """v2 编排逻辑：Router 快判 → simple 走快路径 / complex 调 Planner 意图拆分"""
+        """v2 编排逻辑：Router 快判 → simple 走快路径 / exploratory 走广召回 / complex 调 Planner 意图拆分"""
         self.executor.reset_cache()
 
         # 1. Router 快速判定复杂度
@@ -110,6 +110,10 @@ class AgentOrchestrator:
         if route == "simple":
             await self._emit(on_progress, "routing_done", "简单查询，直接检索")
             return await self._fast_path(query, kb_id, expr=expr)
+
+        if route == "exploratory":
+            await self._emit(on_progress, "routing_done", "探索性查询，启动广召回检索")
+            return await self._exploratory_path(query, kb_id, on_progress, expr=expr)
 
         await self._emit(on_progress, "routing_done", "判定为复杂查询，启动深度检索")
 
@@ -396,6 +400,37 @@ class AgentOrchestrator:
         results = results[:10]
 
         return AgentResult(chunks=results, iterations=iterations)
+
+    async def _exploratory_path(
+        self, query: str, kb_id: str, on_progress: ProgressCallback | None,
+        expr: str | None = None,
+    ) -> AgentResult:
+        """探索性查询路径：广召回 + 查询改写，用于用户想从知识库中发现/筛选内容的场景
+
+        与 complex 路径的区别：
+        - 不做意图拆分（探索性查询通常只有一个筛选意图）
+        - 增大 top_k（需要召回更多候选结果供筛选）
+        - 使用 Rewriter 生成多角度查询以提高召回多样性
+        """
+        self.executor.reset_cache()
+
+        # 1. 查询改写：生成多个角度的检索查询
+        await self._emit(on_progress, "rewriting", "正在生成多角度检索查询...")
+        queries = await self.rewriter.rewrite(query)
+        print(f"[Agent-v2] 探索性改写: {queries}")
+
+        rewrite_text = "、".join(f"「{q}」" for q in queries[:3])
+        await self._emit(on_progress, "rewriting_done", f"生成 {len(queries)} 个检索查询：{rewrite_text}")
+
+        # 2. 并行检索，增大 top_k 以召回更多候选
+        await self._emit(on_progress, "retrieving", "正在广泛检索...")
+        results = await self.executor.execute(queries, kb_id, top_k=30, expr=expr)
+        print(f"[Agent-v2] 探索性检索完成: {len(results)} 条结果")
+
+        await self._emit(on_progress, "done", f"检索完成，找到 {len(results)} 条相关内容")
+
+        # 返回更多结果（探索性查询需要更多候选供 LLM 筛选）
+        return AgentResult(chunks=results[:20], iterations=1)
 
     async def _fast_path(
         self, query: str, kb_id: str, degraded: bool = False, expr: str | None = None,

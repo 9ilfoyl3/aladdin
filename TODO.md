@@ -450,6 +450,32 @@
 - **优先级**: P2（当前法条场景重复问题不严重，文档型知识库更需要）
 - **预估工作量**: 0.5 天
 
+### 28. RRF 自适应权重融合（Post-hoc Adaptive Fusion）
+- **文件**: 修改 `backend/app/retrieval/hybrid.py`
+- **现状**: 三路检索（Dense + Sparse + BM25）使用 uniform RRF 融合，各路权重相同。对于精确关键词查询（案号、人名），BM25 应该权重更高；对于语义理解查询（争议焦点），Dense 应该权重更高。当前 uniform 权重会让各路互相稀释
+- **设计思路**:
+  - 不预判查询类型（规则无法穷举），而是让三路检索结果的**分数分布**自动决定权重
+  - 先用 uniform RRF 拿到三路各自的结果，然后根据各路 top-K 分数分布特征动态调整权重
+  - 信号：某路 top-1 分数远高于 top-10（分数衰减陡峭）→ 该路有高置信命中 → 权重拉高
+  - 信号：某路 top-10 分数都很平（无明显头部）→ 该路没找到强相关的 → 权重降低
+  - 三路分数需先做 min-max 归一化到同一尺度后再计算 confidence
+- **计算方式**:
+  ```python
+  def compute_adaptive_weight(scores: list[float]) -> float:
+      top1 = scores[0]
+      top10 = scores[min(9, len(scores) - 1)]
+      spread = top1 - top10  # 分数跨度作为置信度信号
+      confidence = top1 * 0.6 + spread * 0.4
+      return max(confidence, 0.01)  # 最低保底，不完全压制任何一路
+  # 三路权重 = 各自 confidence 归一化
+  ```
+- **优势**:
+  - 零延迟（纯数值计算），不需要额外 LLM 调用
+  - 不需要规则维护，对任何查询类型自动适应
+  - 对任何领域、任何语言都适用
+- **优先级**: P1（对"又要语义又要关键词"的混合场景提升最直接）
+- **预估工作量**: 1 天
+
 ### 26. Reranker 模型升级 + 远程 Rerank API 支持
 - **文件**: 修改 `backend/app/models/rerank/`、`backend/app/config.py`
 - **现状**: 使用 BGE-reranker-v2-m3（本地部署），对于语义高度相似的候选（如"第三十条"vs"第三十一条"）区分度有限
@@ -464,20 +490,19 @@
 - **优先级**: P2（当前 BGE-reranker-v2-m3 + 文件名前缀已基本够用）
 - **预估工作量**: 1-2 天
 
-### 27. WeKnora 风格的 Contextual Rewrite（检索时查询增强）
-- **文件**: 修改 `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`
-- **现状**: 检索时直接用用户原始查询（或 Planner 生成的查询）去搜索，没有结合对话上下文做查询增强
-- **WeKnora 做法**:
-  - 在检索前对查询做 contextual rewrite：结合对话历史消解指代、补全省略
-  - 改写后的查询保留核心实体和关键词，不生成元指令
-  - 改写结果用于检索，原始查询用于 Rerank（双查询策略）
-  - 支持意图分类：greeting/chitchat 直接回复不走检索，kb_search 才进入检索流程
+### 27. Embedding 上下文增强（Contextual Embedding）
+- **文件**: 修改 `backend/app/pipeline/pipeline.py`、`backend/app/pipeline/embedder.py`
+- **现状**: Dense embedding 用原始 chunk content 生成向量，不包含文档级上下文信息。当用户查询包含文档名但 chunk 内容不含文档名时，语义检索无法匹配
+- **RAGFlow / LlamaIndex 做法**:
+  - 生成 embedding 时，输入文本为 `{章节路径}: {chunk content}`（如"电影产业促进法 > 第三章 > 第二十五条: 依照本法规定..."）
+  - 存储的 content 保持原文不变（展示给用户的不受影响）
+  - 只影响 Dense 向量的生成，BM25 和 Rerank 不受影响
 - **目标**:
-  - 检索时用改写后的查询做召回（提升召回率）
-  - Rerank 时用原始查询做精排（保持精度）
-  - 双查询策略：召回用宽查询，精排用窄查询
-- **优先级**: P2（单轮对话场景不需要，多轮对话场景提升明显）
-- **预估工作量**: 1 天
+  - 在 embedding 输入时拼接章节路径/文档标题（当前已有 ContextualEmbedder 模块）
+  - 评估对检索精度的影响（可能对某些场景有帮助，某些场景引入噪音）
+  - 可配置开关，按知识库决定是否启用
+- **优先级**: P3（当前 BM25 content 前缀已解决文档归属问题，Dense embedding 增强收益有限）
+- **预估工作量**: 0.5 天
 
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`

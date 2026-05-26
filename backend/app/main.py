@@ -21,6 +21,7 @@ from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
 from app.api.middleware import ApiKeyAuthMiddleware
 from app.api.retrieval import router as retrieval_router
+from app.api.session import router as session_router
 from app.api.system import router as system_router
 from app.config import get_settings
 from app.pipeline.queue import TaskQueue
@@ -154,6 +155,7 @@ app.include_router(llm_config_router)
 app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
 app.include_router(agent_node_config_router)
+app.include_router(session_router)
 
 
 @app.get("/")

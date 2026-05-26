@@ -155,6 +155,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      infinity:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -192,6 +194,8 @@ services:
       milvus:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      infinity:
         condition: service_healthy
     restart: unless-stopped
 
