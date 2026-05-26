@@ -435,6 +435,50 @@
 - **优先级**: P1（用户体验优化）
 - **预估工作量**: 1 天
 
+### 25. MMR 多样性去重（Maximal Marginal Relevance）
+- **文件**: 修改 `backend/app/retrieval/hybrid.py`
+- **现状**: Rerank 后直接按分数取 top-K，当知识库有大量相似 chunk（如同一段话被切成多个重叠 chunk）时，返回结果高度重复
+- **WeKnora 做法**:
+  - 在 Rerank 之后、返回最终结果之前，应用 MMR 算法
+  - lambda=0.7（平衡相关性和多样性）
+  - 基于 Jaccard 相似度计算 chunk 间的冗余度
+  - 迭代选择：每次选 MMR 分数最高的候选，直到达到 top_k
+- **目标**:
+  - 在 HybridRetriever 的 `_rerank` 之后增加 MMR 步骤
+  - 对 Rerank 输出的 top-50 应用 MMR，选出最终 top-10
+  - 确保返回结果既相关又多样，避免同一文档的相邻 chunk 占满结果
+- **优先级**: P2（当前法条场景重复问题不严重，文档型知识库更需要）
+- **预估工作量**: 0.5 天
+
+### 26. Reranker 模型升级 + 远程 Rerank API 支持
+- **文件**: 修改 `backend/app/models/rerank/`、`backend/app/config.py`
+- **现状**: 使用 BGE-reranker-v2-m3（本地部署），对于语义高度相似的候选（如"第三十条"vs"第三十一条"）区分度有限
+- **可选升级路径**:
+  - `bge-reranker-v2-gemma`：更强但更慢（需要 GPU），适合对精度要求极高的场景
+  - `jina-reranker-v2-base-multilingual`：多语言支持好，中文效果优秀
+  - 远程 Rerank API（Cohere rerank / Jina rerank API）：无需本地 GPU，按调用计费
+- **目标**:
+  - 支持远程 Rerank API（类似现有的远程 Embedding 支持）
+  - 配置化选择 rerank 模型（本地 vs 远程）
+  - 评测不同 reranker 在法条场景的精度差异
+- **优先级**: P2（当前 BGE-reranker-v2-m3 + 文件名前缀已基本够用）
+- **预估工作量**: 1-2 天
+
+### 27. WeKnora 风格的 Contextual Rewrite（检索时查询增强）
+- **文件**: 修改 `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`
+- **现状**: 检索时直接用用户原始查询（或 Planner 生成的查询）去搜索，没有结合对话上下文做查询增强
+- **WeKnora 做法**:
+  - 在检索前对查询做 contextual rewrite：结合对话历史消解指代、补全省略
+  - 改写后的查询保留核心实体和关键词，不生成元指令
+  - 改写结果用于检索，原始查询用于 Rerank（双查询策略）
+  - 支持意图分类：greeting/chitchat 直接回复不走检索，kb_search 才进入检索流程
+- **目标**:
+  - 检索时用改写后的查询做召回（提升召回率）
+  - Rerank 时用原始查询做精排（保持精度）
+  - 双查询策略：召回用宽查询，精排用窄查询
+- **优先级**: P2（单轮对话场景不需要，多轮对话场景提升明显）
+- **预估工作量**: 1 天
+
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`
 - **现状**: 只支持手动上传文件，不支持从外部平台自动同步知识
