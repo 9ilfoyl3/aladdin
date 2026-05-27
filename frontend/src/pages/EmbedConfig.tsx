@@ -23,7 +23,7 @@ interface FormData {
 const emptyForm: FormData = {
   name: '',
   config_type: 'embedding',
-  model_name: 'BAAI/bge-m3',
+  model_name: 'models/bge-m3',
   base_url: '',
   api_key: '',
   timeout: '60',
@@ -132,7 +132,7 @@ function EmbedConfig() {
 
   function openCreate(configType: 'embedding' | 'rerank') {
     setEditingItem(null)
-    const defaultModel = configType === 'embedding' ? 'BAAI/bge-m3' : 'BAAI/bge-reranker-v2-m3'
+    const defaultModel = configType === 'embedding' ? 'models/bge-m3' : 'models/bge-reranker-v2-m3'
     setForm({ ...emptyForm, config_type: configType, model_name: defaultModel })
     setTestResult(null)
     setShowDialog(true)
@@ -363,7 +363,7 @@ function EmbedConfig() {
               <Input
                 value={form.model_name}
                 onChange={(e) => setForm({ ...form, model_name: e.target.value })}
-                placeholder={form.config_type === 'embedding' ? 'BAAI/bge-m3' : 'BAAI/bge-reranker-v2-m3'}
+                placeholder={form.config_type === 'embedding' ? 'models/bge-m3' : 'models/bge-reranker-v2-m3'}
               />
             </div>
 
@@ -397,7 +397,7 @@ function EmbedConfig() {
                   className="rounded"
                 />
                 <Label htmlFor="sparse_enabled" className="text-sm font-normal">
-                  启用 Sparse 向量（需远程服务支持 /embed_sparse 端点，如 TEI 部署的 BGE-M3）
+                  启用 Sparse 向量（需远程服务支持 /v1/embed_sparse 端点）
                 </Label>
               </div>
             )}

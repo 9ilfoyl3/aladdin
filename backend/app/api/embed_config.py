@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/embed-configs", tags=["Embed Config"])
 class EmbedConfigCreate(BaseModel):
     name: str
     config_type: str  # embedding | rerank
-    model_name: str = "BAAI/bge-m3"
+    model_name: str = "models/bge-m3"
     # 远程服务字段
     base_url: str
     api_key: Optional[str] = None
@@ -67,7 +67,7 @@ class EmbedConfigResponse(BaseModel):
 
 class EmbedTestRequest(BaseModel):
     """测试连通性请求"""
-    model_name: str = "BAAI/bge-m3"
+    model_name: str = "models/bge-m3"
     base_url: str
     api_key: Optional[str] = None
     timeout: float = 60.0

@@ -104,11 +104,11 @@ services:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - EMBED_MODEL=${EMBED_MODEL:-models/bge-m3}
       - EMBED_API_KEY=${EMBED_API_KEY:-}
       - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
       - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_MODEL=${RERANK_MODEL:-models/bge-reranker-v2-m3}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
@@ -135,11 +135,11 @@ services:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - EMBED_MODEL=${EMBED_MODEL:-models/bge-m3}
       - EMBED_API_KEY=${EMBED_API_KEY:-}
       - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
       - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_MODEL=${RERANK_MODEL:-models/bge-reranker-v2-m3}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
       - REDIS_URL=redis://redis:6379/0
       - PIPELINE_MAX_CONCURRENT=${PIPELINE_MAX_CONCURRENT:-3}
