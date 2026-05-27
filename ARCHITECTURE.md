@@ -229,9 +229,10 @@ OCRProvider (抽象基类)
 
 ### 配置方式
 
-- **环境变量**：`EMBED_PROVIDER=remote` + `EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY`
-- **前端页面**：启动后在 **Embedding 配置** 页面动态添加/切换，立即生效无需重启
+- **环境变量**：`EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY`（启动时生效）
+- **前端页面**：启动后在 **Embedding & Rerank 配置** 页面动态添加/切换，立即生效无需重启
 - 数据库中 `is_active=True` 的配置优先级高于环境变量
+- 不配置 Embedding/Rerank 地址也能启动服务，后续通过前端配置即可
 
 ---
 
@@ -243,12 +244,11 @@ OCRProvider (抽象基类)
 | `LLM_BASE_URL` | http://localhost:11434 | LLM 服务地址 |
 | `LLM_MODEL` | qwen2.5:7b | LLM 模型名称 |
 | `LLM_API_KEY` | - | API 密钥 |
-| `EMBED_PROVIDER` | remote | Embedding 后端（remote 推荐） |
-| `EMBED_BASE_URL` | - | Embedding 服务地址 |
+| `EMBED_BASE_URL` | - | Embedding 远程服务地址 |
 | `EMBED_MODEL` | BAAI/bge-m3 | Embedding 模型名称 |
 | `EMBED_API_KEY` | - | Embedding 服务密钥 |
-| `RERANK_PROVIDER` | remote | Rerank 后端（remote 推荐） |
-| `RERANK_BASE_URL` | - | Rerank 服务地址 |
+| `EMBED_SPARSE_ENABLED` | true | 是否启用 Sparse 向量 |
+| `RERANK_BASE_URL` | - | Rerank 远程服务地址 |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型 |
 | `RERANK_API_KEY` | - | Rerank 服务密钥 |
 | `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL 连接地址 |
@@ -262,7 +262,9 @@ OCRProvider (抽象基类)
 | `CHUNK_OVERLAP` | 50 | 子块重叠（字符） |
 | `PIPELINE_MAX_CONCURRENT` | 3 | Worker 最大并发文档处理数 |
 | `PIPELINE_MAX_RETRIES` | 3 | 文档处理最大重试次数 |
-| `PIPELINE_TASK_TIMEOUT_MINUTES` | 30 | 单文档处理超时（分钟） |
+| `PIPELINE_TASK_TIMEOUT_MINUTES` | 60 | 单文档处理超时（分钟） |
+| `PIPELINE_EMBED_BATCH_SIZE` | 128 | Embedding 每批文本数 |
+| `PIPELINE_EMBED_CONCURRENCY` | 8 | Embedding 并发请求数 |
 
 ---
 
@@ -278,7 +280,7 @@ OCRProvider (抽象基类)
 - **迭代反思**：两级评估（分数快判 + LLM 深度评估），覆盖度增幅不足时提前终止
 - **结构性碎片惩罚**：Rerank 阶段对标题/目录等无实质信息的短文本施加分数惩罚
 - **多模型管理**：数据库持久化多个 LLM 配置，支持创建/编辑/删除/设为默认/连通性测试，对话时动态切换
-- **Embedding/Rerank 可配置**：支持本地模型和远程服务两种模式，前端页面动态切换，无需重启
+- **Embedding/Rerank 可配置**：前端页面动态切换，无需重启
 - **OCR 服务管理**：可视化管理多个 OCR 服务，支持默认+Fallback 自动切换
 - **Markdown 切片优化**：VL 模型返回的 Markdown 内容智能切分，表格整块保护不切断
 - **上下文窗口管理**：可配置每个模型的最大上下文 token 数，按 chunk 相关性智能截断

@@ -1,6 +1,6 @@
 # Aladdin 本地开发指南（Windows）
 
-适用于 Windows + Docker Desktop + 远程 LLM/Embedding 服务的开发环境搭建。
+适用于 Windows + Docker Desktop + 远程 LLM/Embedding/Rerank 服务的开发环境搭建。
 
 ---
 
@@ -12,7 +12,7 @@
 | Conda (Anaconda/Miniconda) | 最新版 | 管理 Python 环境 |
 | Node.js | 18+ | 前端构建 |
 | LLM API Key | - | DeepSeek / 通义 / OpenAI 等 |
-| Embedding 服务 | - | TEI / Infinity / vLLM 等 |
+| Embedding 服务 | - | TEI / Infinity / vLLM 等（可选，启动后在前端配置） |
 
 **硬件要求：** 8GB+ 内存，无需显卡（所有 AI 推理由远程服务承担）
 
@@ -57,8 +57,6 @@ npm install
 cd ..
 ```
 
-> 使用 `requirements-base.txt` 而非 `requirements.txt`，跳过 ML 模型库（torch 等），因为使用远程 Embedding 服务不需要本地模型。
-
 ---
 
 ## 第四步：配置环境变量
@@ -86,17 +84,15 @@ LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
 LLM_API_KEY=sk-your-key
 
-# Embedding（远程服务）
-EMBED_PROVIDER=remote
+# Embedding 远程服务（可选，也可启动后在前端配置）
 EMBED_BASE_URL=http://your-embedding-server/v1
 EMBED_MODEL=BAAI/bge-m3
-EMBED_API_KEY=your-token
+EMBED_API_KEY=
 
-# Rerank（远程服务）
-RERANK_PROVIDER=remote
+# Rerank 远程服务（可选，也可启动后在前端配置）
 RERANK_BASE_URL=http://your-rerank-server/v1
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_API_KEY=your-token
+RERANK_API_KEY=
 ```
 
 ### LLM 厂商配置参考

@@ -31,7 +31,8 @@ English | [中文](./README.md)
 - **Async Pipeline** — Redis Stream task queue + independent Worker process, API decoupled from processing
 
 **Flexible Configuration**
-- **Multi-Model Management** — Multiple LLM / Embedding / Rerank configs with frontend dynamic switching
+- **Multi-Model Management** — Multiple LLM configs with frontend dynamic switching
+- **Embedding / Rerank** — Unified remote service calls, visual frontend configuration, hot-swappable
 - **OCR Service Management** — Visual management with default + fallback auto-switching
 - **OpenAI Compatible** — SSE streaming, OpenAI API format, API Key authentication
 
@@ -63,6 +64,8 @@ English | [中文](./README.md)
 └─────────────────────────────────────────────────────────────┘
 ```
 
+> All AI inference (LLM / Embedding / Rerank / OCR) is handled via HTTP calls to external services. The backend is lightweight to deploy.
+
 ---
 
 ## 🚀 Quick Start
@@ -74,8 +77,9 @@ English | [中文](./README.md)
 | Docker & Docker Compose | 20.10+ | For Milvus, PostgreSQL, Redis |
 | Python | 3.12 | ⚠️ 3.13+ has compatibility issues |
 | Node.js | 18+ | Frontend build |
-| LLM API | - | Any OpenAI-compatible API (DeepSeek / OpenAI / etc.) |
+| LLM API | - | Any OpenAI-compatible API |
 | Embedding Service | - | TEI / Infinity / vLLM providing `/v1/embeddings` |
+| Rerank Service | - | TEI / Jina (optional, retrieval works without it) |
 
 ### 1. Clone
 
@@ -91,8 +95,6 @@ docker compose up -d
 # Starts Milvus + PostgreSQL + Redis + etcd + MinIO
 ```
 
-> macOS / Linux users can also use `make infra`
-
 ### 3. Install Dependencies
 
 <details>
@@ -100,7 +102,6 @@ docker compose up -d
 
 ```bash
 make install
-# Creates Python venv + installs backend & frontend dependencies
 ```
 
 </details>
@@ -109,18 +110,13 @@ make install
 <summary><b>Windows (PowerShell)</b></summary>
 
 ```powershell
-# Create Python environment (must be 3.12, 3.13+ incompatible)
 conda create -n aladdin python=3.12 -y
 conda activate aladdin
 
-# Install backend dependencies
 pip install --upgrade pip
 pip install -r backend/requirements-base.txt
 
-# Install frontend dependencies
-cd frontend
-npm install
-cd ..
+cd frontend && npm install && cd ..
 ```
 
 </details>
@@ -140,24 +136,18 @@ LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
 LLM_API_KEY=sk-your-key
 
-# === Embedding Service (required) ===
-EMBED_PROVIDER=remote
+# === Embedding (optional, can be configured via frontend after startup) ===
 EMBED_BASE_URL=http://your-embedding-server/v1
 EMBED_MODEL=BAAI/bge-m3
-EMBED_API_KEY=your-token
+EMBED_API_KEY=
 
-# === Rerank Service (required) ===
-RERANK_PROVIDER=remote
+# === Rerank (optional, can be configured via frontend after startup) ===
 RERANK_BASE_URL=http://your-rerank-server/v1
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_API_KEY=your-token
-
-# === Infrastructure (defaults work for local Docker) ===
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-REDIS_URL=redis://localhost:6379/0
+RERANK_API_KEY=
 ```
+
+> **Embedding / Rerank can be configured after startup.** Add remote service URLs via the frontend "Embedding & Rerank Config" page.
 
 ### 5. Launch
 
@@ -179,7 +169,7 @@ make dev
 cd backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# Terminal 2: Worker (document processing)
+# Terminal 2: Worker
 cd backend
 python -m app.worker_main
 
@@ -199,30 +189,27 @@ npm run dev
 
 ### 7. Usage
 
-1. **Model Management** → Add LLM config → Test connectivity → Set as default
-2. **Knowledge Base** → Create → Upload documents → Wait for processing
-3. **Chat** → Select knowledge base → Ask questions
+1. **Embedding Config** → Add remote Embedding service URL → Test connectivity → Enable
+2. **Model Management** → Add LLM config → Test connectivity → Set as default
+3. **Knowledge Base** → Create → Upload documents → Wait for processing
+4. **Chat** → Select knowledge base → Ask questions
 
 ---
 
 ## 🐳 Docker Deployment (Production)
 
 ```bash
-# 1. Prepare
 mkdir -p /opt/aladdin && cd /opt/aladdin
 
-# 2. Load images
 docker load -i app.tar
 docker load -i infra.tar    # First deployment only
 
-# 3. Configure
 cp .env.example .env && vim .env
 
-# 4. Start
 docker compose up -d
 ```
 
-See [Deployment Guide](./DEPLOY_OPERATIONS.md) for details.
+See [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) for details.
 
 ---
 
@@ -246,7 +233,7 @@ See [Deployment Guide](./DEPLOY_OPERATIONS.md) for details.
 | Frontend | React 18 + TypeScript + Tailwind CSS v4 |
 | Document Parsing | PyMuPDF / python-docx / openpyxl / python-pptx |
 | LLM | Any OpenAI-compatible API |
-| Embedding / Rerank | Any OpenAI-compatible service (TEI / Infinity / vLLM) |
+| Embedding / Rerank | Any OpenAI-compatible remote service (TEI / Infinity / vLLM) |
 
 ---
 
@@ -263,11 +250,11 @@ aladdin/
 │   │   ├── agent/               # Agent orchestration
 │   │   ├── retrieval/           # Retrieval tools
 │   │   ├── pipeline/            # Document processing pipeline
-│   │   ├── models/              # Model abstraction layer
+│   │   ├── models/              # Model abstraction layer (LLM/Embedding/Rerank Provider)
 │   │   ├── storage/             # Storage layer (Milvus/PostgreSQL)
 │   │   └── schema/              # Data models
 │   ├── Dockerfile
-│   └── requirements.txt
+│   └── requirements-base.txt    # Python dependencies
 ├── frontend/                    # React frontend
 ├── docker-compose.yml           # Local dev infrastructure
 ├── docker-compose-production.yml # Production deployment
@@ -295,6 +282,7 @@ make test               # Run tests
 |----------|-------------|
 | [Deployment & Operations](./DEPLOY_OPERATIONS.md) | Production deployment, operations, configuration |
 | [Technical Architecture](./ARCHITECTURE_EN.md) | Agent orchestration, chunking strategy, OCR extension details |
+| [macOS Packaging Guide](./DEPLOYMENT_GUIDE_MAC.md) | Docker image packaging for intranet deployment |
 
 ---
 
