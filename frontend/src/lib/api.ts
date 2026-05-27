@@ -223,10 +223,8 @@ export interface EmbedConfigItem {
   id: string
   name: string
   config_type: string  // embedding | rerank
-  provider: string  // local | remote
-  local_provider: string | null
+  provider: string  // remote
   model_name: string
-  device: string
   base_url: string | null
   api_key_set: boolean
   timeout: number
@@ -242,14 +240,10 @@ export interface EmbedTestResult {
 }
 
 export interface EmbedCurrentConfig {
-  embed_provider: string
   embed_model: string
-  embed_device: string
   embed_base_url: string
   embed_sparse_enabled: boolean
-  rerank_provider: string
   rerank_model: string
-  rerank_device: string
   rerank_base_url: string
 }
 
@@ -261,11 +255,8 @@ export const embedConfigApi = {
   create: (data: {
     name: string
     config_type: string
-    provider: string
-    local_provider?: string
     model_name?: string
-    device?: string
-    base_url?: string
+    base_url: string
     api_key?: string
     timeout?: number
     sparse_enabled?: boolean
@@ -283,12 +274,9 @@ export const embedConfigApi = {
   delete: (id: string) =>
     request<void>(`/embed-configs/${id}`, { method: 'DELETE' }),
   test: (data: {
-    provider: string
     config_type: string
-    local_provider?: string
     model_name?: string
-    device?: string
-    base_url?: string
+    base_url: string
     api_key?: string
     timeout?: number
     config_id?: string

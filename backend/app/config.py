@@ -23,20 +23,16 @@ class Settings(BaseSettings):
     llm_model: str = "qwen2.5:7b"
     llm_api_key: str = ""  # 远端 API 的密钥（vllm provider 使用）
 
-    # Embedding
-    embed_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding | remote
+    # Embedding（远程服务）
     embed_model: str = "BAAI/bge-m3"
-    embed_device: str = "cpu"  # cuda | cpu | mps
-    embed_base_url: str = ""  # remote provider 使用
-    embed_api_key: str = ""  # remote provider 使用
-    embed_sparse_enabled: bool = True  # 是否启用 sparse 向量（远程服务需支持 /embed_sparse 端点）
+    embed_base_url: str = ""  # 远程 Embedding 服务地址（如 http://server:8080/v1）
+    embed_api_key: str = ""  # API 密钥（可选）
+    embed_sparse_enabled: bool = True  # 是否启用 sparse 向量（需服务支持 /embed_sparse 端点）
 
-    # Rerank
-    rerank_provider: str = "sentence-transformers"  # sentence-transformers | flag-embedding | remote
+    # Rerank（远程服务）
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_device: str = "cpu"  # cuda | cpu | mps
-    rerank_base_url: str = ""  # remote provider 使用
-    rerank_api_key: str = ""  # remote provider 使用
+    rerank_base_url: str = ""  # 远程 Rerank 服务地址（如 http://server:8001/v1）
+    rerank_api_key: str = ""  # API 密钥（可选）
 
     # Agent
     agent_max_iterations: int = 3

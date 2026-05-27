@@ -12,8 +12,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# Mock 掉需要 GPU 的模块，避免导入失败
-sys.modules.setdefault("FlagEmbedding", MagicMock())
+# Mock 掉需要的模块，避免导入失败
+sys.modules.setdefault("pymilvus", MagicMock())
 sys.modules.setdefault("pymilvus", MagicMock())
 sys.modules.setdefault("pymilvus.connections", MagicMock())
 sys.modules.setdefault("pymilvus.utility", MagicMock())

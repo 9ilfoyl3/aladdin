@@ -20,30 +20,33 @@ logger = logging.getLogger(__name__)
 async def load_embed_configs() -> None:
     """从数据库加载 active 的 Embedding/Rerank 配置覆盖环境变量默认值
 
-    如果数据库中没有任何配置，根据环境变量自动创建默认配置。
+    如果数据库中没有任何配置，根据环境变量自动创建默认配置（仅当配置了服务地址时）。
     API 和 Worker 启动时都需要调用此函数。
     """
     try:
         settings = get_settings()
 
         async with async_session() as session:
-            # 检查是否有 embedding 配置，没有则创建默认
+            # 清理历史遗留的 local 类型配置
+            from sqlalchemy import delete
+            await session.execute(
+                delete(EmbedConfig).where(EmbedConfig.provider == "local")
+            )
+            await session.commit()
+
+            # 检查是否有 embedding 配置，没有且环境变量配置了地址则创建默认
             embed_count = await session.scalar(
                 select(func.count()).select_from(EmbedConfig).where(
                     EmbedConfig.config_type == "embedding"
                 )
             )
-            if embed_count == 0:
-                provider_type = "remote" if settings.embed_provider == "remote" else "local"
-                local_prov = None if provider_type == "remote" else settings.embed_provider
+            if embed_count == 0 and settings.embed_base_url:
                 default_embed = EmbedConfig(
                     id=str(uuid.uuid4()),
-                    name="默认 Embedding" if provider_type == "local" else "远程 Embedding",
+                    name="远程 Embedding",
                     config_type="embedding",
-                    provider=provider_type,
-                    local_provider=local_prov,
+                    provider="remote",
                     model_name=settings.embed_model,
-                    device=settings.embed_device,
                     base_url=settings.embed_base_url or None,
                     api_key=settings.embed_api_key or None,
                     timeout=60.0,
@@ -52,23 +55,19 @@ async def load_embed_configs() -> None:
                 )
                 session.add(default_embed)
 
-            # 检查是否有 rerank 配置，没有则创建默认
+            # 检查是否有 rerank 配置，没有且环境变量配置了地址则创建默认
             rerank_count = await session.scalar(
                 select(func.count()).select_from(EmbedConfig).where(
                     EmbedConfig.config_type == "rerank"
                 )
             )
-            if rerank_count == 0:
-                provider_type = "remote" if settings.rerank_provider == "remote" else "local"
-                local_prov = None if provider_type == "remote" else settings.rerank_provider
+            if rerank_count == 0 and settings.rerank_base_url:
                 default_rerank = EmbedConfig(
                     id=str(uuid.uuid4()),
-                    name="默认 Rerank" if provider_type == "local" else "远程 Rerank",
+                    name="远程 Rerank",
                     config_type="rerank",
-                    provider=provider_type,
-                    local_provider=local_prov,
+                    provider="remote",
                     model_name=settings.rerank_model,
-                    device=settings.rerank_device,
                     base_url=settings.rerank_base_url or None,
                     api_key=settings.rerank_api_key or None,
                     timeout=60.0,
@@ -98,12 +97,9 @@ async def load_embed_configs() -> None:
 
         manager = get_model_manager()
 
-        if embed_config:
+        if embed_config and embed_config.base_url:
             manager.reload_embedder(
-                provider=embed_config.provider,
-                local_provider=embed_config.local_provider,
                 model_name=embed_config.model_name,
-                device=embed_config.device,
                 base_url=embed_config.base_url or "",
                 api_key=embed_config.api_key or "",
                 timeout=embed_config.timeout,
@@ -114,12 +110,9 @@ async def load_embed_configs() -> None:
                 embed_config.name, embed_config.base_url, embed_config.sparse_enabled,
             )
 
-        if rerank_config:
+        if rerank_config and rerank_config.base_url:
             manager.reload_reranker(
-                provider=rerank_config.provider,
-                local_provider=rerank_config.local_provider,
                 model_name=rerank_config.model_name,
-                device=rerank_config.device,
                 base_url=rerank_config.base_url or "",
                 api_key=rerank_config.api_key or "",
                 timeout=rerank_config.timeout,

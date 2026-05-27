@@ -117,17 +117,17 @@ LLM_BASE_URL=http://your-llm-server/v1
 LLM_MODEL=deepseek-chat
 LLM_API_KEY=sk-your-key
 
-# === Embedding ===
-EMBED_PROVIDER=remote
+# === Embedding 远程服务 ===
+# 不配置也能启动，后续通过前端页面添加
 EMBED_BASE_URL=http://your-embedding-server/v1
 EMBED_MODEL=BAAI/bge-m3
-EMBED_API_KEY=your-token
+EMBED_API_KEY=
 
-# === Rerank ===
-RERANK_PROVIDER=remote
+# === Rerank 远程服务 ===
+# 不配置也能启动，后续通过前端页面添加
 RERANK_BASE_URL=http://your-rerank-server/v1
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_API_KEY=your-token
+RERANK_API_KEY=
 ```
 
 ### 可选项
@@ -152,7 +152,7 @@ PIPELINE_TASK_TIMEOUT_MINUTES=30
 | OpenAI 兼容（TEI/Infinity/vLLM） | 填到 `/v1`，系统自动拼接 `/embeddings` 或 `/rerank` | `http://server:8080/v1` |
 | 自定义接口 | 填完整端点路径 | `http://server:8001/ranking_score` |
 
-> `.env` 中的配置是初始默认值。启动后可在前端页面动态管理 LLM / Embedding / Rerank 配置，数据库配置优先级更高。
+> `.env` 中的 Embedding/Rerank 配置是初始默认值，不配置也能启动。启动后可在前端页面动态管理 LLM / Embedding / Rerank 配置，数据库配置优先级更高。
 
 ---
 
@@ -237,7 +237,7 @@ docker compose up -d
 # 2. 创建 Python 环境
 conda create -n aladdin python=3.12 -y
 conda activate aladdin
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-base.txt
 
 # 3. 安装前端依赖
 cd frontend && npm install && cd ..

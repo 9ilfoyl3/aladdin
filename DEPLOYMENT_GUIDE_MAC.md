@@ -114,17 +114,15 @@ LLM_BASE_URL=http://your-llm-server/v1
 LLM_MODEL=deepseek-chat
 LLM_API_KEY=sk-your-key
 
-# Embedding（远程服务）
-EMBED_PROVIDER=remote
+# Embedding 远程服务（可选，也可启动后在前端配置）
 EMBED_BASE_URL=http://your-embedding-server/v1
 EMBED_MODEL=BAAI/bge-m3
-EMBED_API_KEY=your-token
+EMBED_API_KEY=
 
-# Rerank（远程服务）
-RERANK_PROVIDER=remote
+# Rerank 远程服务（可选，也可启动后在前端配置）
 RERANK_BASE_URL=http://your-rerank-server/v1
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_API_KEY=your-token
+RERANK_API_KEY=
 
 # 其他
 POSTGRES_PASSWORD=your-secure-password

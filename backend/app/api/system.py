@@ -35,9 +35,9 @@ class SystemConfigResponse(BaseModel):
     llm_model: str
     llm_api_key: str
     embed_model: str
-    embed_device: str
+    embed_base_url: str
     rerank_model: str
-    rerank_device: str
+    rerank_base_url: str
     agent_max_iterations: int
     agent_timeout: float
     parent_chunk_size: int
@@ -62,8 +62,6 @@ class SystemConfigUpdate(BaseModel):
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
-    embed_device: str | None = None
-    rerank_device: str | None = None
     agent_max_iterations: int | None = None
     agent_timeout: float | None = None
     parent_chunk_size: int | None = None
@@ -167,9 +165,9 @@ async def get_config():
         llm_model=settings.llm_model,
         llm_api_key=api_key_display,
         embed_model=settings.embed_model,
-        embed_device=settings.embed_device,
+        embed_base_url=settings.embed_base_url,
         rerank_model=settings.rerank_model,
-        rerank_device=settings.rerank_device,
+        rerank_base_url=settings.rerank_base_url,
         agent_max_iterations=settings.agent_max_iterations,
         agent_timeout=settings.agent_timeout,
         parent_chunk_size=settings.parent_chunk_size,
@@ -220,9 +218,9 @@ async def update_config(body: SystemConfigUpdate):
         llm_model=settings.llm_model,
         llm_api_key=api_key_display,
         embed_model=settings.embed_model,
-        embed_device=settings.embed_device,
+        embed_base_url=settings.embed_base_url,
         rerank_model=settings.rerank_model,
-        rerank_device=settings.rerank_device,
+        rerank_base_url=settings.rerank_base_url,
         agent_max_iterations=settings.agent_max_iterations,
         agent_timeout=settings.agent_timeout,
         parent_chunk_size=settings.parent_chunk_size,

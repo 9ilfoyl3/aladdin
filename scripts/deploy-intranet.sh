@@ -28,12 +28,9 @@ if [ -f "models.tar.gz" ]; then
     tar -xzf models.tar.gz -C "$MODEL_DIR"
     echo "  模型加载完成"
     echo ""
-    echo "  提示：如果使用本地模型，需要在 docker-compose.yml 中将 model_data volume 改为绑定挂载："
-    echo "    volumes:"
-    echo "      - $MODEL_DIR:/root/.cache/huggingface/hub"
+    echo "  提示：模型文件仅用于 LLM 本地推理（如 Ollama），Embedding/Rerank 已改为远程服务。"
 else
     echo "  未找到 models.tar.gz，跳过模型加载"
-    echo "  如果使用远程 Embedding 服务，可在 .env 中配置 EMBED_PROVIDER=remote"
 fi
 
 # 3. 配置环境变量
@@ -49,14 +46,11 @@ if [ ! -f .env ]; then
     echo "    LLM_MODEL=模型名称"
     echo "    LLM_API_KEY=密钥（如需要）"
     echo ""
-    echo "  Embedding 配置（二选一）："
-    echo "    方式A - 本地模型（需要 models.tar.gz）："
-    echo "      EMBED_PROVIDER=sentence-transformers"
-    echo "      EMBED_DEVICE=cpu  # 有 GPU 改为 cuda"
+    echo "  Embedding/Rerank 远程服务配置："
+    echo "    EMBED_BASE_URL=http://embedding-server:8080/v1"
+    echo "    RERANK_BASE_URL=http://rerank-server:8001/v1"
     echo ""
-    echo "    方式B - 远程服务："
-    echo "      EMBED_PROVIDER=remote"
-    echo "      EMBED_BASE_URL=http://embedding-server:8080/v1"
+    echo "  也可以启动后通过前端「Embedding & Rerank 配置」页面添加"
     echo ""
     read -p "  编辑完成后按回车继续..."
 fi

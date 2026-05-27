@@ -1,7 +1,8 @@
 """ModelManager 单元测试
 
-通过 mock FlagEmbedding 模块验证 ModelManager 初始化逻辑，
-不需要 GPU 或模型下载。
+验证 ModelManager 初始化逻辑：
+- 配置了远程服务地址时使用 RemoteEmbedder/RemoteReranker
+- 未配置时使用占位 Provider（允许启动）
 """
 
 import sys
@@ -9,109 +10,131 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# 在导入 manager 之前 mock FlagEmbedding 模块
-mock_flag_embedding = MagicMock()
-sys.modules["FlagEmbedding"] = mock_flag_embedding
+# Mock pymilvus
+sys.modules.setdefault("pymilvus", MagicMock())
 
 from app.config import Settings
-from app.models.manager import ModelManager, get_model_manager
-from app.models.provider import LLMProvider, EmbedProvider, RerankProvider
-from app.models.llm.ollama import OllamaLLM
-from app.models.llm.vllm import VllmLLM
+from app.models.manager import ModelManager, get_model_manager, _PlaceholderEmbedder, _PlaceholderReranker
+from app.models.provider import EmbedProvider, RerankProvider
 
 
 @pytest.fixture
-def ollama_config():
-    """Ollama 模式配置"""
+def config_with_remote():
+    """配置了远程 Embedding/Rerank 服务"""
     return Settings(
         llm_provider="ollama",
         llm_base_url="http://localhost:11434",
         llm_model="qwen2.5:7b",
         embed_model="BAAI/bge-m3",
-        embed_device="cpu",
+        embed_base_url="http://embedding-server:8080/v1",
         rerank_model="BAAI/bge-reranker-v2-m3",
-        rerank_device="cpu",
+        rerank_base_url="http://rerank-server:8001/v1",
     )
 
 
 @pytest.fixture
-def vllm_config():
-    """vLLM 模式配置"""
+def config_without_remote():
+    """未配置远程服务地址（允许启动，后续通过前端配置）"""
     return Settings(
         llm_provider="vllm",
         llm_base_url="http://localhost:8000",
         llm_model="Qwen/Qwen2.5-7B-Instruct",
         embed_model="BAAI/bge-m3",
-        embed_device="cpu",
+        embed_base_url="",
         rerank_model="BAAI/bge-reranker-v2-m3",
-        rerank_device="cpu",
+        rerank_base_url="",
     )
 
 
 class TestModelManagerInit:
     """测试 ModelManager 初始化"""
 
-    def test_ollama_provider(self, ollama_config):
-        """ollama 配置应初始化 OllamaLLM"""
-        manager = ModelManager(ollama_config)
-        assert isinstance(manager.llm, OllamaLLM)
-        assert isinstance(manager.llm, LLMProvider)
-        assert manager.llm.base_url == "http://localhost:11434"
-        assert manager.llm.model == "qwen2.5:7b"
-
-    def test_vllm_provider(self, vllm_config):
-        """vllm 配置应初始化 VllmLLM"""
-        manager = ModelManager(vllm_config)
-        assert isinstance(manager.llm, VllmLLM)
-        assert isinstance(manager.llm, LLMProvider)
-        assert manager.llm.base_url == "http://localhost:8000"
-        assert manager.llm.model == "Qwen/Qwen2.5-7B-Instruct"
-
-    def test_embedder_initialized(self, ollama_config):
-        """应正确初始化 embedder"""
-        manager = ModelManager(ollama_config)
+    def test_remote_embedder_initialized(self, config_with_remote):
+        """配置了远程地址时应初始化 RemoteEmbedder"""
+        from app.models.embedding.remote import RemoteEmbedder
+        manager = ModelManager(config_with_remote)
         assert isinstance(manager.embedder, EmbedProvider)
+        assert isinstance(manager.embedder, RemoteEmbedder)
 
-    def test_reranker_initialized(self, ollama_config):
-        """应正确初始化 reranker"""
-        manager = ModelManager(ollama_config)
+    def test_remote_reranker_initialized(self, config_with_remote):
+        """配置了远程地址时应初始化 RemoteReranker"""
+        from app.models.rerank.remote import RemoteReranker
+        manager = ModelManager(config_with_remote)
         assert isinstance(manager.reranker, RerankProvider)
+        assert isinstance(manager.reranker, RemoteReranker)
 
-    def test_embedder_params(self, ollama_config):
-        """embedder 应使用配置中的模型名和设备"""
-        manager = ModelManager(ollama_config)
-        # 验证 embedder 存储了正确的参数
-        assert manager.embedder.model_name == "BAAI/bge-m3"
-        assert manager.embedder.device == "cpu"
+    def test_placeholder_embedder_when_no_url(self, config_without_remote):
+        """未配置远程地址时应使用占位 Provider"""
+        manager = ModelManager(config_without_remote)
+        assert isinstance(manager.embedder, _PlaceholderEmbedder)
 
-    def test_reranker_params(self, ollama_config):
-        """reranker 应使用配置中的模型名和设备"""
-        manager = ModelManager(ollama_config)
-        # 验证 reranker 存储了正确的参数
-        assert manager.reranker.model_name == "BAAI/bge-reranker-v2-m3"
-        assert manager.reranker.device == "cpu"
+    def test_placeholder_reranker_when_no_url(self, config_without_remote):
+        """未配置远程地址时应使用占位 Provider"""
+        manager = ModelManager(config_without_remote)
+        assert isinstance(manager.reranker, _PlaceholderReranker)
+
+    @pytest.mark.asyncio
+    async def test_placeholder_embedder_raises(self, config_without_remote):
+        """占位 Provider 调用时应抛出明确错误"""
+        manager = ModelManager(config_without_remote)
+        with pytest.raises(RuntimeError, match="Embedding 服务未配置"):
+            await manager.embedder.embed(["test"])
+
+    @pytest.mark.asyncio
+    async def test_placeholder_reranker_raises(self, config_without_remote):
+        """占位 Provider 调用时应抛出明确错误"""
+        manager = ModelManager(config_without_remote)
+        with pytest.raises(RuntimeError, match="Rerank 服务未配置"):
+            await manager.reranker.rerank("query", ["doc1"])
+
+
+class TestModelManagerReload:
+    """测试动态重载"""
+
+    def test_reload_embedder(self, config_without_remote):
+        """reload_embedder 应替换为 RemoteEmbedder"""
+        from app.models.embedding.remote import RemoteEmbedder
+        manager = ModelManager(config_without_remote)
+        assert isinstance(manager.embedder, _PlaceholderEmbedder)
+
+        manager.reload_embedder(
+            base_url="http://new-server:8080/v1",
+            model_name="BAAI/bge-m3",
+        )
+        assert isinstance(manager.embedder, RemoteEmbedder)
+
+    def test_reload_reranker(self, config_without_remote):
+        """reload_reranker 应替换为 RemoteReranker"""
+        from app.models.rerank.remote import RemoteReranker
+        manager = ModelManager(config_without_remote)
+        assert isinstance(manager.reranker, _PlaceholderReranker)
+
+        manager.reload_reranker(
+            base_url="http://new-server:8001/v1",
+            model_name="BAAI/bge-reranker-v2-m3",
+        )
+        assert isinstance(manager.reranker, RemoteReranker)
 
 
 class TestModelManagerClose:
     """测试资源清理"""
 
     @pytest.mark.asyncio
-    async def test_close_closes_llm_client(self, ollama_config):
-        """close() 应关闭 LLM 的 httpx 客户端"""
-        manager = ModelManager(ollama_config)
+    async def test_close(self, config_with_remote):
+        """close() 应正常执行"""
+        manager = ModelManager(config_with_remote)
         await manager.close()
-        assert manager.llm._client.is_closed
 
 
 class TestGetModelManager:
     """测试单例获取函数"""
 
-    def test_returns_same_instance(self, ollama_config):
+    def test_returns_same_instance(self, config_with_remote):
         """多次调用应返回同一实例"""
         import app.models.manager as mgr_module
 
         mgr_module._manager = None
-        m1 = get_model_manager(ollama_config)
+        m1 = get_model_manager(config_with_remote)
         m2 = get_model_manager()
         assert m1 is m2
         # 清理
@@ -125,8 +148,6 @@ class TestGetModelManager:
         with patch("app.config.get_settings") as mock_get:
             mock_get.return_value = Settings(
                 llm_provider="ollama",
-                embed_device="cpu",
-                rerank_device="cpu",
             )
             m = get_model_manager()
             mock_get.assert_called_once()

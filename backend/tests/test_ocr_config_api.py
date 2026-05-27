@@ -8,9 +8,6 @@ import sys
 from unittest.mock import MagicMock
 
 # Mock 重型依赖模块
-sys.modules.setdefault("FlagEmbedding", MagicMock())
-sys.modules.setdefault("torch", MagicMock())
-sys.modules.setdefault("sentence_transformers", MagicMock())
 sys.modules.setdefault("pymilvus", MagicMock())
 
 import httpx

@@ -229,9 +229,10 @@ The system calls external Embedding and Rerank services via HTTP API, supporting
 
 ### Configuration Methods
 
-- **Environment variables**: `EMBED_PROVIDER=remote` + `EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY`
-- **Frontend page**: After startup, dynamically add/switch on the **Embedding Config** page, takes effect immediately without restart
+- **Environment variables**: `EMBED_BASE_URL` + `EMBED_MODEL` + `EMBED_API_KEY` (applied at startup)
+- **Frontend page**: After startup, dynamically add/switch on the **Embedding & Rerank Config** page, takes effect immediately without restart
 - Database configs with `is_active=True` take priority over environment variables
+- Service can start without Embedding/Rerank URLs configured; add them later via frontend
 
 ---
 
@@ -243,12 +244,11 @@ The system calls external Embedding and Rerank services via HTTP API, supporting
 | `LLM_BASE_URL` | http://localhost:11434 | LLM service URL |
 | `LLM_MODEL` | qwen2.5:7b | LLM model name |
 | `LLM_API_KEY` | - | API key |
-| `EMBED_PROVIDER` | remote | Embedding backend (remote recommended) |
-| `EMBED_BASE_URL` | - | Embedding service URL |
+| `EMBED_BASE_URL` | - | Embedding remote service URL |
 | `EMBED_MODEL` | BAAI/bge-m3 | Embedding model name |
 | `EMBED_API_KEY` | - | Embedding service key |
-| `RERANK_PROVIDER` | remote | Rerank backend (remote recommended) |
-| `RERANK_BASE_URL` | - | Rerank service URL |
+| `EMBED_SPARSE_ENABLED` | true | Enable sparse vectors |
+| `RERANK_BASE_URL` | - | Rerank remote service URL |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank model |
 | `RERANK_API_KEY` | - | Rerank service key |
 | `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL connection URL |
@@ -262,7 +262,9 @@ The system calls external Embedding and Rerank services via HTTP API, supporting
 | `CHUNK_OVERLAP` | 50 | Child chunk overlap (characters) |
 | `PIPELINE_MAX_CONCURRENT` | 3 | Worker max concurrent document processing |
 | `PIPELINE_MAX_RETRIES` | 3 | Document processing max retries |
-| `PIPELINE_TASK_TIMEOUT_MINUTES` | 30 | Single document processing timeout (minutes) |
+| `PIPELINE_TASK_TIMEOUT_MINUTES` | 60 | Single document processing timeout (minutes) |
+| `PIPELINE_EMBED_BATCH_SIZE` | 128 | Embedding batch size |
+| `PIPELINE_EMBED_CONCURRENCY` | 8 | Embedding concurrent requests |
 
 ---
 
@@ -278,7 +280,7 @@ The system calls external Embedding and Rerank services via HTTP API, supporting
 - **Iterative reflection**: Two-level evaluation (score-based fast judgment + LLM deep evaluation), early termination when coverage improvement is insufficient
 - **Structural fragment penalty**: Rerank phase applies score penalty to short texts with no substantive information (headings, TOC entries)
 - **Multi-model management**: Database-persisted multiple LLM configs with create/edit/delete/set-default/connectivity-test, dynamic switching during chat
-- **Configurable Embedding/Rerank**: Supports both local model and remote service modes, frontend dynamic switching without restart
+- **Configurable Embedding/Rerank**: Unified remote service calls, frontend dynamic switching without restart
 - **OCR service management**: Visual management of multiple OCR services with default + fallback auto-switching
 - **Markdown chunking optimization**: Smart splitting of VL model Markdown output (tables, headings), table block protection
 - **Context window management**: Configurable max context tokens per model, intelligent truncation by chunk relevance
