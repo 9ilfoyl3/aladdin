@@ -1,4 +1,7 @@
-"""Embedding/Rerank 模型配置管理接口"""
+"""Embedding/Rerank 模型配置管理接口
+
+统一使用远程服务，通过此接口管理服务地址和参数。
+"""
 
 import uuid
 import logging
@@ -25,13 +28,9 @@ router = APIRouter(prefix="/api/embed-configs", tags=["Embed Config"])
 class EmbedConfigCreate(BaseModel):
     name: str
     config_type: str  # embedding | rerank
-    provider: str  # local | remote
-    # local 字段
-    local_provider: Optional[str] = None  # sentence-transformers | flag-embedding
     model_name: str = "BAAI/bge-m3"
-    device: str = "cpu"
-    # remote 字段
-    base_url: Optional[str] = None
+    # 远程服务字段
+    base_url: str
     api_key: Optional[str] = None
     timeout: float = 60.0
     # sparse 向量支持（仅 embedding 类型有效）
@@ -42,10 +41,7 @@ class EmbedConfigCreate(BaseModel):
 
 class EmbedConfigUpdate(BaseModel):
     name: Optional[str] = None
-    provider: Optional[str] = None
-    local_provider: Optional[str] = None
     model_name: Optional[str] = None
-    device: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     timeout: Optional[float] = None
@@ -59,9 +55,7 @@ class EmbedConfigResponse(BaseModel):
     name: str
     config_type: str
     provider: str
-    local_provider: Optional[str] = None
     model_name: str
-    device: str
     base_url: Optional[str] = None
     api_key_set: bool
     timeout: float
@@ -73,11 +67,8 @@ class EmbedConfigResponse(BaseModel):
 
 class EmbedTestRequest(BaseModel):
     """测试连通性请求"""
-    provider: str  # local | remote
-    local_provider: Optional[str] = None
     model_name: str = "BAAI/bge-m3"
-    device: str = "cpu"
-    base_url: Optional[str] = None
+    base_url: str
     api_key: Optional[str] = None
     timeout: float = 60.0
     config_type: str = "embedding"  # embedding | rerank
@@ -101,9 +92,7 @@ def _to_response(config: EmbedConfig) -> EmbedConfigResponse:
         name=config.name,
         config_type=config.config_type,
         provider=config.provider,
-        local_provider=config.local_provider,
         model_name=config.model_name,
-        device=config.device,
         base_url=config.base_url,
         api_key_set=bool(config.api_key),
         timeout=config.timeout,
@@ -121,18 +110,16 @@ def _reload_provider(config: EmbedConfig) -> None:
     try:
         manager = get_model_manager()
         kwargs = {
-            "local_provider": config.local_provider,
             "model_name": config.model_name,
-            "device": config.device,
             "base_url": config.base_url or "",
             "api_key": config.api_key or "",
             "timeout": config.timeout,
             "sparse_enabled": config.sparse_enabled,
         }
         if config.config_type == "embedding":
-            manager.reload_embedder(provider=config.provider, **kwargs)
+            manager.reload_embedder(**kwargs)
         else:
-            manager.reload_reranker(provider=config.provider, **kwargs)
+            manager.reload_reranker(**kwargs)
     except Exception as e:
         logger.error("重载 Provider 失败: %s", e)
 
@@ -158,14 +145,10 @@ async def list_embed_configs(
 
 class EmbedCurrentResponse(BaseModel):
     """当前生效的 Embedding/Rerank 配置"""
-    embed_provider: str
     embed_model: str
-    embed_device: str
     embed_base_url: str
     embed_sparse_enabled: bool
-    rerank_provider: str
     rerank_model: str
-    rerank_device: str
     rerank_base_url: str
 
 
@@ -175,14 +158,10 @@ async def get_current_embed_config():
     from app.config import get_settings
     settings = get_settings()
     return EmbedCurrentResponse(
-        embed_provider=settings.embed_provider,
         embed_model=settings.embed_model,
-        embed_device=settings.embed_device,
         embed_base_url=settings.embed_base_url,
         embed_sparse_enabled=settings.embed_sparse_enabled,
-        rerank_provider=settings.rerank_provider,
         rerank_model=settings.rerank_model,
-        rerank_device=settings.rerank_device,
         rerank_base_url=settings.rerank_base_url,
     )
 
@@ -207,10 +186,8 @@ async def create_embed_config(body: EmbedConfigCreate, db: AsyncSession = Depend
         id=config_id,
         name=body.name,
         config_type=body.config_type,
-        provider=body.provider,
-        local_provider=body.local_provider,
+        provider="remote",
         model_name=body.model_name,
-        device=body.device,
         base_url=body.base_url,
         api_key=body.api_key or None,
         timeout=body.timeout,
@@ -276,7 +253,7 @@ async def delete_embed_config(config_id: str, db: AsyncSession = Depends(get_db)
 
 @router.post("/test", response_model=EmbedTestResponse)
 async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depends(get_db)):
-    """测试 Embedding/Rerank 服务连通性（使用表单传入的值）"""
+    """测试 Embedding/Rerank 服务连通性"""
     # 如果 api_key 为空且传了 config_id，从数据库回退获取已保存的密钥
     if not body.api_key and body.config_id:
         result = await db.execute(select(EmbedConfig).where(EmbedConfig.id == body.config_id))
@@ -285,77 +262,49 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
             body.api_key = saved.api_key
 
     try:
-        if body.provider == "remote":
-            if not body.base_url:
-                return EmbedTestResponse(success=False, message="远程服务地址不能为空")
+        if not body.base_url:
+            return EmbedTestResponse(success=False, message="远程服务地址不能为空")
 
-            if body.config_type == "embedding":
-                from app.models.embedding.remote import RemoteEmbedder
-                embedder = RemoteEmbedder(
-                    base_url=body.base_url,
-                    model=body.model_name,
-                    api_key=body.api_key or "",
-                    timeout=body.timeout,
-                    sparse_enabled=body.sparse_enabled,
-                )
-                result = await embedder.embed(["测试文本"])
-                if not result or len(result[0]) == 0:
-                    return EmbedTestResponse(success=False, message="Dense 返回结果为空")
+        if body.config_type == "embedding":
+            from app.models.embedding.remote import RemoteEmbedder
+            embedder = RemoteEmbedder(
+                base_url=body.base_url,
+                model=body.model_name,
+                api_key=body.api_key or "",
+                timeout=body.timeout,
+                sparse_enabled=body.sparse_enabled,
+            )
+            result = await embedder.embed(["测试文本"])
+            if not result or len(result[0]) == 0:
+                return EmbedTestResponse(success=False, message="Dense 返回结果为空")
 
-                msg = f"Dense 连接成功，向量维度: {len(result[0])}"
+            msg = f"连接成功，向量维度: {len(result[0])}"
 
-                # 测试 sparse 端点
-                if body.sparse_enabled:
-                    sparse_ok = await embedder.check_sparse_support()
-                    if sparse_ok:
-                        msg += "；Sparse 端点可用 ✓"
-                    else:
-                        msg += "；Sparse 端点不可用（将降级为 BM25 兜底）"
+            # 测试 sparse 端点
+            if body.sparse_enabled:
+                sparse_ok = await embedder.check_sparse_support()
+                if sparse_ok:
+                    msg += "；Sparse 端点可用 ✓"
+                else:
+                    msg += "；Sparse 端点不可用（将降级为 BM25 兜底）"
 
-                return EmbedTestResponse(success=True, message=msg)
-            else:
-                from app.models.rerank.remote import RemoteReranker
-                reranker = RemoteReranker(
-                    base_url=body.base_url,
-                    model=body.model_name,
-                    api_key=body.api_key or "",
-                    timeout=body.timeout,
-                )
-                result = await reranker.rerank("测试查询", ["文档A", "文档B"], top_k=2)
-                if result:
-                    return EmbedTestResponse(
-                        success=True,
-                        message=f"连接成功，返回 {len(result)} 个结果"
-                    )
-                return EmbedTestResponse(success=False, message="返回结果为空")
+            return EmbedTestResponse(success=True, message=msg)
         else:
-            # 本地模型测试：尝试加载模型
-            if body.config_type == "embedding":
-                local_prov = body.local_provider or "sentence-transformers"
-                if local_prov == "flag-embedding":
-                    from app.models.embedding.bge_m3 import BgeM3Embedder
-                    embedder = BgeM3Embedder(model_name=body.model_name, device=body.device)
-                else:
-                    from app.models.embedding.sentence_transformer import SentenceTransformerEmbedder
-                    embedder = SentenceTransformerEmbedder(model_name=body.model_name, device=body.device)
-                result = await embedder.embed(["测试文本"])
+            from app.models.rerank.remote import RemoteReranker
+            reranker = RemoteReranker(
+                base_url=body.base_url,
+                model=body.model_name,
+                api_key=body.api_key or "",
+                timeout=body.timeout,
+            )
+            result = await reranker.rerank("测试查询", ["文档A", "文档B"], top_k=2)
+            if result:
                 return EmbedTestResponse(
                     success=True,
-                    message=f"本地模型加载成功，向量维度: {len(result[0])}"
+                    message=f"连接成功，返回 {len(result)} 个结果"
                 )
-            else:
-                local_prov = body.local_provider or "sentence-transformers"
-                if local_prov == "flag-embedding":
-                    from app.models.rerank.bge_reranker import BgeReranker
-                    reranker = BgeReranker(model_name=body.model_name, device=body.device)
-                else:
-                    from app.models.rerank.cross_encoder_reranker import CrossEncoderReranker
-                    reranker = CrossEncoderReranker(model_name=body.model_name, device=body.device)
-                result = await reranker.rerank("测试", ["文档A", "文档B"], top_k=2)
-                return EmbedTestResponse(
-                    success=True,
-                    message=f"本地模型加载成功，返回 {len(result)} 个结果"
-                )
+            return EmbedTestResponse(success=False, message="返回结果为空")
+
     except Exception as e:
         logger.exception("Embed/Rerank 测试失败")
         return EmbedTestResponse(success=False, message=f"测试失败: {str(e)}")
@@ -370,11 +319,8 @@ async def test_saved_embed_config(config_id: str, db: AsyncSession = Depends(get
         raise HTTPException(status_code=404, detail="配置不存在")
 
     return await test_embed_connection(EmbedTestRequest(
-        provider=config.provider,
-        local_provider=config.local_provider,
         model_name=config.model_name,
-        device=config.device,
-        base_url=config.base_url,
+        base_url=config.base_url or "",
         api_key=config.api_key,
         timeout=config.timeout,
         config_type=config.config_type,

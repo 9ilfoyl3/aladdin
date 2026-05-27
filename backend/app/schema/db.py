@@ -141,18 +141,18 @@ class OCRConfig(Base):
 
 
 class EmbedConfig(Base):
-    """Embedding/Rerank 模型配置表"""
+    """Embedding/Rerank 远程服务配置表"""
     __tablename__ = "embed_configs"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     config_type: Mapped[str] = mapped_column(String(20), nullable=False)  # embedding | rerank
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # local | remote
-    # local provider 字段
-    local_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # sentence-transformers | flag-embedding
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="remote")  # 统一为 remote
+    # 保留字段（兼容旧数据库，不再使用）
+    local_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    device: Mapped[str] = mapped_column(String(10), default="cpu")
+    # 远程服务字段
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)  # BAAI/bge-m3 等
-    device: Mapped[str] = mapped_column(String(10), default="cpu")  # cpu | cuda | mps
-    # remote provider 字段
     base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timeout: Mapped[float] = mapped_column(Float, default=60.0)

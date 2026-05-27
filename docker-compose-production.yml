@@ -103,24 +103,20 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-remote}
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_MODEL=${EMBED_MODEL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
       - EMBED_API_KEY=${EMBED_API_KEY:-}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-remote}
+      - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
       - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_MODEL=${RERANK_MODEL:-}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_MODEL=${LLM_MODEL:-}
       - LLM_API_KEY=${LLM_API_KEY:-}
-      - HF_HUB_OFFLINE=1
-      - TRANSFORMERS_OFFLINE=1
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - upload_data:/app/data
-      - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
     depends_on:
       postgres:
         condition: service_healthy
@@ -138,16 +134,13 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-remote}
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_MODEL=${EMBED_MODEL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
       - EMBED_API_KEY=${EMBED_API_KEY:-}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-remote}
+      - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
       - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_MODEL=${RERANK_MODEL:-}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
-      - HF_HUB_OFFLINE=1
-      - TRANSFORMERS_OFFLINE=1
       - REDIS_URL=redis://redis:6379/0
       - PIPELINE_MAX_CONCURRENT=${PIPELINE_MAX_CONCURRENT:-3}
       - PIPELINE_MAX_RETRIES=${PIPELINE_MAX_RETRIES:-3}

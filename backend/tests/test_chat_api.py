@@ -10,9 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Mock 重型依赖模块，避免导入 FlagEmbedding / torch 等
-sys.modules.setdefault("FlagEmbedding", MagicMock())
-sys.modules.setdefault("torch", MagicMock())
-sys.modules.setdefault("sentence_transformers", MagicMock())
 sys.modules.setdefault("pymilvus", MagicMock())
 
 from app.retrieval.base import RetrievalResult

@@ -28,8 +28,8 @@ from app.config import get_settings
 from app.pipeline.loaders.pdf_loader import PdfLoader
 from app.pipeline.chunker import HierarchicalChunker
 from app.pipeline.embedder import PipelineEmbedder
-from app.models.embedding.bge_m3 import BgeM3Embedder
-from app.models.rerank.bge_reranker import BgeReranker
+from app.models.embedding.remote import RemoteEmbedder
+from app.models.rerank.remote import RemoteReranker
 from app.retrieval.vector import VectorRetriever
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.hybrid import HybridRetriever
@@ -239,16 +239,21 @@ async def benchmark_embedding(child_texts: list[str]) -> dict:
 
     settings = get_settings()
     print_metric("模型", settings.embed_model)
-    print_metric("设备", settings.embed_device)
+    print_metric("服务地址", settings.embed_base_url or "未配置")
     print_metric("待向量化文本数", str(len(child_texts)))
 
     # 记录模型加载前的内存
     mem_before_model = get_process_memory_mb()
 
     # 初始化模型（首次加载会较慢）
-    print("\n  正在加载 Embedding 模型...")
+    print("\n  正在连接远程 Embedding 服务...")
     model_start = time.perf_counter()
-    embedder = BgeM3Embedder(model_name=settings.embed_model, device=settings.embed_device)
+    embedder = RemoteEmbedder(
+        base_url=settings.embed_base_url,
+        model=settings.embed_model,
+        api_key=settings.embed_api_key,
+        sparse_enabled=settings.embed_sparse_enabled,
+    )
     model_load_time = time.perf_counter() - model_start
 
     mem_after_model = get_process_memory_mb()
@@ -450,7 +455,11 @@ async def benchmark_retrieval(embedder, milvus: MilvusClient) -> dict:
     print_section("5. 检索性能测试")
 
     settings = get_settings()
-    reranker = BgeReranker(model_name=settings.rerank_model, device=settings.rerank_device)
+    reranker = RemoteReranker(
+        base_url=settings.rerank_base_url,
+        model=settings.rerank_model,
+        api_key=settings.rerank_api_key,
+    )
 
     # 构建检索器
     vector_retriever = VectorRetriever(embedder, milvus)
@@ -562,7 +571,7 @@ def print_summary(load_data: dict, chunk_data: dict, embed_data: dict, storage_d
   ├──────────────────────────────────────────────────────────────┤
   │ PDF 加载          │ {format_time(load_data['load_time']):13s} │ pymupdf 提取文本         │
   │ 分片              │ {format_time(chunk_data['chunk_time']):13s} │ {chunk_data['parent_count']}父块/{chunk_data['child_count']}子块            │
-  │ 向量化            │ {format_time(embed_data['embed_time']):13s} │ bge-m3 ({get_settings().embed_device})           │
+  │ 向量化            │ {format_time(embed_data['embed_time']):13s} │ bge-m3 (remote)           │
   │ Milvus 写入       │ {format_time(storage_data['insert_time']):13s} │ {storage_data['insert_count']} 条向量              │
   ├──────────────────────────────────────────────────────────────┤
   │ 端到端入库总耗时  │ {format_time(total_pipeline_time):13s} │ load→chunk→embed→store    │

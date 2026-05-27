@@ -1,4 +1,4 @@
-# 基础依赖（不含 ML 模型库，适用于远程 Embedding/Rerank 模式）
+# 基础依赖（Embedding/Rerank 统一使用远程服务，无需 ML 模型库）
 
 # Web 框架
 fastapi>=0.115.0
