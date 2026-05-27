@@ -35,6 +35,7 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+.shared/
 
 # Environment
 .env
@@ -42,6 +43,7 @@ Thumbs.db
 .env.*.local
 
 # Data & Uploads
+data/
 backend/data/uploads/
 backend/data/*.db
 backend/data/*.db-shm

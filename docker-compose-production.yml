@@ -94,35 +94,6 @@ services:
       retries: 3
     restart: unless-stopped
 
-  infinity:
-    container_name: arag-infinity
-    image: ${IMAGE_INFINITY:-infinity:cpu_auto}
-    command:
-      - v2
-      - --engine
-      - optimum
-      - --device
-      - cpu
-      - --model-id
-      - /models/bge-m3
-      - --model-id
-      - /models/bge-reranker-v2-m3
-      - --port
-      - "7997"
-      - --api-key
-      - ${INFINITY_API_KEY:-sk-arag-infinity}
-    ports:
-      - "${INFINITY_PORT:-8902}:7997"
-    volumes:
-      - ${MODEL_DIR:-./models}:/models
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 180s
-    restart: unless-stopped
-
   backend:
     container_name: arag-backend
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
@@ -153,8 +124,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      infinity:
-        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -182,15 +151,12 @@ services:
       - PIPELINE_HEALTH_CHECK_INTERVAL=${PIPELINE_HEALTH_CHECK_INTERVAL:-30}
     volumes:
       - upload_data:/app/data
-      - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
     depends_on:
       postgres:
         condition: service_healthy
       milvus:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      infinity:
         condition: service_healthy
     restart: unless-stopped
 

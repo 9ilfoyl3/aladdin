@@ -1,0 +1,39 @@
+# Infinity 模型推理服务（独立部署）
+# 用于本地开发或不使用独立 GPU 服务器的场景
+#
+# 使用方式：
+#   docker compose -f docker-compose-infinity.yml up -d
+#
+# 然后 aladdin .env 配置：
+#   EMBED_BASE_URL=http://<infinity-host>:7997/v1
+#   RERANK_BASE_URL=http://<infinity-host>:7997/v1
+
+services:
+  infinity:
+    container_name: arag-infinity
+    image: ${IMAGE_INFINITY:-infinity:cpu_auto}
+    command:
+      - v2
+      - --engine
+      - optimum
+      - --device
+      - cpu
+      - --model-id
+      - /models/bge-m3
+      - --model-id
+      - /models/bge-reranker-v2-m3
+      - --port
+      - "7997"
+      - --api-key
+      - ${INFINITY_API_KEY:-sk-arag-infinity}
+    ports:
+      - "${INFINITY_PORT:-7997}:7997"
+    volumes:
+      - ${MODEL_DIR:-./models}:/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
