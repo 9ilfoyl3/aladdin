@@ -16,12 +16,15 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.executor import RetrievalExecutor
-from app.agent.orchestrator import AgentOrchestrator
-from app.agent.planner import QueryPlanner
-from app.agent.reflector import Reflector
-from app.agent.rewriter import QueryRewriter
-from app.agent.router import QueryRouter
+from app.agent.config import AgentConfig
+from app.agent.engine import AgentEngine
+from app.agent.events import AgentEvent, EventBus, EventType
+from app.agent.state import AgentState
+from app.agent.tools.final_answer import FinalAnswerTool
+from app.agent.tools.grep_chunks import GrepChunksTool
+from app.agent.tools.knowledge_search import KnowledgeSearchTool
+from app.agent.tools.registry import ToolRegistry
+from app.agent.prompts.progressive_rag import render_system_prompt
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.models.llm.ollama import OllamaLLM
@@ -148,26 +151,46 @@ async def _stream_retrieval_test(body: RetrievalTestRequest):
         db_session_factory=async_session,
         bm25_retriever=bm25_retriever,
     )
-    orchestrator = AgentOrchestrator(
-        router=QueryRouter(llm),
-        rewriter=QueryRewriter(llm),
-        executor=RetrievalExecutor(hybrid_retriever, embedder=manager.embedder),
-        reflector=Reflector(llm),
-        retriever=hybrid_retriever,
+
+    # 创建 AgentState 和 ToolRegistry
+    state = AgentState()
+    tool_registry = ToolRegistry()
+    event_bus = EventBus()
+
+    # 注册工具
+    tool_registry.register(KnowledgeSearchTool(hybrid_retriever, body.knowledge_base_id, state))
+    tool_registry.register(GrepChunksTool(bm25_retriever, body.knowledge_base_id))
+    tool_registry.register(FinalAnswerTool(state, event_bus, ""))
+
+    # 创建 AgentConfig
+    config = AgentConfig(
         max_iterations=settings.agent_max_iterations,
-        timeout=settings.agent_timeout,
-        planner=QueryPlanner(llm),
+        system_prompt=render_system_prompt(
+            AgentConfig(),
+            kb_names=[body.knowledge_base_id],
+            available_tools=tool_registry.list_tools(),
+        ),
     )
+
+    # 创建 AgentEngine
+    engine = AgentEngine(config, llm, tool_registry, event_bus)
 
     # 使用队列推送进度
     progress_queue: asyncio.Queue = asyncio.Queue()
 
-    async def on_progress(step: str, detail: str):
-        await progress_queue.put({"type": "progress", "step": step, "detail": detail})
+    async def _on_event(event: AgentEvent):
+        if event.type == EventType.THOUGHT:
+            await progress_queue.put({"type": "progress", "step": "thought", "detail": event.data.get("content", "")})
+        elif event.type == EventType.TOOL_CALL:
+            await progress_queue.put({"type": "progress", "step": "tool_call", "detail": event.data.get("tool_name", "")})
+        elif event.type == EventType.TOOL_RESULT:
+            await progress_queue.put({"type": "progress", "step": "tool_result", "detail": event.data.get("tool_name", "")})
+
+    event_bus.on(None, _on_event)
 
     # 启动 agent 任务
     agent_task = asyncio.create_task(
-        orchestrator.run(body.query, body.knowledge_base_id, on_progress=on_progress)
+        engine.execute("", body.query)
     )
 
     # 推送进度事件
@@ -184,16 +207,16 @@ async def _stream_retrieval_test(body: RetrievalTestRequest):
         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     # 获取结果
-    agent_result = agent_task.result()
-    items = await _build_result_items(agent_result.chunks)
+    result_state: AgentState = agent_task.result()
+    items = await _build_result_items(result_state.knowledge_refs)
 
     # 推送最终结果
     final = RetrievalTestResponse(
         query=body.query,
         mode=body.mode,
         total=len(items),
-        iterations=agent_result.iterations,
-        degraded=agent_result.degraded,
+        iterations=result_state.current_round,
+        degraded=False,
         results=items,
     )
     yield f"data: {json.dumps({'type': 'result', **final.model_dump()}, ensure_ascii=False)}\n\n"

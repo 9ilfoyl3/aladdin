@@ -13,12 +13,18 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.agent.orchestrator import AgentOrchestrator, AgentResult
-from app.agent.executor import RetrievalExecutor
-from app.agent.planner import QueryPlanner
-from app.agent.reflector import Reflector
-from app.agent.rewriter import QueryRewriter
-from app.agent.router import QueryRouter
+from app.agent.config import AgentConfig
+from app.agent.engine import AgentEngine
+from app.agent.events import AgentEvent, EventBus, EventType
+from app.agent.state import AgentState
+from app.agent.tools.final_answer import FinalAnswerTool
+from app.agent.tools.grep_chunks import GrepChunksTool
+from app.agent.tools.knowledge_search import KnowledgeSearchTool
+from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.thinking import ThinkingTool
+from app.agent.tools.web_search import WebSearchTool
+from app.agent.tools.registry import ToolRegistry
+from app.agent.prompts.progressive_rag import render_system_prompt
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.models.provider import LLMProvider
@@ -42,7 +48,7 @@ from app.schema.api import (
     StreamChoice,
     UsageInfo,
 )
-from app.schema.db import AgentNodeConfig, KnowledgeBase, LLMConfig, ChatSession, ChatMessageRecord
+from app.schema.db import LLMConfig, ChatSession, ChatMessageRecord
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient
 
@@ -61,20 +67,48 @@ async def _load_session_history(session_id: str) -> list[dict]:
 
     只保留最近 MAX_HISTORY_ROUNDS 轮（user+assistant 各一条算一轮），
     避免上下文过长超出 LLM token 限制。
+
+    对于 assistant 消息中包含 agent_steps 的，追加工具使用摘要，
+    给 LLM 提供上一轮使用了哪些工具的上下文。
     """
     async with async_session() as session:
-        result = await session.execute(
-            select(ChatMessageRecord)
-            .where(ChatMessageRecord.session_id == session_id)
-            .order_by(ChatMessageRecord.created_at)
-        )
-        messages = result.scalars().all()
+        try:
+            result = await session.execute(
+                select(ChatMessageRecord)
+                .where(ChatMessageRecord.session_id == session_id)
+                .order_by(ChatMessageRecord.created_at)
+            )
+            messages = result.scalars().all()
+        except Exception as e:
+            # agent_steps 列可能不存在（需要数据库迁移），降级为仅查询基础字段
+            logger.warning("加载会话历史异常（可能缺少 agent_steps 列），降级查询: %s", e)
+            await session.rollback()
+            from sqlalchemy import text
+            raw_result = await session.execute(
+                text("SELECT id, session_id, role, content, created_at FROM chat_messages WHERE session_id = :sid ORDER BY created_at"),
+                {"sid": session_id},
+            )
+            rows = raw_result.fetchall()
+            messages = None
+            history = [{"role": row.role, "content": row.content} for row in rows]
+            max_messages = MAX_HISTORY_ROUNDS * 2
+            if len(history) > max_messages:
+                history = history[-max_messages:]
+            return history
 
     if not messages:
         return []
 
-    # 转换为 dict 列表
-    history = [{"role": m.role, "content": m.content} for m in messages]
+    # 转换为 dict 列表，assistant 消息附带工具摘要
+    history = []
+    for m in messages:
+        content = m.content
+        if m.role == "assistant" and hasattr(m, 'agent_steps') and m.agent_steps:
+            # 从 agent_steps 中提取工具调用摘要
+            tool_summary = _summarize_agent_steps(m.agent_steps)
+            if tool_summary:
+                content = f"{content}\n{tool_summary}"
+        history.append({"role": m.role, "content": content})
 
     # 截取最近 N 轮（2N 条消息）
     max_messages = MAX_HISTORY_ROUNDS * 2
@@ -82,6 +116,25 @@ async def _load_session_history(session_id: str) -> list[dict]:
         history = history[-max_messages:]
 
     return history
+
+
+def _summarize_agent_steps(agent_steps: list) -> str:
+    """从 agent_steps 中提取工具调用摘要
+
+    格式: [Agent used: tool1(Nms), tool2(Nms)]
+    """
+    tool_calls = []
+    for step in agent_steps:
+        if isinstance(step, dict) and step.get("type") == "tool_result":
+            tool_name = step.get("tool_name", "")
+            duration_ms = step.get("duration_ms", 0)
+            if tool_name:
+                tool_calls.append(f"{tool_name}({duration_ms}ms)")
+
+    if not tool_calls:
+        return ""
+
+    return f"[Agent used: {', '.join(tool_calls)}]"
 
 
 async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None) -> None:
@@ -99,16 +152,50 @@ async def _save_message(session_id: str, role: str, content: str, references: li
         await session.commit()
 
 
-async def _auto_title_session(session_id: str, user_query: str) -> None:
-    """自动为新会话生成标题（取用户第一条消息的前 30 个字符）"""
+async def _auto_title_session(session_id: str, user_query: str, assistant_answer: str = "") -> None:
+    """自动为新会话生成标题
+
+    首次消息时调用 LLM 生成 ≤15 字的简短标题，
+    失败时回退到截断用户消息前 30 字符。
+    """
     async with async_session() as session:
         result = await session.execute(
             select(ChatSession).where(ChatSession.id == session_id)
         )
         chat_session = result.scalar_one_or_none()
         if chat_session and chat_session.title == "新对话":
-            chat_session.title = user_query[:30] + ("..." if len(user_query) > 30 else "")
+            # 尝试用 LLM 生成标题
+            title = await _generate_title_with_llm(user_query, assistant_answer)
+            if not title:
+                # 回退到截断
+                title = user_query[:30] + ("..." if len(user_query) > 30 else "")
+            chat_session.title = title
             await session.commit()
+
+
+async def _generate_title_with_llm(user_query: str, assistant_answer: str) -> str | None:
+    """调用 LLM 生成会话标题
+
+    Returns:
+        生成的标题字符串，失败时返回 None
+    """
+    try:
+        llm, _, _, _ = await _get_llm_for_request(None)
+        prompt = (
+            f"根据以下对话生成一个≤15字的简短标题：\n"
+            f"用户：{user_query[:200]}\n"
+            f"助手：{assistant_answer[:200]}\n"
+            f"标题："
+        )
+        title = await llm.generate([{"role": "user", "content": prompt}])
+        if title and title.strip():
+            # 清理引号和多余空白，确保不超过 30 字符
+            title = title.strip().strip('"').strip("'").strip("《》")
+            return title[:30]
+    except Exception as e:
+        logger.warning("LLM 生成标题失败: %s", e)
+
+    return None
 
 
 async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None, bool]:
@@ -151,40 +238,6 @@ def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
     else:
         return VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
 
-
-async def _get_node_llm(node_name: str, fallback_llm: LLMProvider) -> LLMProvider:
-    """获取指定 Agent 节点的独立 LLM 实例
-
-    从 AgentNodeConfig 表查询节点配置，若配置有效则创建对应 LLM 实例；
-    未配置或创建失败时返回 fallback_llm。
-
-    Args:
-        node_name: 节点名称（router / rewriter / reflector）
-        fallback_llm: 回退使用的对话 LLM
-
-    Returns:
-        节点专属 LLM 或 fallback LLM
-    """
-    try:
-        async with async_session() as session:
-            result = await session.execute(
-                select(AgentNodeConfig).where(AgentNodeConfig.node_name == node_name)
-            )
-            node_config = result.scalar_one_or_none()
-            if not node_config or not node_config.model_config_id:
-                return fallback_llm
-
-            llm_result = await session.execute(
-                select(LLMConfig).where(LLMConfig.id == node_config.model_config_id)
-            )
-            llm_config = llm_result.scalar_one_or_none()
-            if not llm_config:
-                return fallback_llm
-
-            return _create_llm_from_config(llm_config)
-    except Exception as e:
-        logger.warning("加载节点 [%s] 独立模型失败，使用对话模型: %s", node_name, e)
-        return fallback_llm
 
 
 # RAG 系统提示词模板
@@ -385,34 +438,54 @@ async def _retrieve_chunks(
         return results, False
 
     elif mode == "agent":
-        # Agent 模式：完整编排，各节点加载独立 LLM
-        router_llm = await _get_node_llm("router", llm)
-        planner_llm = await _get_node_llm("planner", llm)
-        reflector_llm = await _get_node_llm("reflector", llm)
-
+        # Agent 模式：ReAct 循环引擎
         hybrid_retriever = _build_hybrid_retriever()
+        bm25_retriever = BM25Retriever(milvus)
 
-        # v2: Router 快判 + Planner 意图拆分
-        planner = QueryPlanner(planner_llm)
+        # 1. 创建 AgentState 和 ToolRegistry
+        state = AgentState()
+        tool_registry = ToolRegistry()
 
-        orchestrator = AgentOrchestrator(
-            router=QueryRouter(router_llm),
-            rewriter=QueryRewriter(planner_llm),
-            executor=RetrievalExecutor(hybrid_retriever, embedder=manager.embedder),
-            reflector=Reflector(reflector_llm),
-            retriever=hybrid_retriever,
+        # 2. 创建 EventBus
+        event_bus = EventBus()
+
+        # 3. 注册工具
+        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
+        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id))
+        tool_registry.register(ListKnowledgeChunksTool())
+        tool_registry.register(FinalAnswerTool(state, event_bus, ""))
+
+        # 4. 创建 AgentConfig（使用 Progressive RAG prompt）
+        settings = get_settings()
+
+        # 注册可选工具：web_search（当 searxng_url 配置时启用）
+        if settings.searxng_url:
+            tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
+
+        config = AgentConfig(
             max_iterations=settings.agent_max_iterations,
-            timeout=settings.agent_timeout,
-            planner=planner,
+            web_search_enabled=bool(settings.searxng_url),
+            system_prompt=render_system_prompt(
+                AgentConfig(),
+                kb_names=[kb_id],
+                available_tools=tool_registry.list_tools(),
+            ),
         )
 
-        # 构建进度回调：将事件放入队列
-        async def on_progress(step: str, detail: str):
-            if progress_queue:
-                await progress_queue.put({"type": "agent_progress", "step": step, "detail": detail})
+        # 5. 创建 AgentEngine
+        engine = AgentEngine(config, llm, tool_registry, event_bus)
 
-        agent_result: AgentResult = await orchestrator.run(query, kb_id, on_progress=on_progress, expr=expr)
-        return agent_result.chunks, agent_result.degraded
+        # 6. 构建进度回调：将事件放入队列
+        if progress_queue:
+            async def _on_event(event: AgentEvent):
+                await progress_queue.put(event)
+            event_bus.on(None, _on_event)
+
+        # 7. 执行 Agent
+        result_state = await engine.execute("", query)
+
+        # 8. 返回 knowledge_refs 作为 chunks
+        return result_state.knowledge_refs, False
 
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
@@ -450,6 +523,50 @@ def _build_messages(
     return messages
 
 
+def _agent_event_to_sse(event: AgentEvent) -> dict | None:
+    """将 AgentEvent 转换为 SSE JSON 格式
+
+    返回格式：
+    {"type": "thought", "content": "...", "iteration": 0}
+    {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
+    {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
+    {"type": "final_answer", "content": "...", "done": true}
+    """
+    if event.type == EventType.THOUGHT:
+        return {
+            "type": "thought",
+            "content": event.data.get("content", ""),
+            "iteration": event.data.get("iteration", 0),
+        }
+    elif event.type == EventType.TOOL_CALL:
+        return {
+            "type": "tool_call",
+            "tool_name": event.data.get("tool_name", ""),
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "iteration": event.data.get("iteration", 0),
+        }
+    elif event.type == EventType.TOOL_RESULT:
+        return {
+            "type": "tool_result",
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "tool_name": event.data.get("tool_name", ""),
+            "success": event.data.get("success", False),
+            "duration_ms": event.data.get("duration_ms", 0),
+        }
+    elif event.type == EventType.FINAL_ANSWER:
+        return {
+            "type": "final_answer",
+            "content": event.data.get("content", ""),
+            "done": event.done,
+        }
+    elif event.type == EventType.ERROR:
+        return {
+            "type": "error",
+            "content": event.data.get("error", ""),
+        }
+    return None
+
+
 async def _stream_response(
     request: ChatCompletionRequest,
     query: str,
@@ -482,31 +599,119 @@ async def _stream_response(
             chunks = []
 
     elif kb_id and mode == "agent":
-        # 使用队列实现进度推送
-        progress_queue: asyncio.Queue = asyncio.Queue()
+        # Agent 模式：使用 EventBus→SSE 桥接
+        # 创建 asyncio.Queue 接收 AgentEvent
+        event_queue: asyncio.Queue = asyncio.Queue()
 
-        # 启动检索任务
-        retrieve_task = asyncio.create_task(
-            _retrieve_chunks(query, kb_id, mode, llm, progress_queue=progress_queue, expr=expr)
+        # 构建 Agent 组件
+        manager = get_model_manager()
+        milvus = _get_milvus_client()
+        hybrid_retriever = _build_hybrid_retriever()
+        bm25_retriever = BM25Retriever(milvus)
+
+        # 创建 AgentState 和 ToolRegistry
+        state = AgentState()
+        tool_registry = ToolRegistry()
+
+        # 创建 EventBus 并注册 handler 将事件放入 queue
+        event_bus = EventBus()
+
+        async def _event_to_queue(event: AgentEvent):
+            await event_queue.put(event)
+
+        event_bus.on(None, _event_to_queue)
+
+        # 注册工具
+        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
+        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id))
+        tool_registry.register(ListKnowledgeChunksTool())
+        tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
+
+        # 注册可选工具：web_search（当 searxng_url 配置时启用）
+        settings = get_settings()
+        if settings.searxng_url:
+            tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
+
+        # 创建 AgentConfig
+        config = AgentConfig(
+            max_iterations=settings.agent_max_iterations,
+            web_search_enabled=bool(settings.searxng_url),
+            system_prompt=render_system_prompt(
+                AgentConfig(),
+                kb_names=[kb_id],
+                available_tools=tool_registry.list_tools(),
+            ),
         )
 
-        # 持续读取进度事件并推送给前端，同时收集步骤
-        while not retrieve_task.done():
+        # 创建 AgentEngine
+        engine = AgentEngine(config, llm, tool_registry, event_bus)
+
+        # 构建 LLM 上下文（历史对话）
+        llm_context = history if history else None
+
+        # 启动 Agent 执行任务
+        agent_task = asyncio.create_task(
+            engine.execute(session_id or "", query, llm_context=llm_context)
+        )
+
+        # 从 event_queue 读取事件并转换为 SSE JSON
+        while not agent_task.done():
             try:
-                event = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
-                agent_steps_collected.append({"step": event.get("step", ""), "detail": event.get("detail", "")})
-                yield json.dumps(event, ensure_ascii=False)
+                event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                sse_data = _agent_event_to_sse(event)
+                if sse_data:
+                    agent_steps_collected.append(sse_data)
+                    yield json.dumps(sse_data, ensure_ascii=False)
             except asyncio.TimeoutError:
                 continue
 
-        # 获取检索结果
-        chunks, degraded = retrieve_task.result()
+        # 获取最终状态
+        result_state: AgentState = agent_task.result()
 
         # 排空队列中剩余的事件
-        while not progress_queue.empty():
-            event = progress_queue.get_nowait()
-            agent_steps_collected.append({"step": event.get("step", ""), "detail": event.get("detail", "")})
-            yield json.dumps(event, ensure_ascii=False)
+        while not event_queue.empty():
+            event = event_queue.get_nowait()
+            sse_data = _agent_event_to_sse(event)
+            if sse_data:
+                agent_steps_collected.append(sse_data)
+                yield json.dumps(sse_data, ensure_ascii=False)
+
+        # 发射 complete 事件
+        complete_event = {"type": "complete", "total_steps": len(result_state.steps)}
+        yield json.dumps(complete_event, ensure_ascii=False)
+
+        # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用
+        # 注意：工具持有的 state 对象和引擎内部的 state 是不同的
+        # knowledge_refs 被 KnowledgeSearchTool 写入到传给工具的 state 中
+        chunks = state.knowledge_refs
+        full_response = result_state.final_answer or ""
+
+        # 发送引用来源和元数据
+        references = await _build_references(chunks)
+        meta_event = {
+            "references": [ref.model_dump() for ref in references],
+            "metadata": {
+                "retrieval_mode": mode,
+                "degraded": False,
+                "llm_degraded": False,
+            },
+        }
+        yield json.dumps(meta_event, ensure_ascii=False)
+
+        # 保存消息到会话（不阻塞 SSE 关闭）
+        if session_id and full_response:
+            try:
+                await _save_message(session_id, "user", query)
+                refs_data = [ref.model_dump() for ref in references] if references else None
+                steps_data = agent_steps_collected if agent_steps_collected else None
+                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data)
+                # 标题生成放到后台，不阻塞 SSE 关闭
+                asyncio.create_task(_auto_title_session(session_id, query, full_response))
+            except Exception as e:
+                logger.warning("保存会话消息失败: %s", e)
+
+        # Agent 模式到此结束，不走后续的 LLM 生成流程
+        return
 
     elif kb_id:
         # 非 agent 模式：直接检索，无进度事件
@@ -593,7 +798,7 @@ async def _stream_response(
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
             await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data)
-            await _auto_title_session(session_id, query)
+            await _auto_title_session(session_id, query, full_response)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
 
@@ -716,7 +921,7 @@ async def chat_completions(request: ChatCompletionRequest):
             await _save_message(request.session_id, "user", user_query)
             refs_data = [ref.model_dump() for ref in references] if references else None
             await _save_message(request.session_id, "assistant", answer, references=refs_data)
-            await _auto_title_session(request.session_id, user_query)
+            await _auto_title_session(request.session_id, user_query, answer)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
 
