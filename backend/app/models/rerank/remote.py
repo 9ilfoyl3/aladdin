@@ -1,9 +1,15 @@
 """远程 Rerank API Provider
 
 通过 HTTP 调用外部 Rerank 服务。
-支持两种接口格式：
-1. 标准格式（TEI/Jina）：POST /rerank，body: {query, documents, top_n}
-2. 自定义格式：POST /ranking_score，body: {query, candidate}
+支持三种接口格式：
+1. OpenAI 兼容格式（DashScope/千问等）：POST /reranks，body: {model, query, documents, top_n}
+2. 标准格式（TEI/Jina）：POST /rerank，body: {query, documents, top_n}
+3. 自定义格式：POST /ranking_score，body: {query, candidate}
+
+自动检测逻辑：
+- URL 以 /v1 结尾 → OpenAI 兼容格式，拼接 /reranks
+- URL 仅为 host:port → 标准 TEI/Jina 格式，拼接 /rerank
+- URL 含其他具体路径 → 自定义格式，直接 POST
 """
 
 import logging
@@ -22,7 +28,10 @@ class RemoteReranker(RerankProvider):
         """初始化远程 Rerank Provider
 
         Args:
-            base_url: 远程服务完整地址（如 http://10.30.1.3:8001/ranking_score 或 http://server:8080/v1）
+            base_url: 远程服务完整地址，支持多种格式：
+                - OpenAI 兼容: https://dashscope.aliyuncs.com/compatible-api/v1
+                - TEI/Jina 标准: http://10.30.1.3:8001
+                - 自定义端点: http://10.30.1.3:8001/ranking_score
             model: 模型名称（可选，传给远程服务）
             api_key: API 密钥（可选）
             timeout: 请求超时时间（秒）
@@ -32,15 +41,24 @@ class RemoteReranker(RerankProvider):
         self.api_key = api_key
         self.timeout = timeout
 
-    def _is_custom_endpoint(self) -> bool:
-        """判断是否为自定义端点（URL 以具体路径结尾，如 /ranking_score）"""
-        # 如果 URL 以 /v1 结尾或不含特殊路径，认为是标准格式，需要拼接 /rerank
+    def _detect_format(self) -> str:
+        """检测 API 格式
+
+        Returns:
+            "openai" - OpenAI 兼容格式（URL 以 /v1 结尾），拼接 /reranks
+            "standard" - TEI/Jina 标准格式（仅 host:port），拼接 /rerank
+            "custom" - 自定义端点（含具体路径），直接 POST
+        """
         path = self.base_url.split("://", 1)[-1]  # 去掉协议
         segments = path.split("/")
-        # 只有 host:port 或以 /v1 结尾 → 标准格式
-        if len(segments) <= 1 or segments[-1] in ("", "v1"):
-            return False
-        return True
+        # 只有 host:port → 标准 TEI/Jina 格式
+        if len(segments) <= 1 or segments[-1] == "":
+            return "standard"
+        # 以 /v1 结尾 → OpenAI 兼容格式
+        if segments[-1] == "v1":
+            return "openai"
+        # 其他具体路径 → 自定义格式
+        return "custom"
 
     async def rerank(
         self, query: str, documents: list[str], top_k: int = 10
@@ -48,8 +66,9 @@ class RemoteReranker(RerankProvider):
         """调用远程服务对候选文档重排序
 
         自动检测接口格式：
-        - URL 含具体路径（如 /ranking_score）→ 直接 POST 到该 URL，body 用 {query, candidate}
-        - URL 为基础地址 → POST /rerank，body 用标准格式 {query, documents, top_n}
+        - URL 以 /v1 结尾 → OpenAI 兼容格式，POST /reranks
+        - URL 仅为 host:port → TEI/Jina 标准格式，POST /rerank
+        - URL 含其他路径 → 自定义格式，直接 POST
 
         Args:
             query: 查询文本
@@ -66,8 +85,20 @@ class RemoteReranker(RerankProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        fmt = self._detect_format()
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            if self._is_custom_endpoint():
+            if fmt == "openai":
+                # OpenAI 兼容格式（DashScope/千问 qwen3-rerank 等）
+                url = f"{self.base_url}/reranks"
+                payload = {
+                    "model": self.model,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": top_k,
+                }
+                resp = await client.post(url, headers=headers, json=payload)
+            elif fmt == "custom":
                 # 自定义格式：直接 POST 到完整 URL
                 payload = {
                     "query": query,
@@ -75,7 +106,7 @@ class RemoteReranker(RerankProvider):
                 }
                 resp = await client.post(self.base_url, headers=headers, json=payload)
             else:
-                # 标准格式：POST /rerank
+                # 标准 TEI/Jina 格式：POST /rerank
                 url = f"{self.base_url}/rerank"
                 payload = {
                     "query": query,
