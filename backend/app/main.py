@@ -10,8 +10,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.api.agent_config import router as agent_config_router
 from app.api.agent_node_config import router as agent_node_config_router
 from app.api.api_key import router as api_key_router
+from app.mcp_server import router as mcp_router
 from app.api.chat import router as chat_router
 from app.api.document import router as document_router
 from app.api.embed_config import router as embed_config_router
@@ -36,6 +38,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化数据库，加载模型配置"""
     await init_db()
+
+    # 自动迁移：添加可能缺失的新列
+    await _auto_migrate_columns()
+
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await load_embed_configs()
 
@@ -49,6 +55,34 @@ async def lifespan(app: FastAPI):
 
     # 关闭 TaskQueue 连接
     await _close_task_queue(app)
+
+
+async def _auto_migrate_columns() -> None:
+    """自动添加可能缺失的数据库列（轻量级迁移）"""
+    from sqlalchemy import text
+
+    migrations = [
+        # chat_messages.agent_steps (JSON, nullable) - 存储 Agent 思考步骤
+        ("chat_messages", "agent_steps", "ALTER TABLE chat_messages ADD COLUMN agent_steps JSON"),
+        # agent_presets 表（如果不存在则由 init_db 的 create_all 创建）
+    ]
+
+    async with async_session() as session:
+        for table, column, sql in migrations:
+            try:
+                # 检查列是否已存在
+                check_sql = text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = :table AND column_name = :column"
+                )
+                result = await session.execute(check_sql, {"table": table, "column": column})
+                if result.scalar() is None:
+                    await session.execute(text(sql))
+                    await session.commit()
+                    logger.info("自动迁移：添加列 %s.%s", table, column)
+            except Exception as e:
+                logger.debug("迁移检查跳过 %s.%s: %s", table, column, e)
+                await session.rollback()
 
 
 async def _init_task_queue(app: FastAPI) -> None:
@@ -155,7 +189,9 @@ app.include_router(llm_config_router)
 app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
 app.include_router(agent_node_config_router)
+app.include_router(agent_config_router)
 app.include_router(session_router)
+app.include_router(mcp_router)
 
 
 @app.get("/")

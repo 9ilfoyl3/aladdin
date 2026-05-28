@@ -35,8 +35,9 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""  # API 密钥（可选）
 
     # Agent
-    agent_max_iterations: int = 3
+    agent_max_iterations: int = 10
     agent_timeout: float = 30.0
+    searxng_url: str = "http://localhost:8080"
 
     # Chunking
     parent_chunk_size: int = 1500
