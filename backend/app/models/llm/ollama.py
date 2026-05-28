@@ -1,15 +1,22 @@
 """Ollama LLM 实现
 
 通过 httpx 异步客户端调用 Ollama 的 /api/chat 接口，
-支持同步生成和流式生成两种模式。
+支持同步生成、流式生成、以及 Function Calling 模式。
 """
 
 import json
 from typing import AsyncIterator
+from uuid import uuid4
 
 import httpx
 
-from app.models.provider import LLMProvider
+from app.models.provider import (
+    ChatResponse,
+    LLMProvider,
+    LLMToolCall,
+    StreamChunk,
+    TokenUsage,
+)
 
 
 class OllamaLLM(LLMProvider):
@@ -83,6 +90,166 @@ class OllamaLLM(LLMProvider):
             raise RuntimeError(f"Ollama 流式请求失败: HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise RuntimeError(f"Ollama 连接失败: {e}") from e
+
+    async def chat_with_tools(
+        self, messages: list[dict], tools: list[dict], **kwargs
+    ) -> ChatResponse:
+        """Function Calling: 非流式调用 Ollama /api/chat 并解析 tool_calls
+
+        Args:
+            messages: 对话消息列表
+            tools: OpenAI 格式的工具定义列表
+
+        Returns:
+            ChatResponse 包含 content、tool_calls、finish_reason、usage
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+            **kwargs,
+        }
+        try:
+            resp = await self._client.post("/api/chat", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            message = data.get("message", {})
+            content = message.get("content", "") or ""
+            raw_tool_calls = message.get("tool_calls", []) or []
+
+            # 解析 tool_calls：Ollama 返回 arguments 为 dict，需要 json.dumps
+            tool_calls = self._parse_tool_calls(raw_tool_calls)
+
+            # 确定 finish_reason
+            finish_reason = "tool_calls" if tool_calls else "stop"
+
+            # 解析 token 用量
+            usage = self._parse_usage(data)
+
+            return ChatResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Ollama Function Calling 请求失败: HTTP {e.response.status_code}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Ollama 连接失败: {e}") from e
+        except (KeyError, TypeError) as e:
+            raise RuntimeError(f"Ollama 响应格式异常: {e}") from e
+
+    async def stream_with_tools(
+        self, messages: list[dict], tools: list[dict], **kwargs
+    ) -> AsyncIterator[StreamChunk]:
+        """Streaming Function Calling: 流式调用 Ollama /api/chat
+
+        Ollama 流式模式下，tool_calls 出现在最终 chunk 的 message 中（非增量）。
+        普通 content 逐块返回，tool_calls 在 done=true 的 chunk 中一次性返回。
+
+        Args:
+            messages: 对话消息列表
+            tools: OpenAI 格式的工具定义列表
+
+        Yields:
+            StreamChunk 包含 content 或 tool_calls
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "stream": True,
+            **kwargs,
+        }
+        try:
+            async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    message = chunk.get("message", {})
+                    is_done = chunk.get("done", False)
+
+                    # 处理 content（逐块流式返回）
+                    content = message.get("content", "") or ""
+                    if content:
+                        yield StreamChunk(
+                            content=content,
+                            response_type="content",
+                        )
+
+                    # 处理 tool_calls（Ollama 在最终 chunk 中一次性返回）
+                    raw_tool_calls = message.get("tool_calls", []) or []
+                    if raw_tool_calls:
+                        tool_calls = self._parse_tool_calls(raw_tool_calls)
+                        yield StreamChunk(
+                            tool_calls=tool_calls,
+                            finish_reason="tool_calls",
+                            response_type="tool_call",
+                        )
+
+                    # 流结束标记
+                    if is_done:
+                        # 如果没有 tool_calls，发送 stop finish_reason
+                        if not raw_tool_calls:
+                            yield StreamChunk(
+                                finish_reason="stop",
+                            )
+                        break
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Ollama 流式 Function Calling 请求失败: HTTP {e.response.status_code}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Ollama 连接失败: {e}") from e
+
+    def _parse_tool_calls(self, raw_tool_calls: list) -> list[LLMToolCall]:
+        """解析 Ollama 格式的 tool_calls 为 LLMToolCall 列表
+
+        Ollama tool_call 格式: {"function": {"name": "...", "arguments": {...}}}
+        注意: Ollama 返回 arguments 为 dict，需要 json.dumps 转为字符串。
+        Ollama 不提供 tool_call id，需要自行生成。
+        """
+        tool_calls = []
+        for tc in raw_tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name", "")
+            arguments = func.get("arguments", {})
+
+            # Ollama 返回 arguments 为 dict，转为 JSON 字符串
+            if isinstance(arguments, dict):
+                args_str = json.dumps(arguments, ensure_ascii=False)
+            else:
+                args_str = str(arguments)
+
+            tool_calls.append(
+                LLMToolCall(
+                    id=f"call_{uuid4().hex[:8]}",
+                    function_name=name,
+                    arguments=args_str,
+                )
+            )
+        return tool_calls
+
+    def _parse_usage(self, data: dict) -> TokenUsage | None:
+        """从 Ollama 响应中解析 token 用量
+
+        Ollama 使用 prompt_eval_count 和 eval_count 字段。
+        """
+        prompt_tokens = data.get("prompt_eval_count", 0) or 0
+        completion_tokens = data.get("eval_count", 0) or 0
+        if prompt_tokens or completion_tokens:
+            return TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+        return None
 
     async def close(self):
         """关闭 HTTP 客户端连接"""
