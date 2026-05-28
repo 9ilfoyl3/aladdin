@@ -400,6 +400,8 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
     doc.status = "pending"
     doc.error_message = None
     doc.chunk_count = 0
+    doc.progress = 0
+    doc.progress_message = None
     await db.flush()
 
     # 重新触发管道（优先入队 Redis Stream）
@@ -499,6 +501,79 @@ async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> No
 # ============================================================
 
 
+class BatchRetryRequest(BaseModel):
+    """批量重试请求"""
+    doc_ids: list[str]
+
+
+@router.post("/api/documents/batch-retry", status_code=200)
+async def batch_retry_documents(body: BatchRetryRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """批量重试失败的文档"""
+    if not body.doc_ids:
+        return {"retried_count": 0, "total_requested": 0}
+
+    # 查询所有指定文档
+    result = await db.execute(
+        select(Document).where(Document.id.in_(body.doc_ids))
+    )
+    docs = result.scalars().all()
+
+    retried = []
+    skipped = []
+    for doc in docs:
+        if doc.status == "processing":
+            skipped.append(doc.id)
+            continue
+
+        # 清除旧 chunks
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(Chunk).where(Chunk.doc_id == doc.id))
+
+        # 重置状态
+        doc.status = "pending"
+        doc.error_message = None
+        doc.chunk_count = 0
+        doc.progress = 0
+        doc.progress_message = None
+        retried.append(doc)
+
+    await db.flush()
+
+    # 批量清理 Milvus 旧向量
+    kb_doc_map: dict[str, list[str]] = {}
+    for doc in retried:
+        kb_doc_map.setdefault(doc.kb_id, []).append(doc.id)
+
+    for kb_id, doc_ids in kb_doc_map.items():
+        try:
+            milvus = _get_milvus()
+            if await milvus.has_collection(kb_id):
+                await milvus.delete_by_doc_ids(kb_id, doc_ids)
+        except Exception as e:
+            logger.warning("批量重试 - 清除旧向量失败: %s", e)
+
+    # 批量入队
+    queue = _get_task_queue(request)
+    for doc in retried:
+        file_path = _UPLOAD_DIR / f"{doc.id}.{doc.file_type}"
+        if not file_path.exists():
+            doc.status = "failed"
+            doc.error_message = "原始文件已丢失"
+            continue
+
+        if queue is not None:
+            try:
+                msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path))
+                await queue.enqueue(msg)
+            except Exception:
+                asyncio.create_task(_run_pipeline_safe(str(file_path), doc.id, doc.kb_id))
+        else:
+            asyncio.create_task(_run_pipeline_safe(str(file_path), doc.id, doc.kb_id))
+
+    await db.commit()
+    return {"retried_count": len(retried), "skipped_count": len(skipped), "total_requested": len(body.doc_ids)}
+
+
 class BatchDeleteRequest(BaseModel):
     """批量删除请求"""
     doc_ids: list[str]
@@ -584,8 +659,7 @@ async def _batch_cleanup_background(
         try:
             milvus = _get_milvus()
             if await milvus.has_collection(kb_id):
-                for doc_id in doc_ids:
-                    await milvus.delete_by_doc_id(kb_id, doc_id)
+                await milvus.delete_by_doc_ids(kb_id, doc_ids)
         except Exception as e:
             logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
 

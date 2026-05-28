@@ -155,7 +155,9 @@ async def update_knowledge_base(
 
 @router.delete("/{kb_id}", status_code=204)
 async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
-    """删除知识库（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
+    """删除知识库（批量 SQL 快速删除，后台异步清理 Milvus 和文件）"""
+    from sqlalchemy import delete as sql_delete, update as sql_update
+
     result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = result.scalar_one_or_none()
     if kb is None:
@@ -167,9 +169,21 @@ async def delete_knowledge_base(kb_id: str, db: AsyncSession = Depends(get_db)):
     )
     doc_info_list = [{"id": row[0], "file_type": row[1]} for row in doc_result.all()]
 
-    # 级联删除 SQLite 数据（ORM cascade 会自动处理 folders、documents 和 chunks）
-    await db.delete(kb)
-    await db.flush()
+    # 标记正在处理的文档为 cancelled（阻止 pipeline 继续处理）
+    await db.execute(
+        sql_update(Document)
+        .where(Document.kb_id == kb_id)
+        .where(Document.status.in_(("pending", "processing")))
+        .values(status="cancelled")
+    )
+
+    # 批量 SQL 删除（比 ORM cascade 快 10-100x）
+    from app.schema.db import Chunk, Folder
+    await db.execute(sql_delete(Chunk).where(Chunk.kb_id == kb_id))
+    await db.execute(sql_delete(Document).where(Document.kb_id == kb_id))
+    await db.execute(sql_delete(Folder).where(Folder.kb_id == kb_id))
+    await db.execute(sql_delete(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+    await db.commit()
 
     # 后台异步清理 Milvus collection + 物理文件 + 缓存（不阻塞 API 响应）
     import asyncio

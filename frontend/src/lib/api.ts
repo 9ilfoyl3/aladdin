@@ -103,6 +103,11 @@ export const documentApi = {
       method: 'POST',
       body: JSON.stringify({ doc_ids: docIds }),
     }),
+  batchRetry: (docIds: string[]) =>
+    request<{ retried_count: number; skipped_count: number; total_requested: number }>('/documents/batch-retry', {
+      method: 'POST',
+      body: JSON.stringify({ doc_ids: docIds }),
+    }),
   retry: (id: string) =>
     request<unknown>(`/documents/${id}/retry`, { method: 'POST' }),
   chunks: (id: string) => request<unknown[]>(`/documents/${id}/chunks`),

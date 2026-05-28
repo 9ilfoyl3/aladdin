@@ -265,6 +265,22 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
         if not body.base_url:
             return EmbedTestResponse(success=False, message="远程服务地址不能为空")
 
+        # 先调 /health 快速验证服务在线（不进推理队列）
+        import httpx
+        health_url = body.base_url.rstrip("/").rsplit("/v1", 1)[0] + "/health"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(health_url)
+                if resp.status_code != 200:
+                    return EmbedTestResponse(success=False, message=f"服务不可达 (HTTP {resp.status_code})")
+                data = resp.json()
+                if data.get("status") != "ready":
+                    return EmbedTestResponse(success=False, message=f"服务未就绪: {data.get('status')}")
+        except httpx.ConnectError:
+            return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
+        except httpx.TimeoutException:
+            return EmbedTestResponse(success=False, message="连接超时，请检查地址和网络")
+
         if body.config_type == "embedding":
             from app.models.embedding.remote import RemoteEmbedder
             embedder = RemoteEmbedder(
