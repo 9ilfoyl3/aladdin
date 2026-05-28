@@ -192,32 +192,6 @@ export const llmConfigApi = {
     }),
 }
 
-// Agent 节点配置接口类型
-export interface AgentNodeConfigResponse {
-  router_model_id: string | null
-  router_model_name: string | null
-  planner_model_id: string | null
-  planner_model_name: string | null
-  reflector_model_id: string | null
-  reflector_model_name: string | null
-}
-
-export interface AgentNodeConfigUpdate {
-  router_model_id?: string | null
-  planner_model_id?: string | null
-  reflector_model_id?: string | null
-}
-
-// Agent 节点配置接口
-export const agentNodeConfigApi = {
-  get: () => request<AgentNodeConfigResponse>('/agent-node-configs'),
-  update: (data: AgentNodeConfigUpdate) =>
-    request<AgentNodeConfigResponse>('/agent-node-configs', {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
-}
-
 // Embedding/Rerank 配置接口类型
 export interface EmbedConfigItem {
   id: string

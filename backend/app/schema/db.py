@@ -164,17 +164,6 @@ class EmbedConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-class AgentNodeConfig(Base):
-    """Agent 节点模型配置表"""
-    __tablename__ = "agent_node_config"
-
-    node_name: Mapped[str] = mapped_column(String(50), primary_key=True)
-    model_config_id: Mapped[Optional[str]] = mapped_column(
-        String(36), ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
 class AgentPreset(Base):
     """Agent 预设配置表"""
     __tablename__ = "agent_presets"

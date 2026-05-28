@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.api.agent_config import router as agent_config_router
-from app.api.agent_node_config import router as agent_node_config_router
 from app.api.api_key import router as api_key_router
 from app.mcp_server import router as mcp_router
 from app.api.chat import router as chat_router
@@ -188,7 +187,6 @@ app.include_router(api_key_router)
 app.include_router(llm_config_router)
 app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
-app.include_router(agent_node_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
 app.include_router(mcp_router)
