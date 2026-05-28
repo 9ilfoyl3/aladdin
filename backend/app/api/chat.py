@@ -451,7 +451,7 @@ async def _retrieve_chunks(
 
         # 3. 注册工具
         tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
-        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id))
+        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
         tool_registry.register(ListKnowledgeChunksTool())
         tool_registry.register(FinalAnswerTool(state, event_bus, ""))
 
@@ -623,7 +623,7 @@ async def _stream_response(
 
         # 注册工具
         tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
-        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id))
+        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
         tool_registry.register(ListKnowledgeChunksTool())
         tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
 

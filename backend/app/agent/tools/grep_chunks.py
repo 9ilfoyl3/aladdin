@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 class GrepChunksTool(BaseTool):
     """BM25 关键词精确匹配工具"""
 
-    def __init__(self, retriever: BM25Retriever, kb_id: str):
+    def __init__(self, retriever: BM25Retriever, kb_id: str, state=None):
         self._retriever = retriever
         self._kb_id = kb_id
+        self._state = state
 
     @property
     def name(self) -> str:
@@ -72,6 +73,11 @@ class GrepChunksTool(BaseTool):
                     idx = seen_ids[r.chunk_id]
                     if r.score > deduped[idx].score:
                         deduped[idx] = r
+
+            # 收集引用到 AgentState（供最终返回引用来源）
+            if self._state:
+                for r in deduped:
+                    self._state.knowledge_refs.append(r)
 
             # XML 格式化输出
             output = self._format_xml(deduped)
