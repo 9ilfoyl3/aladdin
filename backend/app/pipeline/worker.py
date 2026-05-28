@@ -154,16 +154,31 @@ class PipelineWorker:
             await asyncio.sleep(self._health_check_interval)
 
     async def _ping_embedding(self) -> bool:
-        """检查 Embedding 服务是否可用（发送一个简单请求）"""
+        """检查 Embedding 服务是否可用（调用 /health 端点，不占用推理队列）"""
         try:
-            from app.models.manager import get_model_manager
-            manager = get_model_manager()
-            # 发送一个最小的 embed 请求测试连通性
-            await asyncio.wait_for(
-                manager.embedder.embed(["ping"]),
-                timeout=10.0,
-            )
-            return True
+            from app.config import get_settings
+            import httpx
+
+            settings = get_settings()
+            base_url = settings.embed_base_url
+            if not base_url:
+                # 没配置远程地址，回退到发真实请求
+                from app.models.manager import get_model_manager
+                manager = get_model_manager()
+                await asyncio.wait_for(
+                    manager.embedder.embed(["ping"]),
+                    timeout=10.0,
+                )
+                return True
+
+            # 调 /health 端点（不经过推理队列）
+            health_url = base_url.rstrip("/").rsplit("/v1", 1)[0] + "/health"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(health_url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("status") == "ready"
+            return False
         except Exception as e:
             logger.debug("Embedding health check failed: %s", e)
             return False

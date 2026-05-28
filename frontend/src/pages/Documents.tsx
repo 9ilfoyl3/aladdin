@@ -244,6 +244,19 @@ function Documents() {
     },
   })
 
+  const batchRetryMutation = useMutation({
+    mutationFn: (docIds: string[]) => documentApi.batchRetry(docIds),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast(`已重试 ${data.retried_count} 个文档${data.skipped_count > 0 ? `，跳过 ${data.skipped_count} 个` : ''}`)
+      setSelectedIds(new Set())
+      setSelectionMode(false)
+    },
+    onError: (err) => {
+      toast(`批量重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    },
+  })
+
   // 重试失败文档
   const retryMutation = useMutation({
     mutationFn: (id: string) => documentApi.retry(id),
@@ -518,6 +531,16 @@ function Documents() {
               >
                 <Trash2 className="h-4 w-4" />
                 删除 ({selectedIds.size})
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={selectedIds.size === 0 || batchRetryMutation.isPending}
+                onClick={(e) => { e.stopPropagation(); batchRetryMutation.mutate(Array.from(selectedIds)) }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <RotateCcw className="h-4 w-4" />
+                重试 ({selectedIds.size})
               </Button>
               <Button
                 variant="ghost"

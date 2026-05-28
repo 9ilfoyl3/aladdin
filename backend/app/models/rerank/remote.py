@@ -45,19 +45,18 @@ class RemoteReranker(RerankProvider):
         """检测 API 格式
 
         Returns:
-            "openai" - OpenAI 兼容格式（URL 以 /v1 结尾），拼接 /reranks
-            "standard" - TEI/Jina 标准格式（仅 host:port），拼接 /rerank
+            "standard" - 标准格式（URL 以 /v1 结尾或仅 host:port），拼接 /rerank
             "custom" - 自定义端点（含具体路径），直接 POST
         """
         path = self.base_url.split("://", 1)[-1]  # 去掉协议
         segments = path.split("/")
-        # 只有 host:port → 标准 TEI/Jina 格式
+        # 只有 host:port → 标准格式
         if len(segments) <= 1 or segments[-1] == "":
             return "standard"
-        # 以 /v1 结尾 → OpenAI 兼容格式
+        # 以 /v1 结尾 → 标准格式（拼接 /rerank）
         if segments[-1] == "v1":
-            return "openai"
-        # 其他具体路径 → 自定义格式
+            return "standard"
+        # 含其他路径 → 自定义端点
         return "custom"
 
     async def rerank(
@@ -88,17 +87,7 @@ class RemoteReranker(RerankProvider):
         fmt = self._detect_format()
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            if fmt == "openai":
-                # OpenAI 兼容格式（DashScope/千问 qwen3-rerank 等）
-                url = f"{self.base_url}/reranks"
-                payload = {
-                    "model": self.model,
-                    "query": query,
-                    "documents": documents,
-                    "top_n": top_k,
-                }
-                resp = await client.post(url, headers=headers, json=payload)
-            elif fmt == "custom":
+            if fmt == "custom":
                 # 自定义格式：直接 POST 到完整 URL
                 payload = {
                     "query": query,
@@ -106,7 +95,7 @@ class RemoteReranker(RerankProvider):
                 }
                 resp = await client.post(self.base_url, headers=headers, json=payload)
             else:
-                # 标准 TEI/Jina 格式：POST /rerank
+                # 标准格式：POST /rerank
                 url = f"{self.base_url}/rerank"
                 payload = {
                     "query": query,
