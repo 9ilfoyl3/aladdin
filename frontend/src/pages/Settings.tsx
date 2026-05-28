@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, RefreshCw, Bot, Layers } from 'lucide-react'
+import { Save, RefreshCw, Layers } from 'lucide-react'
 import { systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,8 +10,6 @@ import { Label } from '@/components/ui/label'
 
 // 配置数据类型
 interface SystemConfig {
-  agent_max_iterations: number
-  agent_timeout: number
   parent_chunk_size: number
   child_chunk_size: number
   chunk_overlap: number
@@ -44,15 +42,6 @@ function Settings() {
   const [saved, setSaved] = useState(false)
 
   const configGroups: ConfigGroup[] = [
-    {
-      title: 'Agent 配置',
-      icon: <Bot className="h-5 w-5 text-primary" />,
-      description: 'Agent 编排参数，控制迭代检索的深度和超时',
-      fields: [
-        { key: 'agent_max_iterations', label: '最大迭代次数', type: 'number' },
-        { key: 'agent_timeout', label: '超时时间 (秒)', type: 'number' },
-      ],
-    },
     {
       title: '切片配置',
       icon: <Layers className="h-5 w-5 text-primary" />,

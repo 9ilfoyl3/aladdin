@@ -38,8 +38,6 @@ class SystemConfigResponse(BaseModel):
     embed_base_url: str
     rerank_model: str
     rerank_base_url: str
-    agent_max_iterations: int
-    agent_timeout: float
     parent_chunk_size: int
     child_chunk_size: int
     chunk_overlap: int
@@ -62,8 +60,6 @@ class SystemConfigUpdate(BaseModel):
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
-    agent_max_iterations: int | None = None
-    agent_timeout: float | None = None
     parent_chunk_size: int | None = None
     child_chunk_size: int | None = None
     chunk_overlap: int | None = None
@@ -168,8 +164,6 @@ async def get_config():
         embed_base_url=settings.embed_base_url,
         rerank_model=settings.rerank_model,
         rerank_base_url=settings.rerank_base_url,
-        agent_max_iterations=settings.agent_max_iterations,
-        agent_timeout=settings.agent_timeout,
         parent_chunk_size=settings.parent_chunk_size,
         child_chunk_size=settings.child_chunk_size,
         chunk_overlap=settings.chunk_overlap,
@@ -221,8 +215,6 @@ async def update_config(body: SystemConfigUpdate):
         embed_base_url=settings.embed_base_url,
         rerank_model=settings.rerank_model,
         rerank_base_url=settings.rerank_base_url,
-        agent_max_iterations=settings.agent_max_iterations,
-        agent_timeout=settings.agent_timeout,
         parent_chunk_size=settings.parent_chunk_size,
         child_chunk_size=settings.child_chunk_size,
         chunk_overlap=settings.chunk_overlap,

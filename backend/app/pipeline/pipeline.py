@@ -536,6 +536,9 @@ class DocumentPipeline:
     ):
         """选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
 
+        从系统配置读取 chunk 参数（parent_chunk_size, child_chunk_size, chunk_overlap）
+        传递给 Chunker 实例。
+
         Args:
             session: 数据库会话
             kb_id: 知识库 ID
@@ -545,6 +548,13 @@ class DocumentPipeline:
         Returns:
             BaseChunker 实例
         """
+        settings = get_settings()
+        chunk_kwargs = {
+            "parent_size": settings.parent_chunk_size,
+            "child_size": settings.child_chunk_size,
+            "overlap": settings.chunk_overlap,
+        }
+
         # 查询知识库 config 中是否指定了 chunker_type
         chunker_type = None
         result = await session.execute(
@@ -558,17 +568,21 @@ class DocumentPipeline:
             # 手动覆盖：使用知识库配置指定的 Chunker
             logger.info("知识库 %s 手动指定 chunker_type=%s", kb_id, chunker_type)
             try:
-                return ChunkerFactory.create(chunker_type)
-            except ValueError:
+                # 只有 naive 类型接受 chunk 参数，其他类型不传
+                kwargs = chunk_kwargs if chunker_type == "naive" else {}
+                return ChunkerFactory.create(chunker_type, **kwargs)
+            except (ValueError, TypeError):
                 logger.warning(
-                    "知识库 %s 指定的 chunker_type=%s 未注册，回退到自动路由",
+                    "知识库 %s 指定的 chunker_type=%s 创建失败，回退到自动路由",
                     kb_id, chunker_type,
                 )
 
         # 自动路由：根据文件类型和内容特征选择
         selected_type = ChunkerRouter.select(file_type, content)
         logger.info("自动路由选择 chunker_type=%s (file_type=%s)", selected_type, file_type)
-        return ChunkerFactory.create(selected_type)
+        # 只有 naive 类型接受 chunk 参数
+        kwargs = chunk_kwargs if selected_type == "naive" else {}
+        return ChunkerFactory.create(selected_type, **kwargs)
 
     async def _embed_with_progress(
         self,

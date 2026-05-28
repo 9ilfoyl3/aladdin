@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Save, Route, RefreshCw, Brain, Search, LayoutGrid, List } from 'lucide-react'
-import { llmConfigApi, agentNodeConfigApi } from '@/lib/api'
-import type { AgentNodeConfigUpdate } from '@/lib/api'
+import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Search, LayoutGrid, List } from 'lucide-react'
+import { llmConfigApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -133,45 +132,6 @@ function Models() {
   const [dialogTestResult, setDialogTestResult] = useState<{ success: boolean; message: string; reply?: string } | null>(null)
   const [dialogTesting, setDialogTesting] = useState(false)
 
-  // Agent 节点配置相关状态
-  const { data: nodeConfig } = useQuery({
-    queryKey: ['agent-node-configs'],
-    queryFn: () => agentNodeConfigApi.get(),
-  })
-
-  const [nodeForm, setNodeForm] = useState<AgentNodeConfigUpdate>({})
-  const [nodeConfigSaved, setNodeConfigSaved] = useState(false)
-
-  // 同步节点配置到表单
-  useEffect(() => {
-    if (nodeConfig) {
-      setNodeForm({
-        router_model_id: nodeConfig.router_model_id,
-        planner_model_id: nodeConfig.planner_model_id,
-        reflector_model_id: nodeConfig.reflector_model_id,
-      })
-    }
-  }, [nodeConfig])
-
-  const nodeConfigMutation = useMutation({
-    mutationFn: (data: AgentNodeConfigUpdate) => agentNodeConfigApi.update(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['agent-node-configs'] })
-      setNodeConfigSaved(true)
-      setTimeout(() => setNodeConfigSaved(false), 2000)
-    },
-  })
-
-  function handleNodeConfigSave() {
-    // null 值转换为空字符串以清除绑定
-    const payload: AgentNodeConfigUpdate = {
-      router_model_id: nodeForm.router_model_id === null ? '' : nodeForm.router_model_id,
-      planner_model_id: nodeForm.planner_model_id === null ? '' : nodeForm.planner_model_id,
-      reflector_model_id: nodeForm.reflector_model_id === null ? '' : nodeForm.reflector_model_id,
-    }
-    nodeConfigMutation.mutate(payload)
-  }
-
   async function handleTestInDialog() {
     setDialogTesting(true)
     setDialogTestResult(null)
@@ -239,129 +199,10 @@ function Models() {
           <p className="text-muted-foreground text-sm mt-1">配置多个 LLM 模型，在对话中灵活切换</p>
         </div>
         <div className="flex items-center gap-2">
-          {nodeConfigSaved && (
-            <span className="text-sm text-green-600 flex items-center gap-1 animate-in fade-in duration-200">
-              <CheckCircle className="h-4 w-4" />
-              已保存
-            </span>
-          )}
-          <Button
-            onClick={handleNodeConfigSave}
-            disabled={nodeConfigMutation.isPending}
-            variant="outline"
-            className="gap-2 cursor-pointer"
-          >
-            <Save className="h-4 w-4" />
-            {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
-          </Button>
           <Button onClick={openCreate} className="gap-2 cursor-pointer">
             <Plus className="h-4 w-4" />
             添加模型
           </Button>
-        </div>
-      </div>
-
-      {/* Agent 节点模型配置 - 紧凑内联 */}
-      <div className="mb-6 pb-6 border-b border-border">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                <Route className="h-4 w-4 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">查询路由</h3>
-                <p className="text-[11px] text-muted-foreground">判断意图，决定是否检索</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.router_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
-                <RefreshCw className="h-4 w-4 text-amber-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">意图规划</h3>
-                <p className="text-[11px] text-muted-foreground">拆分多意图查询，生成检索计划</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.planner_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, planner_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                <Brain className="h-4 w-4 text-violet-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">结果反思</h3>
-                <p className="text-[11px] text-muted-foreground">评估结果，决定是否重检索</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.reflector_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         </div>
       </div>
 

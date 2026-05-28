@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     searxng_url: str = "http://localhost:8080"
 
     # Chunking
-    parent_chunk_size: int = 1500
-    child_chunk_size: int = 300
-    chunk_overlap: int = 50
+    parent_chunk_size: int = 2500
+    child_chunk_size: int = 450
+    chunk_overlap: int = 70
 
     # Redis（检索缓存 + 任务队列）
     redis_url: str = "redis://localhost:6379/0"

@@ -14,7 +14,7 @@ class NaiveChunker(BaseChunker):
     内部委托给 HierarchicalChunker，使用结构感知 + 父子 chunk 切分策略。
     """
 
-    def __init__(self, parent_size: int = 1500, child_size: int = 300, overlap: int = 50):
+    def __init__(self, parent_size: int = 2500, child_size: int = 450, overlap: int = 70):
         self._chunker = HierarchicalChunker(
             parent_size=parent_size,
             child_size=child_size,
