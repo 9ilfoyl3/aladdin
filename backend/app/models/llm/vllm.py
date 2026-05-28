@@ -281,6 +281,26 @@ class VllmLLM(LLMProvider):
                     delta = choices[0].get("delta", {})
                     finish_reason = choices[0].get("finish_reason") or ""
 
+                    # 防御性检查：某些模型在特定 chunk 中 delta 可能是字符串而非字典
+                    if not isinstance(delta, dict):
+                        # delta 是字符串时，视为纯 content
+                        if delta:
+                            yield StreamChunk(
+                                content=str(delta),
+                                tool_calls=None,
+                                finish_reason="",
+                                response_type="content",
+                            )
+                        if finish_reason:
+                            final_tool_calls = self._build_tool_calls(tool_call_map)
+                            yield StreamChunk(
+                                content="",
+                                tool_calls=final_tool_calls if final_tool_calls else None,
+                                finish_reason=finish_reason,
+                                response_type="tool_call" if final_tool_calls else "content",
+                            )
+                        continue
+
                     # 处理 tool_calls delta（累积模式）
                     delta_tool_calls = delta.get("tool_calls")
                     if delta_tool_calls:
