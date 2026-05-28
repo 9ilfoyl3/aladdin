@@ -9,6 +9,7 @@ import ApiKeys from './pages/ApiKeys'
 import Models from './pages/Models'
 import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
+import AgentConfig from './pages/AgentConfig'
 
 // 应用根组件：路由配置
 function App() {
@@ -21,6 +22,7 @@ function App() {
         <Route path="chat" element={<Chat />} />
         <Route path="retrieval" element={<Retrieval />} />
         <Route path="models" element={<Models />} />
+        <Route path="agent-config" element={<AgentConfig />} />
         <Route path="embed-config" element={<EmbedConfig />} />
         <Route path="ocr-services" element={<OcrServices />} />
         <Route path="api-keys" element={<ApiKeys />} />

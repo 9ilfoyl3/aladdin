@@ -336,6 +336,23 @@ export const ocrConfigApi = {
 
 
 
+// Agent 预设配置接口
+export const agentPresetApi = {
+  list: () => request<unknown[]>('/agent-presets'),
+  create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean }) =>
+    request<unknown>('/agent-presets', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Record<string, unknown>) =>
+    request<unknown>(`/agent-presets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/agent-presets/${id}`, { method: 'DELETE' }),
+}
+
 // 会话相关接口类型
 export interface SessionItem {
   id: string
@@ -352,7 +369,16 @@ export interface SessionMessageItem {
   role: string
   content: string
   references: unknown[] | null
-  agent_steps: { step: string; detail: string }[] | null
+  agent_steps: {
+    type: string
+    content: boolean
+    tool_call_id: string
+    tool_name: string
+    success: any
+    duration_ms: number | undefined
+    step: string
+    detail: string
+  }[] | null
   created_at: string
 }
 
