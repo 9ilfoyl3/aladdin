@@ -106,7 +106,14 @@ class HybridRetriever(BaseRetriever):
             logger.warning("Reranker 异常，跳过重排序: %s", e)
             reranked = fused[:top_k]
 
-        # 4. 父块扩展
+        # 4. Composite Scoring：综合 rerank 分数、RRF 基础分数和位置先验
+        reranked = self._apply_composite_scoring(reranked)
+
+        # 5. MMR 去冗余：去除高度重复的 chunk，确保结果多样性
+        reranked = self._apply_mmr(reranked)
+        print(f"[Retrieval] MMR 去冗余后: {len(reranked)} 条")
+
+        # 6. 父块扩展
         expanded = await self._expand_parent(reranked)
 
         logger.debug("HybridRetriever 在 kb=%s 中检索到 %d 条结果", kb_id, len(expanded))
@@ -164,9 +171,122 @@ class HybridRetriever(BaseRetriever):
             weight = type_weights.get(element_type, 1.0)
             scores[chunk_id] *= weight
 
-        # 按分数降序排列
+        # 按分数降序排列，将 RRF 分数写入 metadata 供后续 composite scoring 使用
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-        return [items[cid] for cid in sorted_ids]
+        fused_results = []
+        for cid in sorted_ids:
+            item = items[cid]
+            item.metadata["_rrf_score"] = scores[cid]
+            fused_results.append(item)
+        return fused_results
+
+    @staticmethod
+    def _composite_score(
+        rerank_score: float,
+        base_score: float,
+        source_weight: float = 1.0,
+    ) -> float:
+        """综合评分：融合 rerank 分数、原始检索分数和位置先验
+
+        公式: composite = 0.6 * rerank_score + 0.3 * base_score + 0.1 * source_weight
+        结果 clamp 到 [0.0, 1.0]
+
+        Args:
+            rerank_score: reranker 输出分数
+            base_score: 原始检索分数（RRF 融合分数）
+            source_weight: 位置先验权重，默认 1.0
+        """
+        composite = 0.6 * rerank_score + 0.3 * base_score + 0.1 * source_weight
+        return max(0.0, min(1.0, composite))
+
+    @staticmethod
+    def _jaccard_tokens(text_a: str, text_b: str) -> float:
+        """基于字符级 token set 的 Jaccard 相似度
+
+        对中文文本使用字符级分词（每个字符作为一个 token），
+        适合检测高度重叠的 chunk 对。
+
+        Returns:
+            Jaccard 相似度 [0.0, 1.0]，两个空集返回 0.0
+        """
+        set_a = set(text_a)
+        set_b = set(text_b)
+        if not set_a and not set_b:
+            return 0.0
+        intersection = set_a & set_b
+        union = set_a | set_b
+        return len(intersection) / len(union)
+
+    @staticmethod
+    def _apply_mmr(
+        results: list[RetrievalResult],
+        lambda_param: float = 0.7,
+        threshold: float = 0.7,
+    ) -> list[RetrievalResult]:
+        """Maximal Marginal Relevance 去冗余
+
+        迭代选择结果，跳过与已选结果 Jaccard 相似度超过 threshold 的候选，
+        确保返回结果多样性。
+
+        Args:
+            results: 按 composite score 排序的检索结果
+            lambda_param: MMR lambda 参数，平衡相关性和多样性（WeKnora 验证值 0.7）
+            threshold: Jaccard 相似度阈值，超过此值的候选被跳过
+
+        Returns:
+            去冗余后的结果列表
+        """
+        if not results:
+            return results
+
+        selected: list[RetrievalResult] = []
+
+        for candidate in results:
+            # 检查候选与所有已选结果的 Jaccard 相似度
+            is_redundant = False
+            for sel in selected:
+                sim = HybridRetriever._jaccard_tokens(candidate.content, sel.content)
+                if sim > threshold:
+                    is_redundant = True
+                    break
+
+            if not is_redundant:
+                selected.append(candidate)
+
+        return selected
+
+    def _apply_composite_scoring(
+        self, results: list[RetrievalResult]
+    ) -> list[RetrievalResult]:
+        """对 rerank 后的结果应用综合评分，按 composite score 重新排序
+
+        source_weight 基于结果在原始检索列表中的位置：
+        第 1 名 = 1.0，逐步递减，最低 0.1
+        """
+        if not results:
+            return results
+
+        scored = []
+        total = len(results)
+        for i, r in enumerate(results):
+            rerank_score = r.score
+            base_score = r.metadata.get("_rrf_score", 0.0)
+            # 位置先验：排名越靠前权重越高，线性递减，最低 0.1
+            source_weight = max(0.1, 1.0 - (i / total)) if total > 1 else 1.0
+            composite = self._composite_score(rerank_score, base_score, source_weight)
+            scored.append(
+                RetrievalResult(
+                    chunk_id=r.chunk_id,
+                    content=r.content,
+                    score=composite,
+                    doc_id=r.doc_id,
+                    metadata=r.metadata,
+                    child_content=r.child_content,
+                )
+            )
+
+        scored.sort(key=lambda x: x.score, reverse=True)
+        return scored
 
     async def _rerank(
         self, query: str, results: list[RetrievalResult], top_k: int

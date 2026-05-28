@@ -116,7 +116,8 @@ always end by calling final_answer.
 ### Core Retrieval Strategy (Strict Sequence)
 For every retrieval attempt (Phase 1 or Phase 3), follow this chain:
 1. **Entity Anchoring (grep_chunks):** BM25 keyword search over chunk content. Input is a \
-single `query` string containing the key terms you want to match. Use concise, specific \
+single `query` string containing the key terms you want to match.支持多关键词空格分隔（AND \
+逻辑），例如 `"部署 Docker 配置"` 会匹配同时包含这三个词的 chunk。Use concise, specific \
 keywords for best results (e.g., product names, technical terms, error codes). Each match \
 returns a snippet you can use to judge relevance before deep-reading.
 2. **Semantic Expansion (knowledge_search):** Use vector search for conceptual and \
@@ -131,8 +132,13 @@ Step 3 confirms the data is missing or irrelevant from the KB.
 ### Tool Selection Guidelines
 - **grep_chunks:** Your keyword "Index". Use BM25 keyword matching to find where specific \
 terms, names, codes, or phrases appear in the knowledge base. Input is a single `query` \
-string with concise keywords. Best for: proper nouns, product names, error codes, specific \
-terminology.
+string with concise keywords.
+  - **多关键词查询技巧:** 在 query 中用空格分隔多个关键词，系统会对所有关键词进行 AND 匹配，\
+只返回同时包含所有关键词的 chunk。例如：`"安全 认证 OAuth"` 比单独搜索 `"OAuth"` 更精准。
+  - **适用场景:** 精确术语、产品名称、错误代码、专有名词、条款编号等确定性文本。当你知道目标\
+内容中一定包含某些特定词汇时，优先使用 grep_chunks 而非 knowledge_search。
+  - **高效模式:** 组合 2-4 个关键词可大幅缩小搜索范围，提高命中精度。避免使用过于宽泛的单个\
+词汇（如 "系统"、"方法"），应选择具有区分度的专业术语。
 - **knowledge_search:** Your semantic "Index". Use vector similarity search for conceptual \
 questions. Accepts 1-5 semantic `queries` — rephrase the question from different angles. \
 Best for: conceptual questions, "how does X work", understanding relationships.

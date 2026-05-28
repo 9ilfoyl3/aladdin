@@ -51,58 +51,289 @@ _TABLE_BLOCK_RE = re.compile(r'<table>.*?</table>', re.DOTALL)
 _MD_TABLE_LINE_RE = re.compile(r'^\|.*\|$')
 
 
+# Markdown 标题正则：匹配 # ~ ###### 开头的行
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
+
+
+@dataclass
+class DocProfile:
+    """文档结构 profile，用于自动选择切分策略"""
+    heading_count: int       # Markdown 标题数
+    structure_count: int     # 结构标记数（条款编号等，如 "第X条"、"Article X"）
+    paragraph_count: int     # 段落数（双换行分隔）
+    total_chars: int         # 总字符数
+    avg_paragraph_len: float # 平均段落长度
+
+
+def _profile_document(text: str) -> DocProfile:
+    """统计文档的结构信号密度，生成 DocProfile。
+
+    分析文本中的 Markdown 标题数、结构标记数（条款编号等）、段落数等，
+    用于后续策略选择。
+    """
+    # 统计 Markdown 标题数
+    heading_count = len(re.findall(r'^#{1,6}\s+', text, re.MULTILINE))
+
+    # 统计结构标记数（排除 Markdown 标题，因为已单独统计）
+    structure_patterns = [
+        r'^[一二三四五六七八九十]+[、．.]',
+        r'^（[一二三四五六七八九十]+）',
+        r'^\([一二三四五六七八九十]+\)',
+        r'^\d+[、．.\s]',
+        r'^第[一二三四五六七八九十百千\d]+[条章节款项]',
+    ]
+    structure_re = re.compile('|'.join(f'(?:{p})' for p in structure_patterns), re.MULTILINE)
+    structure_count = len(structure_re.findall(text))
+
+    # 统计段落数（双换行分隔）
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
+    paragraph_count = len(paragraphs)
+
+    # 总字符数
+    total_chars = len(text)
+
+    # 平均段落长度
+    avg_paragraph_len = total_chars / paragraph_count if paragraph_count > 0 else float(total_chars)
+
+    return DocProfile(
+        heading_count=heading_count,
+        structure_count=structure_count,
+        paragraph_count=paragraph_count,
+        total_chars=total_chars,
+        avg_paragraph_len=avg_paragraph_len,
+    )
+
+
+def _select_strategy(profile: DocProfile) -> list[str]:
+    """根据 DocProfile 返回策略链（优先级列表）。
+
+    - heading_count >= 3 → ["heading", "heuristic", "legacy"]
+    - structure_count >= 2 → ["heuristic", "legacy"]
+    - 其他 → ["legacy"]
+    """
+    if profile.heading_count >= 3:
+        return ["heading", "heuristic", "legacy"]
+    if profile.structure_count >= 2:
+        return ["heuristic", "legacy"]
+    return ["legacy"]
+
+
+def _validate_chunks(chunks: list[str], min_size: int, max_size: int) -> bool:
+    """验证切分质量。
+
+    - 至少有 1 个 chunk
+    - 所有 chunk 长度在 [min_size, max_size] 范围内
+
+    Returns:
+        True 如果验证通过，False 否则。
+    """
+    if not chunks:
+        return False
+    return all(min_size <= len(c) <= max_size for c in chunks)
+
+
+class _HeaderTracker:
+    """标题栈追踪器，维护 Markdown 标题层级并生成面包屑字符串。
+
+    当遇到新标题时，弹出同级或更低级别的标题，压入新标题，
+    然后可通过 breadcrumb() 获取当前层级的面包屑（如 `# 顶级标题 > ## 二级标题`）。
+    """
+
+    def __init__(self):
+        # 栈元素: (level, heading_text)，level 为 1~6
+        self._stack: list[tuple[int, str]] = []
+
+    def push(self, level: int, text: str) -> None:
+        """遇到新标题时更新栈：弹出同级或更低级别的标题，压入新标题。"""
+        # 弹出所有 level >= 当前 level 的标题（同级或子级）
+        while self._stack and self._stack[-1][0] >= level:
+            self._stack.pop()
+        self._stack.append((level, text.strip()))
+
+    def breadcrumb(self) -> str:
+        """生成当前标题栈的面包屑字符串。
+
+        格式: `# 顶级标题 > ## 二级标题 > ### 三级标题`
+        栈为空时返回空字符串。
+        """
+        if not self._stack:
+            return ""
+        parts = [f"{'#' * level} {text}" for level, text in self._stack]
+        return " > ".join(parts)
+
+    def feed_line(self, line: str) -> bool:
+        """检测一行文本是否为 Markdown 标题，如果是则更新栈。
+
+        Returns:
+            True 如果该行是标题并已更新栈，False 否则。
+        """
+        match = _HEADING_RE.match(line.strip())
+        if match:
+            level = len(match.group(1))
+            text = match.group(2)
+            self.push(level, text)
+            return True
+        return False
+
+    def feed_text(self, text: str) -> None:
+        """逐行扫描文本块，检测并追踪所有 Markdown 标题。"""
+        for line in text.split('\n'):
+            self.feed_line(line)
+
+    def current_level(self) -> int:
+        """返回当前栈顶标题级别，栈为空时返回 0。"""
+        return self._stack[-1][0] if self._stack else 0
+
+    def reset(self) -> None:
+        """清空标题栈。"""
+        self._stack.clear()
+
+
 @dataclass
 class ChunkResult:
     """切分结果"""
     parent_chunks: list[str]                    # 大块，用于上下文返回
     child_chunks: list[str]                     # 小块，用于精准检索
     parent_child_map: dict[int, list[int]]      # 父→子映射 (parent_index -> [child_indices])
+    context_headers: list[str] = field(default_factory=list)  # 与 child_chunks 一一对应的面包屑标题
 
 
 class HierarchicalChunker:
     """结构感知的父子 chunk 切分器"""
 
-    def __init__(self, parent_size: int = 1500, child_size: int = 300, overlap: int = 50, min_child_size: int = 20):
+    def __init__(self, parent_size: int = 2500, child_size: int = 450, overlap: int = 70, min_child_size: int = 20):
         self.parent_size = parent_size
         self.child_size = child_size
         self.overlap = overlap
         self.min_child_size = min_child_size
 
     def chunk(self, text: str, metadata: dict = None) -> ChunkResult:
-        """先按结构/语义边界切父块，再将父块细分为子块"""
+        """先按结构/语义边界切父块，再将父块细分为子块。
+
+        使用 Document Profiler 分析文档结构，按策略链顺序尝试切分，
+        每次切分后验证质量，不合格自动降级到下一个策略。
+        """
         if not text or not text.strip():
-            return ChunkResult(parent_chunks=[], child_chunks=[], parent_child_map={})
+            return ChunkResult(parent_chunks=[], child_chunks=[], parent_child_map={}, context_headers=[])
 
         stripped = text.strip()
 
         # 文本短于 child_size，直接作为单个父块和子块
         if len(stripped) <= self.child_size:
+            # 用 _HeaderTracker 检测短文本中的标题
+            tracker = _HeaderTracker()
+            tracker.feed_text(stripped)
             return ChunkResult(
                 parent_chunks=[stripped],
                 child_chunks=[stripped],
                 parent_child_map={0: [0]},
+                context_headers=[tracker.breadcrumb()],
             )
 
-        # 切分父块（优先结构标记，回退到段落边界）
-        parent_chunks = self._split_parent_chunks(stripped)
+        # Document Profiler: 分析文档结构并选择策略链
+        profile = _profile_document(stripped)
+        strategies = _select_strategy(profile)
 
-        # 对每个父块切分子块，构建映射
+        # 按策略链顺序尝试切分，验证通过则使用该结果
+        parent_chunks = None
+        for i, strategy in enumerate(strategies):
+            candidate_chunks = self._split_by_strategy(stripped, strategy)
+            # 最后一个策略（legacy）无论如何都使用
+            if i == len(strategies) - 1:
+                parent_chunks = candidate_chunks
+                break
+            # 验证切分质量
+            if _validate_chunks(candidate_chunks, self.min_child_size, self.parent_size):
+                parent_chunks = candidate_chunks
+                break
+
+        # 兜底：如果所有策略都没产出结果（不应发生），使用 legacy
+        if parent_chunks is None:
+            parent_chunks = self._split_parent_chunks(stripped)
+
+        # 对每个父块切分子块，构建映射，同时追踪标题生成 context_headers
         child_chunks: list[str] = []
+        context_headers: list[str] = []
         parent_child_map: dict[int, list[int]] = {}
+        tracker = _HeaderTracker()
 
         for parent_idx, parent_text in enumerate(parent_chunks):
             children = self._split_child_chunks(parent_text)
             child_indices = []
             for child_text in children:
+                # 在处理子块之前记录当前面包屑
+                current_breadcrumb = tracker.breadcrumb()
+                # 将子块文本喂给 tracker 以检测其中的标题
+                tracker.feed_text(child_text)
+                # 如果子块内有新标题，使用更新后的面包屑；否则使用之前的
+                new_breadcrumb = tracker.breadcrumb()
+                child_breadcrumb = new_breadcrumb if new_breadcrumb else current_breadcrumb
+
                 child_indices.append(len(child_chunks))
                 child_chunks.append(child_text)
+                context_headers.append(child_breadcrumb)
             parent_child_map[parent_idx] = child_indices
 
         return ChunkResult(
             parent_chunks=parent_chunks,
             child_chunks=child_chunks,
             parent_child_map=parent_child_map,
+            context_headers=context_headers,
         )
+
+    def _split_by_strategy(self, text: str, strategy: str) -> list[str]:
+        """根据策略名称执行对应的切分逻辑。
+
+        - "heading": 主要按 Markdown 标题切分
+        - "heuristic": 按结构标记（条款编号等）切分
+        - "legacy": 现有的完整切分逻辑（结构标记 + 段落 + 表格保护）
+        """
+        if strategy == "heading":
+            return self._split_by_headings(text)
+        elif strategy == "heuristic":
+            return self._split_by_heuristic(text)
+        else:
+            return self._split_parent_chunks(text)
+
+    def _split_by_headings(self, text: str) -> list[str]:
+        """按 Markdown 标题切分父块，每个标题开始一个新段落。
+
+        切分后对过长/过短的块进行 normalize。
+        """
+        lines = text.split('\n')
+        sections: list[str] = []
+        current_lines: list[str] = []
+
+        for line in lines:
+            stripped_line = line.strip()
+            # 检测当前行是否为 Markdown 标题
+            if stripped_line and re.match(r'^#{1,6}\s+', stripped_line):
+                # 保存之前积累的内容
+                if current_lines:
+                    content = '\n'.join(current_lines).strip()
+                    if content:
+                        sections.append(content)
+                current_lines = [line]
+            else:
+                current_lines.append(line)
+
+        # 最后一段
+        if current_lines:
+            content = '\n'.join(current_lines).strip()
+            if content:
+                sections.append(content)
+
+        result = sections if sections else [text]
+        return self._normalize_chunks(result)
+
+    def _split_by_heuristic(self, text: str) -> list[str]:
+        """按结构标记（条款编号等）切分父块。
+
+        使用 _STRUCTURE_RE 检测结构标记，每个标记开始一个新段落。
+        切分后对过长/过短的块进行 normalize。
+        """
+        sections = self._split_by_structure(text)
+        return self._normalize_chunks(sections)
 
     def _split_parent_chunks(self, text: str) -> list[str]:
         """按结构标记和段落边界切分父块

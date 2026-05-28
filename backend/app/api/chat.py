@@ -636,6 +636,7 @@ async def _stream_response(
         config = AgentConfig(
             max_iterations=settings.agent_max_iterations,
             web_search_enabled=bool(settings.searxng_url),
+            thinking_enabled=thinking_enabled,
             system_prompt=render_system_prompt(
                 AgentConfig(),
                 kb_names=[kb_id],

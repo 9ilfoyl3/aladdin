@@ -20,7 +20,6 @@ from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.memory.context_manager import (
     ContextManager,
     estimate_tokens,
-    redact_historical_kb_results,
 )
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
 from app.agent.tools.base import ToolResult
@@ -52,7 +51,85 @@ _MAX_TRANSIENT_RETRIES = 2
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
 # 连续相同内容检测阈值（stuck loop）
-_MAX_REPEATED_RESPONSES = 2
+# 当 _previous_responses 中有 _STUCK_LOOP_THRESHOLD-1 个相同记录，
+# 且当前响应也相同时触发（即连续 _STUCK_LOOP_THRESHOLD 轮相同 content 且无 tool call）
+_STUCK_LOOP_THRESHOLD = 3
+_MAX_REPEATED_RESPONSES = _STUCK_LOOP_THRESHOLD - 1
+
+# KB 工具名称集合，用于识别知识库检索工具
+_KB_TOOL_NAMES = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
+
+# 历史 KB 结果脱敏占位符
+_KB_REDACTION_MARKER = "[Previous retrieval omitted — please perform a fresh search.]"
+
+
+def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
+    """将历史轮次的 KB 检索工具结果替换为脱敏占位符，强制每轮重新检索
+
+    遍历消息列表，找到 role="tool" 的消息，通过前面 assistant 消息中的
+    tool_calls 确定工具名称。如果是 KB 工具且不是最后一组工具调用的结果，
+    则替换内容为脱敏标记。
+
+    参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
+
+    Args:
+        messages: 消息列表（OpenAI 格式）
+
+    Returns:
+        处理后的消息列表（浅拷贝，仅修改需要脱敏的消息）
+    """
+    if not messages:
+        return messages
+
+    # 第一步：构建 tool_call_id → tool_name 映射，并追踪每组 tool_calls 的迭代编号
+    tool_call_names: dict[str, str] = {}
+    tool_call_iterations: dict[str, int] = {}
+    iteration = 0
+
+    for msg in messages:
+        try:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id", "")
+                    func_info = tc.get("function", {})
+                    tc_name = func_info.get("name", "")
+                    if tc_id:
+                        tool_call_names[tc_id] = tc_name
+                        tool_call_iterations[tc_id] = iteration
+                iteration += 1
+        except (TypeError, AttributeError):
+            # 消息格式异常时跳过，保持原样
+            continue
+
+    # 如果没有找到任何 tool_calls，直接返回原列表
+    if not tool_call_iterations:
+        return messages
+
+    # 确定最后一组迭代编号（当前轮次，不脱敏）
+    last_iteration = max(tool_call_iterations.values())
+
+    # 第二步：遍历消息，对历史 KB 工具结果做脱敏
+    result: list[dict] = []
+    for msg in messages:
+        try:
+            if msg.get("role") == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                tool_name = tool_call_names.get(tool_call_id, "")
+                msg_iteration = tool_call_iterations.get(tool_call_id, -1)
+
+                # 仅脱敏：KB 工具 + 非最后一组（历史轮次）
+                if tool_name in _KB_TOOL_NAMES and msg_iteration != last_iteration:
+                    redacted_msg = dict(msg)
+                    redacted_msg["content"] = _KB_REDACTION_MARKER
+                    result.append(redacted_msg)
+                    continue
+        except (TypeError, AttributeError):
+            # 消息格式异常时跳过脱敏，保持原样
+            pass
+
+        result.append(msg)
+
+    return result
 
 
 @dataclass
@@ -141,7 +218,7 @@ class AgentEngine:
         # 追加历史上下文（redact 历史 KB 工具结果，强制每轮重新检索）
         # 参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
         if llm_context:
-            redacted_context = redact_historical_kb_results(llm_context, current_iteration=0)
+            redacted_context = _redact_history_kb_results(llm_context)
             messages.extend(redacted_context)
         
 
@@ -454,7 +531,9 @@ class AgentEngine:
         finish_reason = ""
 
         async for chunk in self._llm.stream_with_tools(
-            messages, tools, temperature=self._config.temperature
+            messages, tools,
+            temperature=self._config.temperature,
+            enable_thinking=self._config.thinking_enabled,
         ):
             # 流式 content → 实时发射 THOUGHT 事件
             if chunk.content and chunk.response_type in ("content", "thinking"):
@@ -541,12 +620,13 @@ class AgentEngine:
         # 无 tool_calls 的情况
         content = response.content or ""
 
-        # stuck loop 检测：连续相同 content
+        # stuck loop 检测：连续相同 content 且无 tool call
+        # REQ-7: 连续 3 轮相同 content 且无 tool call 时自动终止并返回最后内容
         if content and len(self._previous_responses) >= _MAX_REPEATED_RESPONSES:
             if all(prev == content for prev in self._previous_responses[-_MAX_REPEATED_RESPONSES:]):
                 logger.warning(
-                    "[Agent] Stuck loop detected: same content repeated %d times",
-                    _MAX_REPEATED_RESPONSES + 1,
+                    "[Agent] Stuck loop detected: LLM repeated same content %d times without tool calls",
+                    _STUCK_LOOP_THRESHOLD,
                 )
                 return ResponseVerdict(
                     should_stop=True,

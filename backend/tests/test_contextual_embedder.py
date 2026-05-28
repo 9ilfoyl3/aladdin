@@ -148,3 +148,69 @@ class TestParentContext:
         assert "A" * 300 not in result
         # 但应包含前 150 字符
         assert "A" * 150 in result
+
+
+
+# ============================================================
+# context_header 优先使用测试
+# ============================================================
+
+
+class TestContextHeader:
+    """测试 context_header 参数优先使用逻辑"""
+
+    def test_context_header_prepended_to_child(self, embedder, basic_metadata):
+        """context_header 非空时，输出以 context_header 开头"""
+        header = "# 顶级标题 > ## 二级标题"
+        child = "这是子块内容。"
+
+        result = embedder.build_embed_text(child, basic_metadata, context_header=header)
+
+        assert result.startswith(header)
+
+    def test_context_header_format(self, embedder, basic_metadata):
+        """context_header 非空时，格式为 {header}\n\n{child}"""
+        header = "# 文档标题 > ## 章节"
+        child = "子块文本内容。"
+
+        result = embedder.build_embed_text(child, basic_metadata, context_header=header)
+
+        assert result == f"{header}\n\n{child}"
+
+    def test_context_header_overrides_metadata_prefix(self, embedder, metadata_with_section):
+        """context_header 非空时，不使用 metadata 拼接逻辑"""
+        header = "# 自定义面包屑"
+        child = "子块内容。"
+
+        result = embedder.build_embed_text(child, metadata_with_section, context_header=header)
+
+        # 不应包含 metadata 拼接的 [filename | section] 格式
+        assert "[contract.pdf" not in result
+        assert result == f"{header}\n\n{child}"
+
+    def test_context_header_overrides_parent_context(self, embedder, basic_metadata):
+        """context_header 非空时，parent_chunk 不参与拼接"""
+        header = "# 标题面包屑"
+        child = "子块内容。"
+        parent = "父块上下文信息，很长的一段文字。"
+
+        result = embedder.build_embed_text(child, basic_metadata, parent_chunk=parent, context_header=header)
+
+        assert parent[:50] not in result
+        assert result == f"{header}\n\n{child}"
+
+    def test_none_context_header_fallback_to_metadata(self, embedder, basic_metadata):
+        """context_header 为 None 时，fallback 到现有 metadata 拼接逻辑"""
+        child = "子块内容。"
+
+        result = embedder.build_embed_text(child, basic_metadata, context_header=None)
+
+        assert result.startswith("[report.pdf]")
+
+    def test_empty_string_context_header_fallback_to_metadata(self, embedder, basic_metadata):
+        """context_header 为空字符串时，fallback 到现有 metadata 拼接逻辑"""
+        child = "子块内容。"
+
+        result = embedder.build_embed_text(child, basic_metadata, context_header="")
+
+        assert result.startswith("[report.pdf]")

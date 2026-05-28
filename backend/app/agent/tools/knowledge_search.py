@@ -187,11 +187,17 @@ class KnowledgeSearchTool(BaseTool):
     ) -> list[tuple[RetrievalResult, bool]]:
         """标记已在之前调用中返回过的 chunk
 
+        chunk_id 为空时跳过去重逻辑，始终视为未见过。
+
         Returns:
             list of (result, is_already_seen) tuples
         """
         marked: list[tuple[RetrievalResult, bool]] = []
         for r in results:
+            # chunk_id 为空时跳过去重逻辑
+            if not r.chunk_id:
+                marked.append((r, False))
+                continue
             already_seen = r.chunk_id in self._state.seen_chunk_ids
             # 无论是否 seen，都记录到 seen_chunk_ids
             self._state.seen_chunk_ids.add(r.chunk_id)
@@ -209,7 +215,7 @@ class KnowledgeSearchTool(BaseTool):
             <content>...</content>
           </chunk>
           <chunk rank="2" chunk_id="..." doc_id="..." score="0.80" status="already_retrieved">
-            <content>[Already retrieved - see above]</content>
+            <content>(content omitted, already returned)</content>
           </chunk>
         </search_results>
         """
@@ -224,7 +230,7 @@ class KnowledgeSearchTool(BaseTool):
                     f'doc_id="{xml_escape(result.doc_id)}" '
                     f'score="{result.score:.2f}" status="already_retrieved">'
                 )
-                lines.append("<content>[Already retrieved - see above]</content>")
+                lines.append("<content>(content omitted, already returned)</content>")
             else:
                 lines.append(
                     f'<chunk rank="{rank}" chunk_id="{xml_escape(result.chunk_id)}" '

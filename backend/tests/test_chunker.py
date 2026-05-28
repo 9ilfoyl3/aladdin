@@ -171,3 +171,69 @@ class TestHierarchicalChunkerIntegration:
         assert result.parent_chunks == ["parent"]
         assert result.child_chunks == ["child1", "child2"]
         assert result.parent_child_map == {0: [0, 1]}
+
+
+class TestContextHeaders:
+    """context_headers 面包屑生成测试"""
+
+    def test_context_headers_length_matches_child_chunks(self):
+        """context_headers 长度与 child_chunks 一一对应"""
+        chunker = HierarchicalChunker(parent_size=500, child_size=150, overlap=30)
+        text = """# 章节一
+
+这是第一章的内容，包含一些详细的描述信息。
+
+## 小节 A
+
+小节 A 的详细内容，需要足够长才能被切分为多个子块。""" + "补充内容。" * 50
+
+        result = chunker.chunk(text)
+        assert len(result.context_headers) == len(result.child_chunks)
+
+    def test_empty_text_returns_empty_headers(self):
+        """空文本返回空 context_headers"""
+        chunker = HierarchicalChunker()
+        result = chunker.chunk("")
+        assert result.context_headers == []
+
+    def test_short_text_with_heading(self):
+        """短文本含标题时 context_headers 包含面包屑"""
+        chunker = HierarchicalChunker()
+        result = chunker.chunk("# 标题\n内容")
+        assert len(result.context_headers) == 1
+        assert "# 标题" in result.context_headers[0]
+
+    def test_short_text_without_heading(self):
+        """短文本无标题时 context_headers 为空字符串"""
+        chunker = HierarchicalChunker()
+        result = chunker.chunk("这是一段没有标题的短文本")
+        assert len(result.context_headers) == 1
+        assert result.context_headers[0] == ""
+
+    def test_nested_headings_breadcrumb(self):
+        """嵌套标题生成正确的面包屑路径"""
+        chunker = HierarchicalChunker(parent_size=200, child_size=100, overlap=20)
+        text = """# 顶级标题
+
+第一段内容需要足够长来触发切分逻辑。""" + "填充内容。" * 20 + """
+
+## 二级标题
+
+第二段内容也需要足够长。""" + "更多填充。" * 20
+
+        result = chunker.chunk(text)
+        # 找到包含二级标题的 chunk，其 header 应包含完整路径
+        for i, chunk in enumerate(result.child_chunks):
+            if "二级标题" in chunk:
+                assert "# 顶级标题" in result.context_headers[i]
+                assert "## 二级标题" in result.context_headers[i]
+                break
+
+    def test_context_headers_default_factory(self):
+        """ChunkResult 的 context_headers 默认为空列表"""
+        result = ChunkResult(
+            parent_chunks=["parent"],
+            child_chunks=["child"],
+            parent_child_map={0: [0]},
+        )
+        assert result.context_headers == []

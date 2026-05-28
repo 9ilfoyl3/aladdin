@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.agent.config import AgentConfig
-from app.agent.engine import AgentEngine
+from app.agent.engine import AgentEngine, _redact_history_kb_results
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 from app.agent.tools.registry import ToolRegistry
-from app.models.provider import ChatResponse, LLMToolCall
+from app.models.provider import ChatResponse, LLMToolCall, StreamChunk
 
 
 # ============================================================
@@ -99,6 +99,91 @@ def make_empty_response() -> ChatResponse:
     return ChatResponse(content="", tool_calls=[], finish_reason="stop")
 
 
+async def _async_iter_chunks(chunks: list[StreamChunk]):
+    """将 StreamChunk 列表转为 async iterator"""
+    for chunk in chunks:
+        yield chunk
+
+
+def _response_to_chunks(response: ChatResponse) -> list[StreamChunk]:
+    """将 ChatResponse 转为 StreamChunk 列表（用于 mock stream_with_tools）"""
+    chunks: list[StreamChunk] = []
+    if response.content:
+        chunks.append(StreamChunk(
+            content=response.content,
+            response_type="content",
+        ))
+    if response.tool_calls:
+        # final_answer 工具的 content 用 "answer" response_type
+        for tc in response.tool_calls:
+            if tc.function_name == "final_answer":
+                try:
+                    args = json.loads(tc.arguments)
+                    answer = args.get("answer", "")
+                except (json.JSONDecodeError, TypeError):
+                    answer = tc.arguments
+                chunks.append(StreamChunk(
+                    content=answer,
+                    response_type="answer",
+                ))
+        chunks.append(StreamChunk(
+            tool_calls=response.tool_calls,
+            finish_reason=response.finish_reason,
+        ))
+    else:
+        chunks.append(StreamChunk(
+            finish_reason=response.finish_reason,
+        ))
+    return chunks
+
+
+def mock_stream_with_tools_from_responses(responses: list[ChatResponse]):
+    """创建 stream_with_tools 的 mock，按顺序返回 responses 对应的 stream chunks"""
+    call_count = [0]
+
+    async def _stream_side_effect(messages, tools, **kwargs):
+        idx = call_count[0]
+        call_count[0] += 1
+        if idx < len(responses):
+            resp = responses[idx]
+        else:
+            # 超出预期调用次数时返回最后一个
+            resp = responses[-1]
+        chunks = _response_to_chunks(resp)
+        async for chunk in _async_iter_chunks(chunks):
+            yield chunk
+
+    return _stream_side_effect
+
+
+def mock_stream_with_tools_single(response: ChatResponse):
+    """创建 stream_with_tools 的 mock，始终返回同一个 response"""
+    async def _stream_side_effect(messages, tools, **kwargs):
+        chunks = _response_to_chunks(response)
+        async for chunk in _async_iter_chunks(chunks):
+            yield chunk
+
+    return _stream_side_effect
+
+
+def mock_stream_with_tools_error_then_success(
+    errors: list[Exception], success_response: ChatResponse
+):
+    """创建 stream_with_tools 的 mock，先抛出错误再成功"""
+    call_count = [0]
+
+    async def _stream_side_effect(messages, tools, **kwargs):
+        idx = call_count[0]
+        call_count[0] += 1
+        if idx < len(errors):
+            raise errors[idx]
+        chunks = _response_to_chunks(success_response)
+        async for chunk in _async_iter_chunks(chunks):
+            yield chunk
+
+    return _stream_side_effect
+
+
 def create_engine(
     mock_llm: AsyncMock,
     config: AgentConfig | None = None,
@@ -133,9 +218,8 @@ class TestAgentEngineSimple:
     async def test_simple_final_answer(self):
         """Mock LLM 第一轮返回 final_answer → 验证 state 正确设置"""
         mock_llm = AsyncMock()
-        mock_llm.chat_with_tools = AsyncMock(
-            return_value=make_final_answer_response("这是最终答案")
-        )
+        responses = [make_final_answer_response("这是最终答案")]
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(responses)
 
         engine, event_bus, registry = create_engine(mock_llm)
 
@@ -159,8 +243,8 @@ class TestAgentEngineSimple:
         # 第二轮：返回 final_answer
         final_response = make_final_answer_response("基于检索结果的答案")
 
-        mock_llm.chat_with_tools = AsyncMock(
-            side_effect=[search_response, final_response]
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [search_response, final_response]
         )
 
         # 注册 knowledge_search mock 工具
@@ -176,20 +260,18 @@ class TestAgentEngineSimple:
 
     @pytest.mark.asyncio
     async def test_stuck_loop_detection(self):
-        """Mock LLM 连续返回相同 content 且无 tool_calls → 验证 stuck_loop 终止"""
+        """REQ-7: 连续 3 轮相同 content 且无 tool call 时自动终止并返回最后内容"""
         mock_llm = AsyncMock()
 
-        # 连续 3 次返回相同内容（无 tool_calls, finish_reason != "stop"）
-        # 注意：_MAX_REPEATED_RESPONSES = 2，需要 3 次相同内容触发
-        # 但 natural_stop 会在 finish_reason=="stop" 时先触发
-        # 所以用 finish_reason="length" 来避免 natural_stop
+        # 连续返回相同内容（无 tool_calls, finish_reason="length" 避免 natural_stop）
+        # _STUCK_LOOP_THRESHOLD = 3，需要连续 3 轮相同 content 触发
         same_response = ChatResponse(
             content="重复内容",
             tool_calls=[],
             finish_reason="length",
         )
 
-        mock_llm.chat_with_tools = AsyncMock(return_value=same_response)
+        mock_llm.stream_with_tools = mock_stream_with_tools_single(same_response)
 
         config = AgentConfig(max_iterations=10, system_prompt="Test")
         engine, event_bus, registry = create_engine(mock_llm, config=config)
@@ -198,6 +280,56 @@ class TestAgentEngineSimple:
 
         assert state.is_complete is True
         assert state.final_answer == "重复内容"
+
+    @pytest.mark.asyncio
+    async def test_stuck_loop_resets_on_tool_call(self):
+        """REQ-7: 有 tool call 时重置 stuck loop 计数器，不会误触发"""
+        mock_llm = AsyncMock()
+
+        # 第 1 轮：相同 content（无 tool_calls）
+        text_resp_1 = ChatResponse(content="重复内容", tool_calls=[], finish_reason="length")
+        # 第 2 轮：有 tool_call → 重置计数器
+        tool_resp = make_tool_call_response("knowledge_search", {"queries": ["q"]}, call_id="call_1")
+        # 第 3-5 轮：又连续 3 轮相同 content → 触发 stuck loop
+        text_resp_2 = ChatResponse(content="新的重复内容", tool_calls=[], finish_reason="length")
+
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [text_resp_1, tool_resp, text_resp_2, text_resp_2, text_resp_2]
+        )
+
+        search_tool = MockTool(name="knowledge_search")
+        config = AgentConfig(max_iterations=10, system_prompt="Test")
+        engine, event_bus, registry = create_engine(mock_llm, config=config, tools=[search_tool])
+
+        state = await engine.execute("session-1", "测试问题")
+
+        assert state.is_complete is True
+        assert state.final_answer == "新的重复内容"
+        # 工具被调用了 1 次（第 2 轮）
+        assert search_tool.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stuck_loop_not_triggered_with_different_content(self):
+        """REQ-7: 不同 content 不触发 stuck loop"""
+        mock_llm = AsyncMock()
+
+        # 每轮返回不同内容，不应触发 stuck loop
+        responses = [
+            ChatResponse(content=f"内容{i}", tool_calls=[], finish_reason="length")
+            for i in range(5)
+        ]
+        # 最后一轮返回 final_answer
+        responses.append(make_final_answer_response("最终答案"))
+
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(responses)
+
+        config = AgentConfig(max_iterations=10, system_prompt="Test")
+        engine, event_bus, registry = create_engine(mock_llm, config=config)
+
+        state = await engine.execute("session-1", "测试问题")
+
+        assert state.is_complete is True
+        assert state.final_answer == "最终答案"
 
     @pytest.mark.asyncio
     async def test_max_iterations_graceful_degradation(self):
@@ -210,7 +342,12 @@ class TestAgentEngineSimple:
             {"queries": ["query"]},
             call_id="call_1",
         )
-        mock_llm.chat_with_tools = AsyncMock(return_value=tool_response)
+        mock_llm.stream_with_tools = mock_stream_with_tools_single(tool_response)
+
+        # 合成答案时需要 stream 方法
+        async def mock_stream(messages, **kwargs):
+            yield "合成的答案"
+        mock_llm.stream = mock_stream
 
         search_tool = MockTool(name="knowledge_search")
         config = AgentConfig(max_iterations=3, system_prompt="Test")
@@ -230,13 +367,13 @@ class TestAgentEngineSimple:
         """Mock LLM 前 2 次抛出 HTTP 429 错误，第 3 次成功 → 验证重试机制"""
         mock_llm = AsyncMock()
 
-        # 前 2 次抛出瞬态错误，第 3 次成功
-        mock_llm.chat_with_tools = AsyncMock(
-            side_effect=[
+        # 使用 error_then_success mock
+        mock_llm.stream_with_tools = mock_stream_with_tools_error_then_success(
+            errors=[
                 RuntimeError("HTTP 429 Too Many Requests"),
                 RuntimeError("HTTP 429 Too Many Requests"),
-                make_final_answer_response("重试后的答案"),
-            ]
+            ],
+            success_response=make_final_answer_response("重试后的答案"),
         )
 
         config = AgentConfig(max_iterations=5, system_prompt="Test")
@@ -255,16 +392,11 @@ class TestAgentEngineSimple:
         mock_llm = AsyncMock()
 
         # 第一次空响应，第二次正常
-        mock_llm.chat_with_tools = AsyncMock(
-            side_effect=[
-                make_empty_response(),
-                make_final_answer_response("nudge 后的答案"),
-            ]
-        )
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses([
+            make_empty_response(),
+            make_final_answer_response("nudge 后的答案"),
+        ])
 
-        # 空响应的 finish_reason 需要不是 "stop" 才不会触发 natural_stop
-        # 但 make_empty_response 返回 content="" 且 tool_calls=[]
-        # 在 engine 中，空响应检测是 not response.content and not response.tool_calls
         config = AgentConfig(max_iterations=5, system_prompt="Test")
         engine, event_bus, registry = create_engine(mock_llm, config=config)
 
@@ -287,8 +419,8 @@ class TestAgentEngineSimple:
         # 第二轮：final_answer
         final_response = make_final_answer_response("最终答案")
 
-        mock_llm.chat_with_tools = AsyncMock(
-            side_effect=[search_response, final_response]
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [search_response, final_response]
         )
 
         search_tool = MockTool(name="knowledge_search")
@@ -344,8 +476,8 @@ class TestAgentEngineSimple:
         )
         final_response = make_final_answer_response("并行结果")
 
-        mock_llm.chat_with_tools = AsyncMock(
-            side_effect=[parallel_response, final_response]
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [parallel_response, final_response]
         )
 
         # 创建带延迟的工具来验证并行执行
@@ -534,3 +666,180 @@ class TestEventBus:
         await bus.emit(AgentEvent(type=EventType.TOOL_RESULT, session_id="s1"))
 
         assert order == ["specific", "global"]
+
+
+# ============================================================
+# _redact_history_kb_results Tests
+# ============================================================
+
+
+class TestRedactHistoryKbResults:
+    """_redact_history_kb_results 历史 KB 结果脱敏测试"""
+
+    def test_empty_messages(self):
+        """空消息列表返回空列表"""
+        result = _redact_history_kb_results([])
+        assert result == []
+
+    def test_no_tool_messages(self):
+        """没有 tool 消息时原样返回"""
+        messages = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好！"},
+        ]
+        result = _redact_history_kb_results(messages)
+        assert result == messages
+
+    def test_redacts_historical_knowledge_search(self):
+        """历史轮次的 knowledge_search 结果被脱敏"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "大量检索结果..."},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_2", "content": "当前轮次结果"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 第一轮（历史）应被脱敏
+        assert result[1]["content"] == "[Previous retrieval omitted — please perform a fresh search.]"
+        # 最后一轮（当前）保持原样
+        assert result[3]["content"] == "当前轮次结果"
+
+    def test_redacts_historical_grep_chunks(self):
+        """历史轮次的 grep_chunks 结果被脱敏"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "grep_chunks", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "grep 结果..."},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "final_answer", "arguments": "{}"}}
+            ], "content": None},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 第一轮的 grep_chunks 应被脱敏（最后一组是 final_answer 的迭代）
+        assert result[1]["content"] == "[Previous retrieval omitted — please perform a fresh search.]"
+
+    def test_preserves_non_kb_tool_results(self):
+        """非 KB 工具的结果不被脱敏"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "other_tool", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "其他工具结果"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_2", "content": "当前检索结果"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 非 KB 工具不脱敏
+        assert result[1]["content"] == "其他工具结果"
+        # 当前轮次 KB 工具不脱敏
+        assert result[3]["content"] == "当前检索结果"
+
+    def test_preserves_current_iteration_kb_results(self):
+        """最后一组迭代的 KB 结果不被脱敏"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}},
+                {"id": "call_2", "function": {"name": "grep_chunks", "arguments": "{}"}},
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "结果1"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "结果2"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 只有一组迭代（最后一组），不脱敏
+        assert result[1]["content"] == "结果1"
+        assert result[2]["content"] == "结果2"
+
+    def test_skips_malformed_messages(self):
+        """格式异常的消息跳过脱敏，保持原样"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "历史结果"},
+            # 格式异常：tool_calls 不是列表
+            {"role": "assistant", "tool_calls": "invalid"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "当前结果"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 第一轮被脱敏（因为有第二个 assistant 消息，虽然格式异常但 iteration 仍递增不了）
+        # 实际上格式异常的 assistant 消息会被跳过，所以只有 1 个迭代
+        # call_1 属于迭代 0，也是最后一个迭代，所以不脱敏
+        assert result[1]["content"] == "历史结果"
+        assert result[3]["content"] == "当前结果"
+
+    def test_handles_missing_tool_call_id(self):
+        """tool 消息缺少 tool_call_id 时保持原样"""
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "content": "没有 tool_call_id 的消息"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_2", "content": "当前结果"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        # 缺少 tool_call_id 的消息无法匹配到任何工具，保持原样
+        assert result[1]["content"] == "没有 tool_call_id 的消息"
+        # 当前轮次不脱敏
+        assert result[3]["content"] == "当前结果"
+
+    def test_multiple_historical_iterations(self):
+        """多个历史迭代都被脱敏，只保留最后一组"""
+        messages = [
+            # 迭代 0
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": "第一轮结果"},
+            # 迭代 1
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "grep_chunks", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_2", "content": "第二轮结果"},
+            # 迭代 2（最后一组）
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_3", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_3", "content": "第三轮结果"},
+        ]
+        result = _redact_history_kb_results(messages)
+
+        marker = "[Previous retrieval omitted — please perform a fresh search.]"
+        # 迭代 0 和 1 被脱敏
+        assert result[1]["content"] == marker
+        assert result[3]["content"] == marker
+        # 迭代 2（最后一组）保持原样
+        assert result[5]["content"] == "第三轮结果"
+
+    def test_does_not_mutate_original(self):
+        """脱敏不修改原始消息列表"""
+        original_content = "原始检索结果"
+        messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_1", "content": original_content},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_2", "function": {"name": "knowledge_search", "arguments": "{}"}}
+            ], "content": None},
+            {"role": "tool", "tool_call_id": "call_2", "content": "当前结果"},
+        ]
+        _redact_history_kb_results(messages)
+
+        # 原始消息不应被修改
+        assert messages[1]["content"] == original_content

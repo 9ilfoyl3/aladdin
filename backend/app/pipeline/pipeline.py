@@ -329,10 +329,13 @@ class DocumentPipeline:
                 child_to_parent = self._build_child_to_parent_map(chunk_result.parent_child_map)
                 ctx_embedder = ContextualEmbedder()
                 embed_texts = []
+                # 获取 context_headers（与 child_chunks 一一对应）
+                context_headers = chunk_result.context_headers or []
                 for child_idx, (child_text, meta) in enumerate(zip(enriched_children, metadata_list)):
                     parent_idx = child_to_parent.get(child_idx)
                     parent_text = chunk_result.parent_chunks[parent_idx] if parent_idx is not None else None
-                    embed_text = ctx_embedder.build_embed_text(child_text, meta, parent_text)
+                    header = context_headers[child_idx] if child_idx < len(context_headers) else None
+                    embed_text = ctx_embedder.build_embed_text(child_text, meta, parent_text, context_header=header)
                     embed_texts.append(embed_text)
                 print(f"[Pipeline] 文档 {doc_id} 上下文增强构造完成，共 {len(embed_texts)} 个文本，准备调用 _embed_with_progress")
                 import sys
