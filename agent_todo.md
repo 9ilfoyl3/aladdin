@@ -153,6 +153,55 @@ composite *= position_prior  # 文档前部微弱加分
 
 ---
 
+## P1.5 — CSV/表格检索优化
+
+### 15. ✅ 取消 CSV 文件的 table 降权
+
+**已完成。** 在 `_rrf_fusion()` 中，当 `file_type == "csv"` 时跳过 table 降权。
+CSV 的 table 标记是格式转换导致的，不代表内容是辅助性表格。
+
+### 16. CSV 切分策略优化（参考 WeKnora）
+
+**现状：** `TableChunker` 每行一个子块，信息碎片化，语义密度低。
+
+**WeKnora 做法：** CSV 转 Markdown 表格后走通用 chunker（按 chunk_size 切分），chunker 的 `headerTracker` 自动为后续 chunk prepend 表头。一个 chunk 包含多行数据。
+
+**改进方向：**
+- 方案 A：让 CSV 不走 `pre_chunked`，而是走通用 `HierarchicalChunker`（chunker 已有表格保护逻辑）
+- 方案 B：调整 `TableChunker` 的 `rows_per_group` 参数，让每个子块包含更多行
+- 方案 C：CSV 宽行模式（KV 格式）时，每条记录作为完整 chunk 不再细分
+
+**注意：** 修改后需要重新 embedding 已有 CSV 文档。
+
+### 17. DataTableSummary — CSV 入库时生成 LLM 摘要（可选）
+
+**WeKnora 做法：**
+- CSV/XLSX 入库后，额外触发 `DataTableSummaryTask`
+- 用 DuckDB 加载数据，取前 10 行样本
+- 调用 LLM 生成：1) 表格整体摘要（这个表是什么）2) 各列含义描述
+- 摘要作为额外 chunk（`ChunkTypeTableSummary`）写入向量库
+- **一定会调用**：在 `knowledge_create.go` 中，只要文件类型是 csv/xlsx/xls 就无条件触发
+
+**LLM 开销分析：**
+- 每个 CSV 文件入库时调用 **2 次 LLM**（一次生成表格摘要，一次生成列描述）
+- 输入 token：schema 描述 + 10 行样本数据（通常 500-2000 token）
+- 输出 token：摘要文本（通常 200-500 token）
+- **总开销：每个 CSV 约 3000-5000 token**，对于本地 vLLM 来说开销很小
+- 但如果用商业 API（如 GPT-4），大量 CSV 入库时成本会累积
+
+**建议：**
+- 如果用本地 vLLM → 可以实现，开销可忽略
+- 如果用商业 API → 做成可选功能（知识库 config 中加开关 `enable_table_summary`）
+- 折中方案：不用 LLM，用规则生成简单摘要（文件名 + 列名 + 行数），零 LLM 开销
+
+### 18. `_detect_element_type` 优化 — KV 格式不标记为 table
+
+**现状：** CSV 宽行模式输出 KV 格式（`字段: 值`），但如果内容中有 `|` 也可能被误标为 table。
+
+**改进：** 在 `_detect_element_type()` 中，如果大部分行是 `key: value` 格式，标记为 `text` 而非 `table`。
+
+---
+
 ## P2 — 低优先级（提升稳定性和可维护性）
 
 ### 9. Document Profiler + Tier 验证链

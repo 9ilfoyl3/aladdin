@@ -152,6 +152,8 @@ class HybridRetriever(BaseRetriever):
             results_lists: 多路检索结果列表
             k: RRF 参数，默认 60
             type_weights: 元素类型权重映射，默认对 table 类型施加 0.8 降权
+                         注意：CSV 文件来源的 table 类型不降权（它们的 table 标记是格式转换导致的，
+                         不代表内容是辅助性表格）
         """
         if type_weights is None:
             type_weights = {"table": 0.8}
@@ -165,9 +167,13 @@ class HybridRetriever(BaseRetriever):
                 scores[item.chunk_id] = scores.get(item.chunk_id, 0) + rrf_score
                 items[item.chunk_id] = item
 
-        # 施加类型权重
+        # 施加类型权重（CSV 文件来源的 chunk 跳过降权）
         for chunk_id, item in items.items():
             element_type = item.metadata.get("element_type", "text")
+            file_type = item.metadata.get("file_type", "")
+            # CSV 文件的 table 标记是格式转换导致的，不应降权
+            if file_type == "csv":
+                continue
             weight = type_weights.get(element_type, 1.0)
             scores[chunk_id] *= weight
 

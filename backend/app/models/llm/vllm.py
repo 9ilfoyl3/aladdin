@@ -361,11 +361,11 @@ class VllmLLM(LLMProvider):
                                         # 计算本次增量（相对于上次已发射的长度）
                                         prev_len = entry.get("_answer_emitted_len", 0)
                                         if len(raw_value) > prev_len:
-                                            delta = raw_value[prev_len:]
+                                            answer_delta = raw_value[prev_len:]
                                             entry["_answer_emitted_len"] = len(raw_value)
-                                            if delta:
+                                            if answer_delta:
                                                 yield StreamChunk(
-                                                    content=delta,
+                                                    content=answer_delta,
                                                     tool_calls=None,
                                                     finish_reason="",
                                                     response_type="answer",
