@@ -98,7 +98,7 @@ services:
     container_name: arag-backend
     image: ${IMAGE_BACKEND:-aladdin-backend:latest}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
       - MILVUS_HOST=milvus
