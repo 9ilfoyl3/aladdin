@@ -400,6 +400,8 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
     doc.status = "pending"
     doc.error_message = None
     doc.chunk_count = 0
+    doc.progress = 0
+    doc.progress_message = None
     await db.flush()
 
     # 重新触发管道（优先入队 Redis Stream）
@@ -431,6 +433,8 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
         status="pending",
         error_message=None,
         chunk_count=0,
+        progress=0,
+        progress_message=None,
         created_at=doc.created_at.isoformat() if doc.created_at else "",
     )
 
