@@ -355,8 +355,7 @@ async def _folder_cleanup_background(
             settings = get_settings()
             milvus = MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
             if await milvus.has_collection(kb_id):
-                for doc_id in doc_ids:
-                    await milvus.delete_by_doc_id(kb_id, doc_id)
+                await milvus.delete_by_doc_ids(kb_id, doc_ids)
             logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 个文档", len(doc_ids))
         except Exception as e:
             logger.warning("文件夹删除 - Milvus 向量清理失败: %s", e)

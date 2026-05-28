@@ -400,6 +400,8 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
     doc.status = "pending"
     doc.error_message = None
     doc.chunk_count = 0
+    doc.progress = 0
+    doc.progress_message = None
     await db.flush()
 
     # 重新触发管道（优先入队 Redis Stream）
@@ -584,8 +586,7 @@ async def _batch_cleanup_background(
         try:
             milvus = _get_milvus()
             if await milvus.has_collection(kb_id):
-                for doc_id in doc_ids:
-                    await milvus.delete_by_doc_id(kb_id, doc_id)
+                await milvus.delete_by_doc_ids(kb_id, doc_ids)
         except Exception as e:
             logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
 

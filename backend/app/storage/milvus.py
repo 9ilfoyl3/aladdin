@@ -139,6 +139,12 @@ class MilvusClient:
         """按 doc_id 删除该文档的所有向量（用于取消/清理孤儿数据）"""
         await asyncio.to_thread(self._delete_by_doc_id_sync, kb_id, doc_id)
 
+    async def delete_by_doc_ids(self, kb_id: str, doc_ids: list[str]) -> None:
+        """批量按 doc_id 列表删除向量（合并表达式，只 load/flush 一次）"""
+        if not doc_ids:
+            return
+        await asyncio.to_thread(self._delete_by_doc_ids_sync, kb_id, doc_ids)
+
     async def drop_collection(self, kb_id: str) -> None:
         """删除整个 collection"""
         await asyncio.to_thread(self._drop_collection_sync, kb_id)
@@ -377,6 +383,33 @@ class MilvusClient:
         collection.flush()
 
         logger.info("Collection %s 按 doc_id=%s 删除向量", name, doc_id)
+
+    def _delete_by_doc_ids_sync(self, kb_id: str, doc_ids: list[str]) -> None:
+        """批量按 doc_id 列表删除向量
+
+        优化：合并为 IN 表达式，只 load 一次，只 flush 一次。
+        """
+        self._connect()
+        name = self._collection_name(kb_id)
+
+        if not utility.has_collection(name, using=self._alias):
+            return
+
+        collection = Collection(name=name, using=self._alias)
+        try:
+            collection.load()
+        except Exception:
+            pass
+
+        batch_size = 100
+        for i in range(0, len(doc_ids), batch_size):
+            batch = doc_ids[i:i + batch_size]
+            ids_str = ", ".join(f'"{did}"' for did in batch)
+            expr = f"doc_id in [{ids_str}]"
+            collection.delete(expr)
+
+        collection.flush()
+        logger.info("Collection %s 批量删除 %d 个文档的向量", name, len(doc_ids))
 
     def _drop_collection_sync(self, kb_id: str) -> None:
         """同步删除 collection"""

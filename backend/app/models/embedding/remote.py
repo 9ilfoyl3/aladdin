@@ -70,14 +70,10 @@ class RemoteEmbedder(EmbedProvider):
     def _get_sparse_url(self) -> str:
         """获取 sparse 端点 URL
 
-        TEI 格式：base_url 去掉 /v1 后缀，拼接 /embed_sparse
-        例如：http://server:8080/v1 → http://server:8080/embed_sparse
-              http://server:8080 → http://server:8080/embed_sparse
+        直接在 base_url 后拼接 /embed_sparse
+        例如：http://server:7997/v1 → http://server:7997/v1/embed_sparse
         """
-        base = self.base_url
-        if base.endswith("/v1"):
-            base = base[:-3]
-        return f"{base}/embed_sparse"
+        return f"{self.base_url}/embed_sparse"
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """调用远程服务生成稠密向量
