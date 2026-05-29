@@ -16,6 +16,7 @@ class EventType(str, Enum):
     TOOL_RESULT = "tool_result"
     FINAL_ANSWER = "final_answer"
     REFERENCES = "references"
+    TOKEN_USAGE = "token_usage"  # 每轮 LLM 调用后的 token 用量事件，供前端上下文进度条消费
     COMPLETE = "complete"
     ERROR = "error"
 

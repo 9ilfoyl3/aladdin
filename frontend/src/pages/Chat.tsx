@@ -31,7 +31,10 @@ function Chat() {
   const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
+  const [contextUsage, setContextUsage] = useState<{ current: number; max: number }>({ current: 0, max: 0 })
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
+  const pendingSendSessionRef = useRef<string | null>(null)
 
   const { currentSessionId, setCurrentSessionId, refreshSessions } = useSession()
 
@@ -69,12 +72,18 @@ function Chat() {
       setMessages([])
       setExpandedRefs(new Set())
       setExpandedRefDetails(new Set())
+      setContextUsage({ current: 0, max: 0 })
+      return
+    }
+    // 若该会话是刚在本地发起发送的（消息已在本地、可能正在流式），跳过加载避免覆盖
+    if (pendingSendSessionRef.current === currentSessionId) {
       return
     }
     // 加载会话消息
     async function loadMessages() {
       setExpandedRefs(new Set())
       setExpandedRefDetails(new Set())
+      setContextUsage({ current: 0, max: 0 })
       try {
         const msgs = await sessionApi.getMessages(currentSessionId!)
         setMessages(msgs.map((m) => {
@@ -137,6 +146,22 @@ function Chat() {
           }
           return base
         }))
+
+        // 从历史消息中恢复上下文用量圆环：取最后一条带 token_usage 步骤的记录
+        // token_usage 事件在流式时已随其他 SSE 事件一并存入 agent_steps（后端 _stream_response）
+        let restoredUsage: { current: number; max: number } | null = null
+        for (const m of msgs) {
+          if (!m.agent_steps || !Array.isArray(m.agent_steps)) continue
+          for (const step of m.agent_steps) {
+            if (step.type === 'token_usage' && typeof step.max_context_tokens === 'number') {
+              restoredUsage = {
+                current: step.current_context_tokens || 0,
+                max: step.max_context_tokens,
+              }
+            }
+          }
+        }
+        if (restoredUsage) setContextUsage(restoredUsage)
       } catch (e) {
         console.error('加载会话消息失败', e)
         setMessages([])
@@ -155,11 +180,16 @@ function Chat() {
       try {
         const session = await sessionApi.create({ title: '新对话' })
         sessionId = session.id
+        // 标记该会话为本地发起发送，避免 setCurrentSessionId 触发的 loadMessages 覆盖本地消息
+        pendingSendSessionRef.current = session.id
         setCurrentSessionId(session.id)
         refreshSessions()
       } catch (e) {
         console.error('自动创建会话失败', e)
       }
+    } else {
+      // 已有会话内发送：同样标记，防止其它原因触发的重载覆盖流式消息
+      pendingSendSessionRef.current = sessionId
     }
 
     const userMessage: Message = { role: 'user', content: query }
@@ -349,6 +379,15 @@ function Chat() {
                     break
                   }
 
+                  // 上下文 token 用量：更新进度圆环
+                  case 'token_usage': {
+                    setContextUsage({
+                      current: parsed.current_context_tokens,
+                      max: parsed.max_context_tokens,
+                    })
+                    break
+                  }
+
                   // 错误事件
                   case 'error': {
                     fullContent = `⚠️ ${parsed.content || '执行出错'}`
@@ -451,6 +490,8 @@ function Chat() {
     } finally {
       setIsStreaming(false)
       refreshSessions()
+      // 清除本地发送标记：之后再切回该会话时正常从服务端加载
+      pendingSendSessionRef.current = null
     }
   }
 
@@ -520,6 +561,7 @@ function Chat() {
         selectedModelName={selectedModelName}
         retrievalMode={retrievalMode}
         auxiliaryKbIds={auxiliaryKbIds}
+        contextUsage={contextUsage}
         knowledgeBases={knowledgeBases}
         llmConfigs={llmConfigs}
         onInputChange={setInput}

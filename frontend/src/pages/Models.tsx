@@ -490,11 +490,11 @@ function Models() {
                 type="number"
                 value={form.max_context_tokens}
                 onChange={(e) => setForm({ ...form, max_context_tokens: e.target.value })}
-                placeholder="不填则不限制，建议设为模型上下文窗口的 60%"
+                placeholder="留空默认 200000（200K）"
                 className="mt-1.5"
               />
               <p className="text-xs text-muted-foreground mt-1.5">
-                限制发送给模型的检索上下文长度，超出部分按相关性从低到高裁剪
+                填模型的完整上下文窗口（如 128000、1000000）。用于检索上下文裁剪和 Agent 上下文管理；留空默认 200K，百万上下文模型请手动填写
               </p>
             </div>
             {dialogTestResult && (

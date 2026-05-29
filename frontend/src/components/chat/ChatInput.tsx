@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
+import ContextUsageRing from '@/components/chat/ContextUsageRing'
 
 interface KnowledgeBaseItem {
   id: string
@@ -27,6 +28,7 @@ interface ChatInputProps {
   selectedModelName: string
   retrievalMode: string
   auxiliaryKbIds: string[]
+  contextUsage: { current: number; max: number }
   knowledgeBases: KnowledgeBaseItem[]
   llmConfigs: LLMConfigItem[]
   onInputChange: (value: string) => void
@@ -45,6 +47,7 @@ function ChatInput({
   selectedModelName,
   retrievalMode,
   auxiliaryKbIds,
+  contextUsage,
   knowledgeBases,
   llmConfigs,
   onInputChange,
@@ -146,6 +149,12 @@ function ChatInput({
 
             {/* 右侧 */}
             <div className="flex items-center gap-2">
+              <ContextUsageRing
+                currentTokens={contextUsage.current}
+                maxTokens={contextUsage.max}
+                visible={contextUsage.max > 0}
+              />
+
               <Select value={selectedModel} onValueChange={onModelChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-transparent hover:bg-muted/50 rounded-lg px-2 gap-1 text-xs text-muted-foreground shadow-none focus:ring-0">
                   <Cpu className="h-3 w-3 shrink-0" />

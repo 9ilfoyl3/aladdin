@@ -271,12 +271,15 @@ def _build_context(chunks: list[RetrievalResult], max_tokens: int | None = None)
 
     Args:
         chunks: 检索结果列表（已按相关性排序）
-        max_tokens: 上下文最大 token 数，None 表示不限制
+        max_tokens: 上下文最大 token 数，None 表示使用默认 200K（与 Agent 模式一致）
     """
     import re
 
     if not chunks:
         return "（未找到相关内容）"
+    # 与 Agent 模式保持一致：模型未配置 max_context_tokens 时回退默认 200K
+    if not max_tokens:
+        max_tokens = AgentConfig.max_context_tokens
     parts = []
     total_chars = 0
     # 按 2 字符/token 估算
@@ -559,6 +562,15 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "content": event.data.get("content", ""),
             "done": event.done,
         }
+    elif event.type == EventType.TOKEN_USAGE:
+        return {
+            "type": "token_usage",
+            "prompt_tokens": event.data.get("prompt_tokens", 0),
+            "completion_tokens": event.data.get("completion_tokens", 0),
+            "total_tokens": event.data.get("total_tokens", 0),
+            "max_context_tokens": event.data.get("max_context_tokens", 0),
+            "current_context_tokens": event.data.get("current_context_tokens", 0),
+        }
     elif event.type == EventType.ERROR:
         return {
             "type": "error",
@@ -635,6 +647,7 @@ async def _stream_response(
         # 创建 AgentConfig
         config = AgentConfig(
             max_iterations=settings.agent_max_iterations,
+            max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
             web_search_enabled=bool(settings.searxng_url),
             thinking_enabled=thinking_enabled,
             system_prompt=render_system_prompt(

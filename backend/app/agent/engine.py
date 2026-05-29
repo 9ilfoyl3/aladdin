@@ -21,10 +21,14 @@ from app.agent.memory.context_manager import (
     ContextManager,
     estimate_tokens,
 )
+from app.agent.memory.compress import compress_context
+from app.agent.memory.consolidator import MemoryConsolidator
+from app.agent.memory.token_estimator import TokenEstimator
+from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
 from app.agent.tools.base import ToolResult
 from app.agent.tools.registry import ToolRegistry
-from app.models.provider import ChatResponse, LLMProvider, LLMToolCall
+from app.models.provider import ChatResponse, LLMProvider, LLMToolCall, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +164,18 @@ class AgentEngine:
         self._event_bus = event_bus
         # 用于 stuck loop 检测
         self._previous_responses: list[str] = []
-        # 上下文窗口管理器
+        # 上下文窗口管理器（已废弃，保留字段不再调用 compress_messages）
         self._context_manager = ContextManager()
+        # 三层递进式上下文管理组件
+        # ① BPE Token 估算器 ② API Usage 追踪器 ③ LLM 摘要合并器
+        self._token_estimator = TokenEstimator()
+        self._usage_tracker = UsageTracker(self._token_estimator)
+        self._consolidator = MemoryConsolidator(
+            self._llm,
+            self._token_estimator,
+            self._config.max_context_tokens,
+            self._config.consolidation_threshold,
+        )
 
     async def execute(
         self,
@@ -279,11 +293,23 @@ class AgentEngine:
             )
 
             # 1. Think: 调用 LLM（含重试）
-            # 上下文窗口管理：在调用 LLM 前检查 token 数，必要时压缩
-            # 参考 WeKnora: engine.go runReActIteration() 中的 manageContextWindow
-            messages = self._context_manager.compress_messages(
-                messages, self._config.max_context_tokens
+            # 三层递进式上下文管理（参考 WeKnora observe.go manageContextWindow）：
+            # ① UsageTracker 估算当前 token 数（API Usage + BPE Delta）
+            # ② MemoryConsolidator 在超过 consolidation 阈值（默认 50%）时用 LLM 摘要早期历史
+            # ③ compress_context 在超过 80% 阈值时分组截断兜底
+            current_tokens = self._usage_tracker.estimate_current_tokens(messages)
+            if self._consolidator.should_consolidate(current_tokens):
+                messages = await self._consolidator.consolidate(messages)
+                current_tokens = self._usage_tracker.estimate_current_tokens(messages)
+            messages = compress_context(
+                messages,
+                self._token_estimator,
+                self._config.max_context_tokens,
+                current_tokens,
             )
+
+            # 本轮实际发送给 LLM 的消息数量，用于 UsageTracker 的 delta 估算
+            sent_count = len(messages)
 
             try:
                 response = await self._call_llm_with_retry(
@@ -303,6 +329,28 @@ class AgentEngine:
                         data={"error": str(e), "stage": "llm_call"},
                     ))
                 return
+
+            # LLM 调用后：从 response.usage 更新 UsageTracker（Task 7.3）
+            # 无 usage 或 total_tokens <= 0 时 UsageTracker.update 内部会跳过，
+            # 下次估算继续使用全量 BPE（Req 5.2 / 7.3）
+            usage: TokenUsage | None = response.usage
+            if usage is not None:
+                self._usage_tracker.update(usage, sent_count)
+
+            # 每轮 LLM 调用后发射 TOKEN_USAGE 事件，供前端上下文进度条消费（Task 7.4，Req 5.3 / 7.1）
+            # 无 API usage 时 prompt/completion/total 为 0，current_context_tokens 为 BPE 估算值（Req 7.3）
+            current_context_tokens = self._usage_tracker.estimate_current_tokens(messages)
+            await self._event_bus.emit(AgentEvent(
+                type=EventType.TOKEN_USAGE,
+                session_id=session_id,
+                data={
+                    "prompt_tokens": usage.prompt_tokens if usage else 0,
+                    "completion_tokens": usage.completion_tokens if usage else 0,
+                    "total_tokens": usage.total_tokens if usage else 0,
+                    "max_context_tokens": self._config.max_context_tokens,
+                    "current_context_tokens": current_context_tokens,
+                },
+            ))
 
             # 处理空响应（content 为空且无 tool_calls）
             if not response.content and not response.tool_calls:

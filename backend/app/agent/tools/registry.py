@@ -50,6 +50,11 @@ class ToolRegistry:
                 }
             }
         ]
+
+        返回前按工具名称（function.name）字母序稳定排序，保证相同工具集合
+        多次调用产生字节级相同的 JSON 序列化结果，最大化 LLM API 的
+        prompt prefix caching 命中率。
+        参考 WeKnora: internal/agent/tools/registry.go。
         """
         definitions = []
         for tool in self._tools.values():
@@ -61,6 +66,8 @@ class ToolRegistry:
                     "parameters": tool.parameters,
                 },
             })
+        # 按 function.name 字母序稳定排序，保证 JSON 字节级稳定（Prompt Caching）
+        definitions.sort(key=lambda item: item["function"]["name"])
         return definitions
 
     async def execute(self, name: str, args: dict) -> ToolResult:

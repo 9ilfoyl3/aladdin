@@ -357,6 +357,8 @@ export interface SessionMessageItem {
     duration_ms: number | undefined
     step: string
     detail: string
+    max_context_tokens?: number
+    current_context_tokens?: number
   }[] | null
   created_at: string
 }

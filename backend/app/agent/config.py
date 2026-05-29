@@ -43,5 +43,11 @@ class AgentConfig:
     # 工具输出最大字符数，超过时截断（保留头尾）
     max_tool_output_chars: int = 16000
 
+    # 记忆合并触发阈值（占 max_context_tokens 的比例，有效范围 0-1）
+    consolidation_threshold: float = 0.5
+
+    # 是否保留历史检索结果（为 True 时不对历史 KB 工具结果做脱敏处理）
+    retain_retrieval_history: bool = False
+
     # 自定义系统提示词，空字符串表示使用默认 Progressive RAG prompt
     system_prompt: str = ""
