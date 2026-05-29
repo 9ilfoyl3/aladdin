@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
@@ -250,6 +250,30 @@ function formatDuration(ms: number): string {
   return `${m}m${s}s`
 }
 
+// 实时耗时计数：running 期间以 100ms 步进累加，结束后返回后端最终耗时
+function useLiveDuration(running: boolean, finalMs?: number): number | undefined {
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!running) {
+      startRef.current = null
+      return
+    }
+    if (startRef.current === null) startRef.current = Date.now()
+    setElapsed(Date.now() - startRef.current)
+    const timer = setInterval(() => {
+      if (startRef.current !== null) setElapsed(Date.now() - startRef.current)
+    }, 100)
+    return () => clearInterval(timer)
+  }, [running])
+
+  // 结束后优先展示后端返回的精确耗时；running 期间展示本地累加值
+  if (!running && finalMs !== undefined) return finalMs
+  if (running) return elapsed
+  return finalMs
+}
+
 // 步骤统计面板：顶部汇总（步骤数 + 整体耗时），可折叠展开各步骤
 function StepSummaryPanel({
   steps,
@@ -265,6 +289,8 @@ function StepSummaryPanel({
   const [open, setOpen] = useState(true)
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
   const running = isStreaming && isLast
+  // 实时耗时：执行中持续累加，结束后切换为后端精确值
+  const displayDuration = useLiveDuration(running, totalDurationMs)
 
   function toggleStep(i: number) {
     setExpandedSteps((prev) => {
@@ -292,11 +318,11 @@ function StepSummaryPanel({
           <span className="text-primary font-medium mx-1">{steps.length}</span>
           个步骤
         </span>
-        {totalDurationMs !== undefined && (
+        {displayDuration !== undefined && (
           <span className="text-muted-foreground">
             ，耗时
             <span className="text-primary font-medium ml-1">
-              {formatDuration(totalDurationMs)}
+              {formatDuration(displayDuration)}
             </span>
           </span>
         )}
