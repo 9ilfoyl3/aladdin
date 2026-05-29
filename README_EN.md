@@ -1,162 +1,161 @@
 <div align="center">
 
-# Artoo
+# 🧞 Artoo — Let the Knowledge Base Retrieve Itself: A ReAct-Agent-Driven Agentic RAG Framework
 
-**Open-Source Agentic RAG Knowledge Base System**
+**Open-source · LLM-powered · Self-hostable intelligent knowledge base**
 
-Achieves more accurate knowledge retrieval through agent-orchestrated query routing, rewriting, iterative retrieval, and reflection mechanisms.
+Built around a ReAct Agent, Artoo lets the LLM autonomously orchestrate keyword search, semantic retrieval, deep reading, web search, and MCP tools — delivering an "evidence-first, then answer" traceable Q&A experience.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
+[![Milvus](https://img.shields.io/badge/Milvus-2.4+-00a1ea.svg)](https://milvus.io/)
 
-English | [中文](./README.md)
+| [简体中文](./README.md) | **English** |
 
 </div>
 
----
-
-## 🔥 Key Features
-
-**Intelligent Retrieval**
-- **Agent Orchestration** — Routing → query rewriting → iterative retrieval → reflection, up to 3 iterations
-- **Hybrid Retrieval** — Dense semantic + sparse keyword search with RRF fusion and reranking
-- **Smart Routing** — Auto-determines query complexity; simple queries take fast path, complex ones go through iterative retrieval
-- **Graceful Degradation** — Agent errors fall back to hybrid retrieval; LLM unavailability returns raw text
-
-**Document Processing**
-- **Multi-Format** — PDF, Word, Excel, PPT, TXT, Markdown, images
-- **Mixed Content** — Auto-extracts embedded images with OCR, inserts recognized text at page positions
-- **Structure-Aware Chunking** — Splits by document logical structure with parent-child chunk mapping
-- **Async Pipeline** — Redis Stream task queue + independent Worker process, API decoupled from processing
-
-**Flexible Configuration**
-- **Multi-Model Management** — Multiple LLM configs with frontend dynamic switching
-- **Embedding / Rerank** — Unified remote service calls, visual frontend configuration, hot-swappable
-- **OCR Service Management** — Visual management with default + fallback auto-switching
-- **OpenAI Compatible** — SSE streaming, OpenAI API format, API Key authentication
+<p align="center">
+  <a href="#-overview">Overview</a> •
+  <a href="#%EF%B8%8F-architecture">Architecture</a> •
+  <a href="#-feature-overview">Features</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-documentation">Docs</a> •
+  <a href="#-developer-guide">Developer Guide</a>
+</p>
 
 ---
+
+## 📌 Overview
+
+**Artoo** is an open-source, LLM-powered Agentic RAG knowledge base framework built for enterprise-grade document understanding and traceable Q&A.
+
+It is organized around three core capabilities: a **ReAct Agent** that autonomously decides retrieval strategy and stopping conditions within a Think → Act → Observe loop; **three-way hybrid retrieval** that recalls in parallel via dense semantic, sparse vector, and BM25 full-text search, then produces high-quality context through RRF fusion, reranking, MMR de-duplication, and parent-chunk expansion; and **structure-aware document processing** that splits by logical structure, maps parent/child chunks, and runs concurrent OCR on mixed text-and-image documents. Combined with visual multi-model management, hot-swappable Embedding / Rerank / OCR services, MCP tool integration, Agent Skills, and three-tier progressive context management, Artoo turns scattered documents into a queryable, reasoning-capable, traceable knowledge asset.
+
+All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to external services, keeping the backend lightweight and easy to self-host offline with full data sovereignty. The agent's reasoning is streamed to the frontend in real time via an EventBus — thoughts, tool calls, citations, and context token usage are all observable.
+
+## ✨ Highlights
+
+- **A real ReAct Agent** — the LLM autonomously calls tools, analyzes results, and decides whether to keep searching or submit an answer via function calling, rather than a fixed orchestration pipeline.
+- **Evidence-First discipline** — a built-in Progressive RAG system prompt (Assess-Reconnaissance-Plan-Execute workflow) enforces "search first, deep-read chunks, then answer" — no fabrication from parametric memory.
+- **Three-way hybrid retrieval** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion.
+- **Three-tier progressive context management** — BPE token estimation + API usage delta tracking + LLM summary consolidation + group-based truncation fallback keep long conversations within the window.
+- **Extensible tool ecosystem** — built-in knowledge search, keyword matching, deep reading, web search, thinking, and skill loading tools, plus remote MCP Server integration.
+- **Fully observable** — agent thoughts, tool calls, citation tracing, and token usage are streamed via SSE and rendered token-by-token in the UI.
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Access Layer                            │
-│   Chat API (OpenAI Compatible)  │  Admin API (RESTful)      │
+│                        Access Layer                          │
+│   Chat API (OpenAI-compatible · SSE)  │  Admin API (REST)    │
+│   MCP Server (exposes KB capabilities)                       │
 ├─────────────────────────────────────────────────────────────┤
-│                  Agent Orchestration Layer                   │
-│   QueryRouter → QueryRewriter → Executor → Reflector        │
+│                      ReAct Agent Engine                      │
+│   Think(stream LLM) → Analyze(stop) → Act(tools) → Observe   │
+│   EventBus  │  3-tier context management  │  Skills          │
 ├─────────────────────────────────────────────────────────────┤
-│                     Retrieval Tool Layer                     │
-│   DenseRetriever │ SparseRetriever │ HybridRetriever        │
-│                      Reranker                               │
+│                          Tool Layer                          │
+│  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
+│  thinking │ web_search │ final_answer │ MCP Tools            │
 ├─────────────────────────────────────────────────────────────┤
-│                    Index / Storage Layer                     │
-│   Milvus (Dense + Sparse Vectors)  │  PostgreSQL (Metadata) │
+│                      Retrieval Tool Layer                    │
+│   Dense + Sparse + BM25 → RRF → Rerank → MMR → parent expand │
 ├─────────────────────────────────────────────────────────────┤
-│                   Data Processing Layer                      │
-│   Loader → Chunker → Embedder → Indexer                     │
-│   Worker (Redis Stream Consumer)                            │
+│                     Index / Storage Layer                    │
+│   Milvus (dense + sparse vectors)  │  PostgreSQL (metadata)  │
 ├─────────────────────────────────────────────────────────────┤
-│                  Model Service Layer (External)              │
-│   LLM API  │  Embedding API  │  Rerank API  │  OCR API     │
+│                     Data Processing Layer                    │
+│   Loader → OCR → Chunker → Embedder → Indexer                │
+│   Worker (Redis Stream consumer, async processing)           │
+├─────────────────────────────────────────────────────────────┤
+│                 Model Service Layer (external HTTP)          │
+│   LLM API  │  Embedding API  │  Rerank API  │  OCR API       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-> All AI inference (LLM / Embedding / Rerank / OCR) is handled via HTTP calls to external services. The backend is lightweight to deploy.
+Fully modular from parsing, vectorization, and retrieval to LLM inference — every component is swappable. Supports local / private-cloud deployment with full data sovereignty and a zero-barrier Web UI.
 
----
+## 🧩 Feature Overview
+
+**Intelligent Conversation**
+
+| Capability | Details |
+|------------|---------|
+| ReAct Reasoning | The LLM decides autonomously within a Think → Act → Observe loop: call tools, analyze results, decide when to stop |
+| Tool Calling | Built-in knowledge search, keyword matching, deep reading, web search, thinking, skill loading; remote MCP tools |
+| Evidence-First | Progressive RAG prompt enforces "search, deep-read chunks, then answer" with inline citations and no fabrication |
+| Agent Presets | Built-in "Quick Q&A" (single-pass hybrid) and "Smart Reasoning" (multi-step agent); prompts editable via AI rewrite |
+| Context Management | Three-tier progressive compression (token estimation + usage tracking + LLM summary + group truncation) |
+| Streaming Visibility | Thoughts, tool calls, citations, and token usage streamed via SSE and rendered token-by-token |
+
+**Knowledge Management**
+
+| Capability | Details |
+|------------|---------|
+| Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images |
+| Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
+| Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
+| Three-Way Hybrid Retrieval | Dense + Sparse + BM25, RRF fusion + Rerank + MMR + parent-chunk expansion |
+| Async Pipeline | Redis Stream task queue + independent Worker, API decoupled from processing, resumable |
+| Retrieval Testing | Dedicated page to compare direct / hybrid / agent modes |
+
+**Integrations & Extensions**
+
+| Capability | Details |
+|------------|---------|
+| LLM | Any OpenAI-compatible API (vLLM / DeepSeek / Qwen / …) / Ollama |
+| Embedding / Rerank | Any OpenAI-compatible remote service (TEI / Infinity / vLLM), hot-swappable via frontend |
+| OCR | PaddleOCR (local) / TextIn / generic external API; multi-provider with default + fallback auto-switching |
+| Vector DB | Milvus 2.4+ (dense + sparse vectors) |
+| MCP | Exposes KB capabilities (MCP Server) and integrates remote MCP tools (discovery + auto-registration) |
+| Skills | Progressive Disclosure loading — read full SKILL.md instructions on demand |
+
+**Platform**
+
+| Capability | Details |
+|------------|---------|
+| Deployment | Local / Docker / offline intranet (ARM64 + AMD64 image packaging) |
+| Interfaces | Web UI / RESTful API / OpenAI-compatible API / MCP Server |
+| Multi-Model Management | DB-persisted multiple LLM configs; create / edit / set-default / connectivity-test; dynamic switching |
+| Security | API Key auth (SHA256 hashed, only `/v1/` paths); external MCP tool output marked untrusted |
+| Graceful Degradation | Agent error → hybrid → pure retrieval; LLM down → raw retrieved text; Reranker error → RRF results |
+| Observability | Agent thought / tool / token-usage SSE events; session history persists agent_steps |
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### 🛠 Prerequisites
 
 | Dependency | Version | Notes |
 |-----------|---------|-------|
 | Docker & Docker Compose | 20.10+ | For Milvus, PostgreSQL, Redis |
 | Python | 3.12 | ⚠️ 3.13+ has compatibility issues |
 | Node.js | 18+ | Frontend build |
-| LLM API | - | Any OpenAI-compatible API |
-| Embedding Service | - | TEI / Infinity / vLLM providing `/v1/embeddings` |
-| Rerank Service | - | TEI / Jina (optional, retrieval works without it) |
+| LLM API | - | Any OpenAI-compatible API / Ollama |
+| Embedding Service | - | TEI / Infinity / vLLM (configurable after startup) |
+| Rerank Service | - | Optional (retrieval works without it) |
 
-### 1. Clone
+### 📦 Installation & Launch
 
 ```bash
 git clone <repo-url>
 cd artoo
-```
 
-### 2. Start Infrastructure
-
-```bash
+# Start infrastructure (Milvus + PostgreSQL + Redis)
 docker compose up -d
-# Starts Milvus + PostgreSQL + Redis + etcd + MinIO
-```
 
-### 3. Install Dependencies
-
-<details>
-<summary><b>macOS / Linux</b></summary>
-
-```bash
-make install
-```
-
-</details>
-
-<details>
-<summary><b>Windows (PowerShell)</b></summary>
-
-```powershell
-conda create -n artoo python=3.12 -y
-conda activate artoo
-
-pip install --upgrade pip
-pip install -r backend/requirements-base.txt
-
-cd frontend && npm install && cd ..
-```
-
-</details>
-
-### 4. Configure
-
-```bash
+# Configure environment
 cp backend/.env.example backend/.env
+# Edit backend/.env: at minimum set LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
 ```
-
-Edit `backend/.env`:
-
-```env
-# === LLM (required) ===
-LLM_PROVIDER=vllm
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
-LLM_API_KEY=sk-your-key
-
-# === Embedding (optional, can be configured via frontend after startup) ===
-EMBED_BASE_URL=http://your-embedding-server/v1
-EMBED_MODEL=BAAI/bge-m3
-EMBED_API_KEY=
-
-# === Rerank (optional, can be configured via frontend after startup) ===
-RERANK_BASE_URL=http://your-rerank-server/v1
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_API_KEY=
-```
-
-> **Embedding / Rerank can be configured after startup.** Add remote service URLs via the frontend "Embedding & Rerank Config" page.
-
-### 5. Launch
 
 <details>
 <summary><b>macOS / Linux</b></summary>
 
 ```bash
-make dev
-# Starts API server + Worker + frontend dev server
+make install   # installs deps, auto-creates .venv
+make dev       # starts API + Worker + frontend
 ```
 
 </details>
@@ -165,7 +164,14 @@ make dev
 <summary><b>Windows (PowerShell) — three terminals</b></summary>
 
 ```powershell
-# Terminal 1: API server
+conda create -n artoo python=3.12 -y
+conda activate artoo
+
+pip install --upgrade pip
+pip install -r backend/requirements.txt
+cd frontend && npm install && cd ..
+
+# Terminal 1: API
 cd backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
@@ -180,47 +186,67 @@ npm run dev
 
 </details>
 
-### 6. Access
+Once started, visit **http://localhost:5173**.
+
+> **Embedding / Rerank / LLM can all be configured after startup** via the frontend "Embedding & Rerank Config" and "Model Management" pages — changes take effect immediately, no restart needed.
+
+### 🌐 Service URLs
 
 | Service | URL |
 |---------|-----|
-| Frontend UI | http://localhost:5173 |
-| API Docs | http://localhost:8000/docs |
+| Frontend UI | `http://localhost:5173` |
+| API Docs | `http://localhost:8000/docs` |
+| MCP Server | `http://localhost:8000/mcp` |
 
-### 7. Usage
+### 🧭 Usage Flow
 
-1. **Embedding Config** → Add remote Embedding service URL → Test connectivity → Enable
-2. **Model Management** → Add LLM config → Test connectivity → Set as default
-3. **Knowledge Base** → Create → Upload documents → Wait for processing
-4. **Chat** → Select knowledge base → Ask questions
+1. **Embedding Config** → add remote Embedding service URL → test connectivity → enable
+2. **Model Management** → add LLM config → test connectivity → set as default
+3. **Knowledge Base** → create → upload documents → wait for the Worker to finish processing
+4. **Chat** → select a knowledge base and an Agent preset → ask questions
 
----
-
-## 🐳 Docker Deployment (Production)
+## 🐳 Docker Deployment (Production / Intranet)
 
 ```bash
 mkdir -p /opt/artoo && cd /opt/artoo
 
-docker load -i app.tar
-docker load -i infra.tar    # First deployment only
+docker load -i artoo-backend.tar
+docker load -i artoo-frontend.tar
+# First deployment also requires loading infrastructure images and the model package
 
 cp .env.example .env && vim .env
-
 docker compose up -d
 ```
 
-See [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) for details.
-
----
+Image packaging (ARM64 / AMD64) and offline intranet deployment are detailed in the [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) and [macOS Packaging Guide](./DEPLOYMENT_GUIDE_MAC.md).
 
 ## 🔍 Retrieval Modes
 
 | Mode | Flow | Use Case |
 |------|------|----------|
-| **Smart** (agent) | Router → query rewriting → iterative retrieval + reflection | Complex multi-hop queries |
-| **Fast** (hybrid) | Dense + sparse parallel → RRF fusion → reranking | General purpose, low latency |
+| **direct** | Dense vector ANN retrieval | Simple queries, low latency |
+| **hybrid** (Quick Q&A) | Dense + Sparse + BM25 parallel → RRF → Rerank → MMR → parent expansion | General purpose |
+| **agent** (Smart Reasoning) | ReAct loop: autonomous grep / semantic search / deep read / thinking / web search, iterating until it submits an answer | Complex multi-hop queries requiring synthesis |
 
----
+### Agent ReAct Loop
+
+```
+User query → (if history) resolve coreferences, redact prior KB results to force fresh retrieval
+  │
+  └─ while not complete and iteration < max_iterations:
+       ├─ Think: stream the LLM, emit THOUGHT events in real time
+       ├─ Context mgmt: usage estimate → (>50%) LLM summary consolidation → (>80%) group truncation
+       ├─ Analyze: decide termination
+       │    ├─ final_answer tool → submit answer
+       │    ├─ natural stop → nudge to call final_answer
+       │    └─ stuck loop / empty response → retry or synthesize
+       ├─ Act: execute tool calls (optionally in parallel), emit TOOL_CALL / TOOL_RESULT
+       └─ Observe: append tool results to messages, next round
+  │
+  └─ Exception → degrade to the hybrid fast path
+```
+
+For details on tools, prompts, context management, and chunking, see the [Technical Architecture](./ARCHITECTURE_EN.md).
 
 ## 🔧 Tech Stack
 
@@ -232,10 +258,9 @@ See [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) for details.
 | Task Queue | Redis Stream |
 | Frontend | React 18 + TypeScript + Tailwind CSS v4 |
 | Document Parsing | PyMuPDF / python-docx / openpyxl / python-pptx |
-| LLM | Any OpenAI-compatible API |
-| Embedding / Rerank | Any OpenAI-compatible remote service (TEI / Infinity / vLLM) |
-
----
+| Token Estimation | tiktoken (cl100k_base) |
+| LLM | Any OpenAI-compatible API / Ollama |
+| Embedding / Rerank | Any OpenAI-compatible remote service |
 
 ## 📂 Project Structure
 
@@ -244,52 +269,71 @@ artoo/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI entry point
-│   │   ├── config.py            # Configuration
 │   │   ├── worker_main.py       # Worker entry point
-│   │   ├── api/                 # API routes
-│   │   ├── agent/               # Agent orchestration
-│   │   ├── retrieval/           # Retrieval tools
-│   │   ├── pipeline/            # Document processing pipeline
-│   │   ├── models/              # Model abstraction layer (LLM/Embedding/Rerank Provider)
-│   │   ├── storage/             # Storage layer (Milvus/PostgreSQL)
-│   │   └── schema/              # Data models
+│   │   ├── config.py            # Configuration
+│   │   ├── api/                 # API routes (chat / kb / document / *config …)
+│   │   ├── agent/               # ReAct Agent engine
+│   │   │   ├── engine.py        #   Core ReAct loop
+│   │   │   ├── events.py        #   EventBus
+│   │   │   ├── tools/           #   Tool layer (search / deep read / web / MCP …)
+│   │   │   ├── memory/          #   Three-tier context management
+│   │   │   ├── skills/          #   Skills (Progressive Disclosure)
+│   │   │   └── prompts/         #   Progressive RAG system prompt
+│   │   ├── retrieval/           # Retrieval tools (hybrid / vector / sparse / bm25 …)
+│   │   ├── pipeline/            # Document processing (loader / ocr / chunker …)
+│   │   ├── models/              # Model provider abstraction (LLM / Embedding / Rerank)
+│   │   └── storage/             # Storage layer (Milvus / PostgreSQL)
 │   ├── Dockerfile
-│   └── requirements-base.txt    # Python dependencies
+│   └── requirements.txt
 ├── frontend/                    # React frontend
 ├── docker-compose.yml           # Local dev infrastructure
-├── docker-compose-production.yml # Production deployment
-├── Makefile                     # Dev commands
-└── scripts/                     # Packaging & deployment scripts
+├── docker-compose-production.yml
+├── Makefile
+└── scripts/
 ```
-
----
 
 ## 🛠️ Commands
 
 ```bash
-make install            # Install all dependencies
+make install            # Install all dependencies (auto-creates .venv)
 make dev                # Start frontend + backend + Worker
-make infra              # Start infrastructure
+make dev-backend        # API only
+make dev-worker         # Worker only
+make dev-frontend       # Frontend only
+make infra              # Start infrastructure (Milvus + Redis + PostgreSQL)
 make infra-down         # Stop infrastructure
-make test               # Run tests
+make download-models    # Download Embedding / Rerank models locally
+make test               # Run backend tests
 ```
 
----
-
-## 📖 Documentation
+## 📘 Documentation
 
 | Document | Description |
 |----------|-------------|
+| [Technical Architecture](./ARCHITECTURE_EN.md) | ReAct engine, tool layer, context management, chunking, OCR extension |
 | [Deployment & Operations](./DEPLOY_OPERATIONS.md) | Production deployment, operations, configuration |
-| [Technical Architecture](./ARCHITECTURE_EN.md) | Agent orchestration, chunking strategy, OCR extension details |
 | [macOS Packaging Guide](./DEPLOYMENT_GUIDE_MAC.md) | Docker image packaging for intranet deployment |
+| [Windows Developer Guide](./DEPLOYMENT_GUIDE.md) | Windows local dev setup |
 
----
+## 🗺️ Roadmap
+
+- [ ] End-to-end retrieval evaluation (RAGAS, quantifying recall & generation quality)
+- [ ] Chunk metadata enrichment (Enricher summaries / keywords) + filtered retrieval
+- [ ] Database migration management (Alembic)
+- [ ] Knowledge-graph-enhanced retrieval (GraphRAG)
+- [ ] Data-source connectors (Feishu / Notion)
+- [ ] Multi-worker horizontal scaling
+
+## 🧭 Developer Guide
+
+Fast development mode requires no Docker rebuilds: run `make infra` for infrastructure, then `make dev-backend`, `make dev-worker`, and `make dev-frontend` separately. The backend supports `--reload` hot-reload and the frontend uses Vite hot module replacement. See the [Windows Developer Guide](./DEPLOYMENT_GUIDE.md).
 
 ## 🤝 Contributing
 
 Issues and Pull Requests are welcome.
 
+**Process:** Fork → Create branch → Commit changes → Open PR
+
 ## 📄 License
 
-[MIT License](./LICENSE)
+Released under the [MIT License](./LICENSE). You are free to use, modify, and distribute the code with proper attribution.
