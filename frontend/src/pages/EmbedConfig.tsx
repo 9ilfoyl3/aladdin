@@ -88,8 +88,8 @@ function EmbedConfig() {
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [testing, setTesting] = useState(false)
 
-  // 卡片列表中的测试状态：key 为 config id
-  const [cardTestingId, setCardTestingId] = useState<string | null>(null)
+  // 卡片列表中的测试状态：支持多个同时测试
+  const [cardTestingIds, setCardTestingIds] = useState<Set<string>>(new Set())
   const [cardTestResults, setCardTestResults] = useState<Record<string, { success: boolean; message: string }>>({})
 
   async function handleTest() {
@@ -114,7 +114,7 @@ function EmbedConfig() {
   }
 
   async function handleCardTest(item: EmbedConfigItem) {
-    setCardTestingId(item.id)
+    setCardTestingIds((prev) => new Set(prev).add(item.id))
     setCardTestResults((prev) => {
       const next = { ...prev }
       delete next[item.id]
@@ -126,7 +126,11 @@ function EmbedConfig() {
     } catch {
       setCardTestResults((prev) => ({ ...prev, [item.id]: { success: false, message: '请求失败' } }))
     } finally {
-      setCardTestingId(null)
+      setCardTestingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(item.id)
+        return next
+      })
     }
   }
 
@@ -235,10 +239,10 @@ function EmbedConfig() {
             variant="outline"
             className="h-7 text-xs gap-1 cursor-pointer"
             onClick={() => handleCardTest(item)}
-            disabled={cardTestingId === item.id}
+            disabled={cardTestingIds.has(item.id)}
           >
             <Zap className="h-3 w-3" />
-            {cardTestingId === item.id ? '测试中...' : '测试'}
+            {cardTestingIds.has(item.id) ? '测试中...' : '测试'}
           </Button>
           <Button
             size="sm"
