@@ -274,8 +274,13 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
                 if resp.status_code != 200:
                     return EmbedTestResponse(success=False, message=f"服务不可达 (HTTP {resp.status_code})")
                 data = resp.json()
-                if data.get("status") != "ready":
-                    return EmbedTestResponse(success=False, message=f"服务未就绪: {data.get('status')}")
+                # 兼容多种 health 响应格式：
+                # - embedding-rerank-server: {"status": "ready", ...}
+                # - Infinity: {"unix": 1748490407.766}（200 即健康）
+                # - TEI: {"status": "ok"} 或直接 200
+                status = data.get("status")
+                if status and status not in ("ready", "ok"):
+                    return EmbedTestResponse(success=False, message=f"服务未就绪: {status}")
         except httpx.ConnectError:
             return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
         except httpx.TimeoutException:
