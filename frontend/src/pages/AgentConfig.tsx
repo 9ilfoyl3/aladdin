@@ -13,6 +13,7 @@ interface AgentPresetItem {
   name: string
   description: string | null
   config_json: {
+    agent_mode?: 'agent' | 'hybrid'
     max_iterations?: number
     temperature?: number
     thinking_enabled?: boolean
@@ -26,6 +27,7 @@ interface AgentPresetItem {
 interface FormData {
   name: string
   description: string
+  agent_mode: 'agent' | 'hybrid'
   max_iterations: string
   temperature: string
   thinking_enabled: boolean
@@ -35,6 +37,7 @@ interface FormData {
 const emptyForm: FormData = {
   name: '',
   description: '',
+  agent_mode: 'agent',
   max_iterations: '20',
   temperature: '0.7',
   thinking_enabled: true,
@@ -67,6 +70,7 @@ function AgentConfig() {
       name: data.name,
       description: data.description || undefined,
       config_json: {
+        agent_mode: data.agent_mode,
         max_iterations: parseInt(data.max_iterations) || 20,
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
@@ -84,6 +88,7 @@ function AgentConfig() {
       name: data.name,
       description: data.description || undefined,
       config_json: {
+        agent_mode: data.agent_mode,
         max_iterations: parseInt(data.max_iterations) || 20,
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
@@ -115,6 +120,7 @@ function AgentConfig() {
     setForm({
       name: item.name,
       description: item.description || '',
+      agent_mode: item.config_json?.agent_mode ?? 'agent',
       max_iterations: String(item.config_json?.max_iterations ?? 20),
       temperature: String(item.config_json?.temperature ?? 0.7),
       thinking_enabled: item.config_json?.thinking_enabled ?? true,
@@ -262,6 +268,33 @@ function AgentConfig() {
                 placeholder="预设用途说明（可选）"
                 className="mt-1.5"
               />
+            </div>
+            <div>
+              <Label className="mb-2 block">运行模式</Label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, agent_mode: 'agent' })}
+                  className={`flex-1 px-3 py-2 rounded-md text-xs border cursor-pointer transition-colors ${
+                    form.agent_mode === 'agent'
+                      ? 'bg-primary/10 border-primary/30 text-primary'
+                      : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
+                  }`}
+                >
+                  智能推理（多步 ReAct）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, agent_mode: 'hybrid' })}
+                  className={`flex-1 px-3 py-2 rounded-md text-xs border cursor-pointer transition-colors ${
+                    form.agent_mode === 'hybrid'
+                      ? 'bg-primary/10 border-primary/30 text-primary'
+                      : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
+                  }`}
+                >
+                  快速问答（单轮检索）
+                </button>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>

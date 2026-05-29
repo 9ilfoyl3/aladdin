@@ -316,8 +316,24 @@ export const ocrConfigApi = {
 
 
 // Agent 预设配置接口
+export interface AgentPresetItem {
+  id: string
+  name: string
+  description: string | null
+  config_json: {
+    agent_mode?: 'agent' | 'hybrid'
+    max_iterations?: number
+    temperature?: number
+    thinking_enabled?: boolean
+    allowed_tools?: string[]
+  } | null
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
 export const agentPresetApi = {
-  list: () => request<unknown[]>('/agent-presets'),
+  list: () => request<AgentPresetItem[]>('/agent-presets'),
   create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean }) =>
     request<unknown>('/agent-presets', {
       method: 'POST',

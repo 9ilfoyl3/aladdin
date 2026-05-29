@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bot } from 'lucide-react'
-import { knowledgeBaseApi, llmConfigApi, sessionApi } from '@/lib/api'
+import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
@@ -27,7 +27,7 @@ function Chat() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
-  const [retrievalMode, setRetrievalMode] = useState('auto')
+  const [selectedPreset, setSelectedPreset] = useState('')
   const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
@@ -47,6 +47,19 @@ function Chat() {
     queryKey: ['llm-configs', 'chat-visible'],
     queryFn: () => llmConfigApi.list(true) as Promise<LLMConfigItem[]>,
   })
+
+  const { data: agentPresets = [] } = useQuery({
+    queryKey: ['agent-presets'],
+    queryFn: () => agentPresetApi.list(),
+  })
+
+  // 默认选中 is_default 的 Agent 预设
+  useEffect(() => {
+    if (agentPresets.length > 0 && !selectedPreset) {
+      const def = agentPresets.find((p) => p.is_default) ?? agentPresets[0]
+      if (def) setSelectedPreset(def.id)
+    }
+  }, [agentPresets, selectedPreset])
 
   // 默认选中 is_default 的模型
   useEffect(() => {
@@ -217,7 +230,7 @@ function Chat() {
           stream: true,
           knowledge_base_id: selectedKb || undefined,
           model_config_id: selectedModel || undefined,
-          retrieval_mode: retrievalMode === 'auto' ? undefined : retrievalMode,
+          agent_preset_id: selectedPreset || undefined,
           kb_ids: kbIds,
           session_id: sessionId || undefined,
         }),
@@ -559,16 +572,17 @@ function Chat() {
         selectedKb={selectedKb}
         selectedModel={selectedModel}
         selectedModelName={selectedModelName}
-        retrievalMode={retrievalMode}
+        selectedPreset={selectedPreset}
         auxiliaryKbIds={auxiliaryKbIds}
         contextUsage={contextUsage}
         knowledgeBases={knowledgeBases}
         llmConfigs={llmConfigs}
+        agentPresets={agentPresets}
         onInputChange={setInput}
         onSend={handleSend}
         onKbChange={setSelectedKb}
         onModelChange={setSelectedModel}
-        onRetrievalModeChange={setRetrievalMode}
+        onPresetChange={setSelectedPreset}
         onToggleAuxiliaryKb={toggleAuxiliaryKb}
       />
     </div>

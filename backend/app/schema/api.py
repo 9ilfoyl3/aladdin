@@ -33,6 +33,9 @@ class ChatCompletionRequest(BaseModel):
     model_config_id: Optional[str] = Field(
         default=None, description="LLM 模型配置 ID，为空时使用系统默认模型"
     )
+    agent_preset_id: Optional[str] = Field(
+        default=None, description="Agent 预设 ID，为空时使用默认预设"
+    )
     filter_doc_ids: Optional[list[str]] = Field(
         default=None, description="限定文档范围过滤，仅在指定文档中检索"
     )

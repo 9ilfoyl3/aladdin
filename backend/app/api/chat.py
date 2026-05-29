@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.config import AgentConfig
+from app.api.agent_config import get_effective_preset_config
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
@@ -367,13 +368,6 @@ def _build_hybrid_retriever() -> HybridRetriever:
     )
 
 
-async def _get_retrieval_mode(kb_id: str, request_mode: str | None) -> str:
-    """确定检索模式：请求指定 > 默认 agent"""
-    if request_mode:
-        return request_mode
-    return "agent"
-
-
 async def _retrieve_multi_kb(
     query: str,
     kb_ids: list[str],
@@ -592,9 +586,11 @@ async def _stream_response(
     kb_ids: list[str] | None = None,
     history: list[dict] | None = None,
     session_id: str | None = None,
+    preset_cfg: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    preset_cfg = preset_cfg or {}
 
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
@@ -646,10 +642,11 @@ async def _stream_response(
 
         # 创建 AgentConfig
         config = AgentConfig(
-            max_iterations=settings.agent_max_iterations,
+            max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
             max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
+            temperature=preset_cfg.get("temperature", AgentConfig.temperature),
             web_search_enabled=bool(settings.searxng_url),
-            thinking_enabled=thinking_enabled,
+            thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
             system_prompt=render_system_prompt(
                 AgentConfig(),
                 kb_names=[kb_id],
@@ -834,13 +831,17 @@ async def chat_completions(request: ChatCompletionRequest):
     if not user_query:
         raise HTTPException(status_code=400, detail="消息列表中缺少 user 角色消息")
 
-    # 确定检索模式
-    mode = await _get_retrieval_mode(request.knowledge_base_id, request.retrieval_mode)
+    # 加载生效的 Agent 预设（指定 > 默认 > 内置兜底）
+    preset_cfg = await get_effective_preset_config(request.agent_preset_id)
+
+    # 确定检索模式：显式 retrieval_mode > 预设的 agent_mode > 默认 agent
+    # 预设统一承载"快速问答(hybrid 单轮) / 智能推理(agent 多步)"的模式选择
+    mode = request.retrieval_mode or preset_cfg.get("agent_mode") or "agent"
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
     llm, stream_enabled, max_context_tokens, thinking_enabled = await _get_llm_for_request(request.model_config_id)
 
-    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, stream={request.stream}, session={request.session_id}")
+    print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, preset={request.agent_preset_id}, stream={request.stream}, session={request.session_id}")
 
     # 加载会话历史上下文
     history: list[dict] | None = None
@@ -865,7 +866,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg),
             media_type="text/event-stream",
         )
 

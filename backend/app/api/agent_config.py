@@ -55,8 +55,9 @@ _BUILTIN_PRESETS = [
     {
         "id": "preset-quick-qa",
         "name": "快速问答",
-        "description": "适合简单问题，快速返回结果",
+        "description": "单轮检索直接作答，适合简单问题，快速返回结果",
         "config_json": {
+            "agent_mode": "hybrid",
             "max_iterations": 5,
             "thinking_enabled": False,
             "temperature": 0.3,
@@ -66,8 +67,9 @@ _BUILTIN_PRESETS = [
     {
         "id": "preset-smart-reasoning",
         "name": "智能推理",
-        "description": "适合复杂问题，深度思考和多轮检索",
+        "description": "ReAct 多步推理，深度思考和多轮检索，适合复杂问题",
         "config_json": {
+            "agent_mode": "agent",
             "max_iterations": 20,
             "thinking_enabled": True,
             "temperature": 0.7,
@@ -75,6 +77,38 @@ _BUILTIN_PRESETS = [
         "is_default": True,
     },
 ]
+
+
+async def get_effective_preset_config(preset_id: str | None) -> dict:
+    """获取生效的 Agent 预设配置（config_json）
+
+    指定 preset_id 时返回该预设；否则返回默认预设（is_default=True）。
+    都找不到时返回智能推理内置预设的配置作为兜底。
+
+    Returns:
+        预设的 config_json 字典，至少包含 agent_mode / max_iterations /
+        temperature / thinking_enabled（取自数据库或内置兜底）。
+    """
+    await _ensure_builtin_presets()
+
+    async with async_session() as session:
+        preset = None
+        if preset_id:
+            result = await session.execute(
+                select(AgentPreset).where(AgentPreset.id == preset_id)
+            )
+            preset = result.scalar_one_or_none()
+        if preset is None:
+            result = await session.execute(
+                select(AgentPreset).where(AgentPreset.is_default == True)  # noqa: E712
+            )
+            preset = result.scalar_one_or_none()
+
+    if preset is not None and preset.config_json:
+        return dict(preset.config_json)
+
+    # 兜底：内置智能推理预设
+    return dict(_BUILTIN_PRESETS[1]["config_json"])
 
 
 async def _ensure_builtin_presets() -> None:

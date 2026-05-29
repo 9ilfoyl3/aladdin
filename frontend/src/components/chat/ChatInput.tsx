@@ -1,10 +1,11 @@
 import { useRef, useEffect } from 'react'
-import { Send, Database, Cpu, Library, ChevronDown } from 'lucide-react'
+import { Send, Database, Cpu, Library, ChevronDown, Bot } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
 import ContextUsageRing from '@/components/chat/ContextUsageRing'
+import type { AgentPresetItem } from '@/lib/api'
 
 interface KnowledgeBaseItem {
   id: string
@@ -26,16 +27,17 @@ interface ChatInputProps {
   selectedKb: string
   selectedModel: string
   selectedModelName: string
-  retrievalMode: string
+  selectedPreset: string
   auxiliaryKbIds: string[]
   contextUsage: { current: number; max: number }
   knowledgeBases: KnowledgeBaseItem[]
   llmConfigs: LLMConfigItem[]
+  agentPresets: AgentPresetItem[]
   onInputChange: (value: string) => void
   onSend: () => void
   onKbChange: (value: string) => void
   onModelChange: (value: string) => void
-  onRetrievalModeChange: (value: string) => void
+  onPresetChange: (value: string) => void
   onToggleAuxiliaryKb: (kbId: string) => void
 }
 
@@ -45,16 +47,17 @@ function ChatInput({
   selectedKb,
   selectedModel,
   selectedModelName,
-  retrievalMode,
+  selectedPreset,
   auxiliaryKbIds,
   contextUsage,
   knowledgeBases,
   llmConfigs,
+  agentPresets,
   onInputChange,
   onSend,
   onKbChange,
   onModelChange,
-  onRetrievalModeChange,
+  onPresetChange,
   onToggleAuxiliaryKb,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -103,13 +106,15 @@ function ChatInput({
                 </SelectContent>
               </Select>
 
-              <Select value={retrievalMode} onValueChange={onRetrievalModeChange}>
+              <Select value={selectedPreset} onValueChange={onPresetChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <SelectValue />
+                  <Bot className="h-3 w-3 shrink-0" />
+                  <SelectValue placeholder="选择智能体" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">智能检索</SelectItem>
-                  <SelectItem value="hybrid">快速检索</SelectItem>
+                  {agentPresets.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
 

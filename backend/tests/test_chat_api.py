@@ -175,12 +175,13 @@ def test_client():
 
 
 @patch("app.api.chat._retrieve_chunks")
-@patch("app.api.chat._get_retrieval_mode")
+@patch("app.api.chat._retrieve_chunks")
+@patch("app.api.chat.get_effective_preset_config", new_callable=AsyncMock)
 @patch("app.api.chat.get_model_manager")
-def test_chat_completions_non_stream(mock_manager, mock_mode, mock_retrieve, test_client):
+def test_chat_completions_non_stream(mock_manager, mock_preset, mock_retrieve, test_client):
     """测试非流式 Chat Completion 响应"""
-    # Mock 检索模式
-    mock_mode.return_value = "hybrid"
+    # Mock 生效预设：hybrid 模式
+    mock_preset.return_value = {"agent_mode": "hybrid"}
 
     # Mock 检索结果
     mock_retrieve.return_value = (
@@ -232,11 +233,11 @@ def test_chat_completions_non_stream(mock_manager, mock_mode, mock_retrieve, tes
 
 
 @patch("app.api.chat._retrieve_chunks")
-@patch("app.api.chat._get_retrieval_mode")
+@patch("app.api.chat.get_effective_preset_config", new_callable=AsyncMock)
 @patch("app.api.chat.get_model_manager")
-def test_chat_completions_stream(mock_manager, mock_mode, mock_retrieve, test_client):
+def test_chat_completions_stream(mock_manager, mock_preset, mock_retrieve, test_client):
     """测试流式 SSE 响应"""
-    mock_mode.return_value = "direct"
+    mock_preset.return_value = {"agent_mode": "direct"}
 
     mock_retrieve.return_value = (
         [
@@ -315,11 +316,11 @@ def test_chat_completions_missing_user_message(test_client):
 
 
 @patch("app.api.chat._retrieve_chunks")
-@patch("app.api.chat._get_retrieval_mode")
+@patch("app.api.chat.get_effective_preset_config", new_callable=AsyncMock)
 @patch("app.api.chat.get_model_manager")
-def test_chat_completions_with_degraded(mock_manager, mock_mode, mock_retrieve, test_client):
+def test_chat_completions_with_degraded(mock_manager, mock_preset, mock_retrieve, test_client):
     """测试降级模式标记"""
-    mock_mode.return_value = "agent"
+    mock_preset.return_value = {"agent_mode": "agent"}
 
     # 模拟 Agent 降级
     mock_retrieve.return_value = (
@@ -359,10 +360,10 @@ def test_chat_completions_with_degraded(mock_manager, mock_mode, mock_retrieve, 
 
 
 @patch("app.api.chat._retrieve_chunks")
-@patch("app.api.chat._get_retrieval_mode")
-def test_chat_completions_retrieval_error(mock_mode, mock_retrieve, test_client):
+@patch("app.api.chat.get_effective_preset_config", new_callable=AsyncMock)
+def test_chat_completions_retrieval_error(mock_preset, mock_retrieve, test_client):
     """测试检索失败时返回 500"""
-    mock_mode.return_value = "hybrid"
+    mock_preset.return_value = {"agent_mode": "hybrid"}
     mock_retrieve.side_effect = Exception("Milvus 连接超时")
 
     response = test_client.post(
