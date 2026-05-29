@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     pipeline_task_timeout_minutes: int = 60  # 单个文档处理总超时（分钟）
     pipeline_circuit_breaker_threshold: int = 5  # 连续失败 N 次触发熔断
     pipeline_health_check_interval: int = 30  # 健康检查/熔断恢复轮询间隔（秒）
+    # PEL 孤儿任务周期性回收（崩溃恢复）
+    pipeline_claim_interval_seconds: int = 60  # 周期性认领 PEL 中超时消息的间隔（秒）
+    # 消息 idle 超过此值才回收。必须大于 task_timeout，否则会抢走正在被合法处理的消息
+    # 导致同一文档重复处理。运行时会强制提升到 task_timeout+5 以下不生效。
+    pipeline_claim_min_idle_minutes: int = 65
     pipeline_embed_batch_size: int = 32  # Embedding 每批文本数
     pipeline_embed_concurrency: int = 4  # Embedding 并发请求数
     pipeline_embed_max_connections: int = 20  # httpx 连接池上限

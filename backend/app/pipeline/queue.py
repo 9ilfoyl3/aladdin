@@ -146,38 +146,145 @@ class TaskQueue:
         await self.ack(message_id)
 
     async def claim_pending(
-        self, consumer_name: str, min_idle_ms: int = 60000
+        self,
+        consumer_name: str,
+        min_idle_ms: int = 60000,
+        max_delivery_count: int | None = None,
     ) -> list[tuple[str, TaskMessage]]:
-        """认领超时的 pending 消息（用于启动恢复）
+        """认领超时的 pending 消息（用于崩溃恢复）
 
-        使用 XAUTOCLAIM 认领空闲超过 min_idle_ms 的消息。
+        使用 XAUTOCLAIM 认领 idle 超过 min_idle_ms 的消息。这里的 idle 是
+        "距离消息上次被投递的时间"，因此 min_idle_ms 必须大于单文档最大处理
+        时长，否则会抢走正在被合法处理的消息，导致同一文档重复处理。
+
+        通过 cursor 分页遍历整个 PEL，避免单次 XAUTOCLAIM（默认 COUNT=100）
+        在 PEL 堆积时漏认领。
+
+        毒消息（poison-pill）兜底：硬崩溃（OOM/SIGKILL）下消息从未走过失败
+        重试逻辑，payload 里的 retry_count 永远是 0，只能靠 Redis 层的投递
+        次数（delivery count）收敛。XAUTOCLAIM 每次认领都会使投递次数 +1，
+        当某条消息投递次数超过 max_delivery_count 时直接移入 DLQ 不再处理。
+
+        Args:
+            consumer_name: 认领者名称
+            min_idle_ms: 消息 idle 阈值（毫秒），必须 > task_timeout
+            max_delivery_count: 投递次数上限，超过则进 DLQ；None 表示不限制
+
+        Returns:
+            可处理的 [(message_id, TaskMessage), ...]（已剔除毒消息）
         """
         results: list[tuple[str, TaskMessage]] = []
-        try:
-            # XAUTOCLAIM 返回 (next_start_id, [(msg_id, fields), ...], deleted_ids)
-            response = await self._redis.xautoclaim(
-                name=self._stream_key,
-                groupname=self._group_name,
-                consumername=consumer_name,
-                min_idle_time=min_idle_ms,
-                start_id="0-0",
+        start_id = "0-0"
+        seen_cursors: set[str] = set()
+        claimed_ids: set[str] = set()
+
+        while True:
+            try:
+                # XAUTOCLAIM 返回 (next_start_id, [(msg_id, fields), ...], deleted_ids)
+                response = await self._redis.xautoclaim(
+                    name=self._stream_key,
+                    groupname=self._group_name,
+                    consumername=consumer_name,
+                    min_idle_time=min_idle_ms,
+                    start_id=start_id,
+                    count=100,
+                )
+            except (aioredis.ResponseError, aioredis.ConnectionError):
+                break
+
+            if not response or len(response) < 2:
+                break
+
+            next_start_id = response[0]
+            messages = response[1]
+
+            for msg_id, fields in messages:
+                if fields is None:
+                    # 消息已被删除（XAUTOCLAIM 在 deleted_ids 中返回，fields 为 None）
+                    continue
+                parsed = self._parse_message(msg_id, fields)
+                if not parsed:
+                    continue
+
+                mid, task_msg = parsed
+
+                # 去重：fakeredis 排干后会重复返回同一批消息，避免重复处理
+                if mid in claimed_ids:
+                    continue
+                claimed_ids.add(mid)
+
+                # 毒消息兜底：投递次数超阈值直接进 DLQ，避免无限重投
+                if max_delivery_count is not None:
+                    delivery_count = await self._get_delivery_count(mid)
+                    if delivery_count > max_delivery_count:
+                        logger.error(
+                            "Message %s (doc_id=%s) exceeded max delivery count "
+                            "(%d > %d), moving to DLQ as poison-pill",
+                            mid, task_msg.doc_id, delivery_count, max_delivery_count,
+                        )
+                        await self.move_to_dlq(
+                            mid,
+                            task_msg,
+                            f"poison-pill: delivery_count={delivery_count} "
+                            f"exceeded max={max_delivery_count}",
+                        )
+                        continue
+
+                results.append((mid, task_msg))
+
+            # 终止判定（兼容真实 Redis 与 fakeredis 两种 cursor 语义）：
+            # ① 本页无消息 → PEL 已遍历完
+            # ② 真实 Redis 返回 cursor "0-0" → 完成
+            # ③ cursor 不再前进（fakeredis 排干后会重复返回最后一个 ID）→ 完成
+            if not messages:
+                break
+            next_id_str = (
+                next_start_id.decode()
+                if isinstance(next_start_id, bytes)
+                else str(next_start_id)
             )
-        except (aioredis.ResponseError, aioredis.ConnectionError):
-            return results
-
-        if not response or len(response) < 2:
-            return results
-
-        messages = response[1]
-        for msg_id, fields in messages:
-            if fields is None:
-                # 消息已被删除
-                continue
-            parsed = self._parse_message(msg_id, fields)
-            if parsed:
-                results.append(parsed)
+            if next_id_str == "0-0" or next_id_str in seen_cursors:
+                break
+            seen_cursors.add(next_id_str)
+            start_id = next_id_str
 
         return results
+
+    async def _get_delivery_count(self, message_id: str) -> int:
+        """查询某条消息在 consumer group 中的投递次数（XPENDING）
+
+        XPENDING 的 detail 形式返回每条消息的
+        [message_id, consumer, idle_time, delivery_count]。
+
+        Returns:
+            投递次数；查询失败时返回 0（视为未超限，交由后续处理）
+        """
+        try:
+            pending = await self._redis.xpending_range(
+                name=self._stream_key,
+                groupname=self._group_name,
+                min=message_id,
+                max=message_id,
+                count=1,
+            )
+        except (aioredis.ResponseError, aioredis.ConnectionError):
+            return 0
+
+        if not pending:
+            return 0
+
+        entry = pending[0]
+        # redis-py 返回 dict（key 可能是 str 或 bytes）
+        if isinstance(entry, dict):
+            for key in ("times_delivered", b"times_delivered"):
+                if key in entry:
+                    return int(entry[key])
+            return 0
+        # 兜底：序列形式 [id, consumer, idle, times_delivered]
+        try:
+            return int(entry[3])
+        except (IndexError, TypeError, ValueError):
+            return 0
 
     async def get_stats(self) -> QueueStats:
         """获取队列统计信息"""

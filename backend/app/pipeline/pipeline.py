@@ -448,6 +448,19 @@ class DocumentPipeline:
                 if not await self.milvus.has_collection(kb_id):
                     await self.milvus.create_collection(kb_id)
 
+                # 写入前先清理本文档可能残留的旧向量（幂等，治本去孤儿）。
+                # 覆盖三类重处理场景：手动 retry、批量 retry、机制 A 崩溃重投。
+                # 上一次处理若在本阶段分批写入途中被硬杀（OOM/SIGKILL），
+                # 已写入的批次会成为孤儿向量（DB 未 commit 故无对应 chunk 记录），
+                # 且本次 chunk_id 全新，不覆盖旧向量。先按 doc_id 删一次确保干净。
+                try:
+                    await self.milvus.delete_by_doc_id(kb_id, doc_id)
+                except Exception as e:
+                    logger.warning(
+                        "文档 %s 写入前清理旧向量失败（非致命，继续写入）: %s",
+                        doc_id, e,
+                    )
+
                 # 检查 collection schema 版本，兼容旧 schema
                 schema_info = await self.milvus.check_schema_version(kb_id)
                 if schema_info["exists"] and not schema_info["has_new_fields"]:

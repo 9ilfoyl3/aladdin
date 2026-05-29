@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -70,6 +71,18 @@ class PipelineWorker:
         self._consecutive_failures = 0
         self._circuit_open = False
 
+        # PEL 孤儿任务周期性回收（崩溃恢复）
+        self._claim_interval = settings.pipeline_claim_interval_seconds
+        # idle 阈值必须大于单文档最大处理时长，否则会抢走正在被合法处理的消息。
+        # 强制下限：task_timeout + 5 分钟，防止配置写小导致重复处理。
+        configured_idle_ms = settings.pipeline_claim_min_idle_minutes * 60 * 1000
+        safe_floor_ms = (settings.pipeline_task_timeout_minutes + 5) * 60 * 1000
+        self._claim_min_idle_ms = max(configured_idle_ms, safe_floor_ms)
+        # 毒消息投递次数上限，复用 max_retries
+        self._claim_max_delivery = self._max_retries
+        # 上次执行周期性 claim 的时间戳（monotonic）
+        self._last_claim_at = 0.0
+
     async def start(self) -> None:
         """启动 Worker 循环：健康检查 → claim pending → consume new"""
         self._running = True
@@ -85,19 +98,8 @@ class PipelineWorker:
         logger.info("Pipeline worker started, embedding service available")
         print("[Worker] Pipeline worker initialized, embedding service healthy")
 
-        # 恢复中断的 pending 任务
-        try:
-            pending = await self._queue.claim_pending(
-                self._consumer_name, min_idle_ms=60000
-            )
-            for message_id, msg in pending:
-                task = asyncio.create_task(
-                    self._process_task(message_id, msg)
-                )
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
-        except Exception as e:
-            logger.warning("Failed to claim pending tasks: %s", e)
+        # 启动时回收上一个实例遗留在 PEL 中的孤儿任务
+        await self._reclaim_orphan_tasks()
 
         # 主消费循环
         while self._running:
@@ -110,6 +112,12 @@ class PipelineWorker:
                 self._consecutive_failures = 0
                 print("[Worker] ✅ Embedding 服务恢复，继续消费")
                 logger.info("Circuit breaker CLOSED, resuming consumption")
+
+            # 周期性回收 PEL 孤儿任务（崩溃恢复）。放在 consume 之前，
+            # 确保即使本进程一直存活，也能接管其他已死 Worker 的遗留任务，
+            # 以及本进程上次崩溃后重启过快（idle 未达阈值）漏掉的任务。
+            if time.monotonic() - self._last_claim_at >= self._claim_interval:
+                await self._reclaim_orphan_tasks()
 
             try:
                 messages = await self._queue.consume(
@@ -126,6 +134,34 @@ class PipelineWorker:
             except Exception as e:
                 logger.error("Error consuming tasks: %s, retrying in 5s", e)
                 await asyncio.sleep(5)
+
+    async def _reclaim_orphan_tasks(self) -> None:
+        """认领 PEL 中 idle 超时的孤儿消息并重新处理
+
+        使用 self._claim_min_idle_ms 作为阈值（已强制 > task_timeout），
+        确保不会抢走正在被合法处理的消息。毒消息（投递次数超 max_retries）
+        由 claim_pending 内部直接移入 DLQ，不会返回到这里。
+        """
+        self._last_claim_at = time.monotonic()
+        try:
+            pending = await self._queue.claim_pending(
+                self._consumer_name,
+                min_idle_ms=self._claim_min_idle_ms,
+                max_delivery_count=self._claim_max_delivery,
+            )
+        except Exception as e:
+            logger.warning("Failed to claim pending tasks: %s", e)
+            return
+
+        if not pending:
+            return
+
+        print(f"[Worker] ♻️ 回收 {len(pending)} 个 PEL 孤儿任务重新处理")
+        logger.info("Reclaimed %d orphan task(s) from PEL", len(pending))
+        for message_id, msg in pending:
+            task = asyncio.create_task(self._process_task(message_id, msg))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def stop(self) -> None:
         """停止 Worker，等待所有正在处理的任务完成。"""
