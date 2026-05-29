@@ -32,6 +32,7 @@ class RemoteEmbedder(EmbedProvider):
         api_key: str = "",
         timeout: float = 60.0,
         sparse_enabled: bool = True,
+        max_connections: int = 20,
     ):
         """初始化远程 Embedding Provider
 
@@ -41,12 +42,14 @@ class RemoteEmbedder(EmbedProvider):
             api_key: API 密钥（可选）
             timeout: 请求超时时间（秒）
             sparse_enabled: 是否启用 sparse 向量（调用 /embed_sparse 端点）
+            max_connections: httpx 连接池上限
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
         self.sparse_enabled = sparse_enabled
+        self.max_connections = max_connections
         self._client: httpx.AsyncClient | None = None
         # sparse 端点可用性缓存：None=未探测, True=可用, False=不可用
         self._sparse_available: bool | None = None
@@ -55,8 +58,8 @@ class RemoteEmbedder(EmbedProvider):
         """获取复用的 httpx 客户端，支持连接池"""
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                timeout=self.timeout,
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                timeout=self.timeout if self.timeout and self.timeout > 0 else None,
+                limits=httpx.Limits(max_connections=self.max_connections, max_keepalive_connections=self.max_connections // 2),
             )
         return self._client
 
