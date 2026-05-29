@@ -148,6 +148,7 @@ class PipelineWorker:
                 self._consumer_name,
                 min_idle_ms=self._claim_min_idle_ms,
                 max_delivery_count=self._claim_max_delivery,
+                on_poison_pill=self._on_poison_pill,
             )
         except Exception as e:
             logger.warning("Failed to claim pending tasks: %s", e)
@@ -162,6 +163,19 @@ class PipelineWorker:
             task = asyncio.create_task(self._process_task(message_id, msg))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+
+    async def _on_poison_pill(self, msg: TaskMessage, reason: str) -> None:
+        """毒消息被移入 DLQ 后的回调：将对应文档标记为 failed
+
+        避免反复崩溃的毒文档在消息进 DLQ 后，DB 状态仍停留在 processing，
+        导致前端看到文档永久"处理中"。
+        """
+        print(f"[Worker] 💀 文档 {msg.doc_id} 判定为毒消息进入 DLQ: {reason}")
+        logger.error(
+            "Poison-pill document marked as failed: doc_id=%s (trace_id=%s), reason=%s",
+            msg.doc_id, msg.trace_id, reason,
+        )
+        await self._mark_failed(msg.doc_id, f"重复崩溃，已停止重试: {reason}")
 
     async def stop(self) -> None:
         """停止 Worker，等待所有正在处理的任务完成。"""

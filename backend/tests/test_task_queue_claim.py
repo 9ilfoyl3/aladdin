@@ -132,3 +132,53 @@ async def test_get_delivery_count_increments(task_queue):
     await task_queue.claim_pending("worker-B", min_idle_ms=0, max_delivery_count=999)
     second = await task_queue._get_delivery_count(msg_id)
     assert second > first
+
+
+@pytest.mark.asyncio
+async def test_poison_pill_triggers_callback(task_queue):
+    """毒消息进 DLQ 时应触发 on_poison_pill 回调，携带对应 TaskMessage"""
+    await task_queue.enqueue(_msg("poison-cb"))
+    await task_queue.consume("worker-A", count=1, block_ms=100)
+
+    # 先把投递次数堆高
+    for _ in range(4):
+        await task_queue.claim_pending(
+            "worker-B", min_idle_ms=0, max_delivery_count=999
+        )
+
+    called: list[tuple[str, str]] = []
+
+    async def on_poison(msg: TaskMessage, reason: str) -> None:
+        called.append((msg.doc_id, reason))
+
+    claimed = await task_queue.claim_pending(
+        "worker-B", min_idle_ms=0, max_delivery_count=2, on_poison_pill=on_poison
+    )
+    assert claimed == []
+    assert len(called) == 1
+    assert called[0][0] == "poison-cb"
+    assert "poison-pill" in called[0][1]
+
+
+@pytest.mark.asyncio
+async def test_poison_pill_callback_exception_does_not_break(task_queue):
+    """on_poison_pill 回调抛异常时不应中断 claim_pending（仍进 DLQ）"""
+    await task_queue.enqueue(_msg("poison-err"))
+    await task_queue.consume("worker-A", count=1, block_ms=100)
+
+    for _ in range(4):
+        await task_queue.claim_pending(
+            "worker-B", min_idle_ms=0, max_delivery_count=999
+        )
+
+    async def bad_callback(msg: TaskMessage, reason: str) -> None:
+        raise RuntimeError("callback boom")
+
+    # 回调抛异常不应向上传播
+    claimed = await task_queue.claim_pending(
+        "worker-B", min_idle_ms=0, max_delivery_count=2, on_poison_pill=bad_callback
+    )
+    assert claimed == []
+    # 消息仍应进入 DLQ
+    stats = await task_queue.get_stats()
+    assert stats.dlq_length == 1

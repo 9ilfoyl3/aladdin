@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import redis.asyncio as aioredis
 from pydantic import BaseModel
@@ -150,6 +150,7 @@ class TaskQueue:
         consumer_name: str,
         min_idle_ms: int = 60000,
         max_delivery_count: int | None = None,
+        on_poison_pill: "Callable[[TaskMessage, str], Awaitable[None]] | None" = None,
     ) -> list[tuple[str, TaskMessage]]:
         """认领超时的 pending 消息（用于崩溃恢复）
 
@@ -169,6 +170,9 @@ class TaskQueue:
             consumer_name: 认领者名称
             min_idle_ms: 消息 idle 阈值（毫秒），必须 > task_timeout
             max_delivery_count: 投递次数上限，超过则进 DLQ；None 表示不限制
+            on_poison_pill: 毒消息移入 DLQ 后的回调（async），接收 (TaskMessage, 原因)。
+                            队列层不依赖 DB，由调用方传入以将文档标记为 failed，
+                            避免毒文档状态停留在 processing。回调异常不影响主流程。
 
         Returns:
             可处理的 [(message_id, TaskMessage), ...]（已剔除毒消息）
@@ -228,6 +232,19 @@ class TaskQueue:
                             f"poison-pill: delivery_count={delivery_count} "
                             f"exceeded max={max_delivery_count}",
                         )
+                        # 通知调用方将该文档标记为 failed（队列层不直接碰 DB）
+                        if on_poison_pill is not None:
+                            try:
+                                await on_poison_pill(
+                                    task_msg,
+                                    f"poison-pill: delivery_count={delivery_count} "
+                                    f"exceeded max={max_delivery_count}",
+                                )
+                            except Exception as cb_err:
+                                logger.warning(
+                                    "on_poison_pill callback failed for doc_id=%s: %s",
+                                    task_msg.doc_id, cb_err,
+                                )
                         continue
 
                 results.append((mid, task_msg))
