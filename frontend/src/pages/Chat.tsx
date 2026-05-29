@@ -1,13 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bot, PanelLeftClose, PanelLeft } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Bot } from 'lucide-react'
 import { knowledgeBaseApi, llmConfigApi, sessionApi } from '@/lib/api'
-import type { SessionItem } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import SessionSidebar from '@/components/chat/SessionSidebar'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
+import { useSession } from '@/lib/session-context'
 
 interface KnowledgeBaseItem {
   id: string
@@ -33,16 +31,9 @@ function Chat() {
   const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const queryClient = useQueryClient()
 
-  // 数据查询
-  const { data: sessions = [] } = useQuery({
-    queryKey: ['sessions'],
-    queryFn: () => sessionApi.list(),
-  })
+  const { currentSessionId, setCurrentSessionId, refreshSessions } = useSession()
 
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
@@ -72,100 +63,87 @@ function Chat() {
     }
   }, [messages])
 
-  // 会话操作
-  const handleNewSession = useCallback(async () => {
-    setCurrentSessionId(null)
-    setMessages([])
-    setExpandedRefs(new Set())
-    setExpandedRefDetails(new Set())
-  }, [])
-
-  const handleSwitchSession = useCallback(async (sessionId: string) => {
-    if (sessionId === currentSessionId) return
-    setCurrentSessionId(sessionId)
-    setExpandedRefs(new Set())
-    setExpandedRefDetails(new Set())
-    try {
-      const msgs = await sessionApi.getMessages(sessionId)
-      setMessages(msgs.map((m) => {
-        const base: Message = {
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          references: (m.references as Reference[]) || undefined,
-        }
-        // 解析 agent_steps：区分新格式（有 type 字段）和旧格式（有 step/detail 字段）
-        if (m.agent_steps && Array.isArray(m.agent_steps)) {
-          const hasNewFormat = m.agent_steps.some((s: Record<string, unknown>) => s.type)
-          if (hasNewFormat) {
-            // 新格式：构建 segments 数组（按存储顺序还原交错段落）
-            const segments: ContentSegment[] = []
-            for (const step of m.agent_steps) {
-              if (step.type === 'thought' && step.content) {
-                // 合并连续的 thought 段落
-                const lastSeg = segments[segments.length - 1]
-                if (lastSeg && lastSeg.type === 'thought') {
-                  lastSeg.content += String(step.content)
-                } else {
-                  segments.push({ type: 'thought', content: String(step.content) })
-                }
-              } else if (step.type === 'tool_call') {
-                segments.push({
-                  type: 'tool_call',
-                  content: String(step.tool_name || ''),
-                  toolCallId: String(step.tool_call_id || ''),
-                  toolName: String(step.tool_name || ''),
-                  success: undefined,
-                })
-              } else if (step.type === 'tool_result') {
-                // 更新匹配的 tool_call 段落
-                const existing = segments.find(
-                  (seg) => seg.type === 'tool_call' && seg.toolCallId === step.tool_call_id
-                )
-                if (existing) {
-                  existing.success = step.success as boolean
-                  existing.durationMs = step.duration_ms as number | undefined
-                }
-              } else if (step.type === 'final_answer' && step.content) {
-                // 合并连续的 answer 段落
-                const lastSeg = segments[segments.length - 1]
-                if (lastSeg && lastSeg.type === 'answer') {
-                  lastSeg.content += String(step.content)
-                } else {
-                  segments.push({ type: 'answer', content: String(step.content) })
+  // 会话切换时加载消息
+  useEffect(() => {
+    if (currentSessionId === null) {
+      setMessages([])
+      setExpandedRefs(new Set())
+      setExpandedRefDetails(new Set())
+      return
+    }
+    // 加载会话消息
+    async function loadMessages() {
+      setExpandedRefs(new Set())
+      setExpandedRefDetails(new Set())
+      try {
+        const msgs = await sessionApi.getMessages(currentSessionId!)
+        setMessages(msgs.map((m) => {
+          const base: Message = {
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            references: (m.references as Reference[]) || undefined,
+          }
+          // 解析 agent_steps：区分新格式（有 type 字段）和旧格式（有 step/detail 字段）
+          if (m.agent_steps && Array.isArray(m.agent_steps)) {
+            const hasNewFormat = m.agent_steps.some((s: Record<string, unknown>) => s.type)
+            if (hasNewFormat) {
+              // 新格式：构建 segments 数组（按存储顺序还原交错段落）
+              const segments: ContentSegment[] = []
+              for (const step of m.agent_steps) {
+                if (step.type === 'thought' && step.content) {
+                  // 合并连续的 thought 段落
+                  const lastSeg = segments[segments.length - 1]
+                  if (lastSeg && lastSeg.type === 'thought') {
+                    lastSeg.content += String(step.content)
+                  } else {
+                    segments.push({ type: 'thought', content: String(step.content) })
+                  }
+                } else if (step.type === 'tool_call') {
+                  segments.push({
+                    type: 'tool_call',
+                    content: String(step.tool_name || ''),
+                    toolCallId: String(step.tool_call_id || ''),
+                    toolName: String(step.tool_name || ''),
+                    success: undefined,
+                  })
+                } else if (step.type === 'tool_result') {
+                  // 更新匹配的 tool_call 段落
+                  const existing = segments.find(
+                    (seg) => seg.type === 'tool_call' && seg.toolCallId === step.tool_call_id
+                  )
+                  if (existing) {
+                    existing.success = step.success as boolean
+                    existing.durationMs = step.duration_ms as number | undefined
+                  }
+                } else if (step.type === 'final_answer' && step.content) {
+                  // 合并连续的 answer 段落
+                  const lastSeg = segments[segments.length - 1]
+                  if (lastSeg && lastSeg.type === 'answer') {
+                    lastSeg.content += String(step.content)
+                  } else {
+                    segments.push({ type: 'answer', content: String(step.content) })
+                  }
                 }
               }
+              // 如果没有从 steps 中还原出 answer 段落，但有 content，补一个
+              if (base.content && !segments.some((s) => s.type === 'answer')) {
+                segments.push({ type: 'answer', content: base.content })
+              }
+              if (segments.length > 0) base.segments = segments
+            } else {
+              // 旧格式：直接作为 agentSteps
+              base.agentSteps = m.agent_steps
             }
-            // 如果没有从 steps 中还原出 answer 段落，但有 content，补一个
-            if (base.content && !segments.some((s) => s.type === 'answer')) {
-              segments.push({ type: 'answer', content: base.content })
-            }
-            if (segments.length > 0) base.segments = segments
-          } else {
-            // 旧格式：直接作为 agentSteps
-            base.agentSteps = m.agent_steps
           }
-        }
-        return base
-      }))
-    } catch (e) {
-      console.error('加载会话消息失败', e)
-      setMessages([])
-    }
-  }, [currentSessionId])
-
-  const handleDeleteSession = useCallback(async (sessionId: string, e: React.MouseEvent) => {
-    e.stopPropagation()
-    try {
-      await sessionApi.delete(sessionId)
-      if (currentSessionId === sessionId) {
-        setCurrentSessionId(null)
+          return base
+        }))
+      } catch (e) {
+        console.error('加载会话消息失败', e)
         setMessages([])
       }
-      queryClient.invalidateQueries({ queryKey: ['sessions'] })
-    } catch (err) {
-      console.error('删除会话失败', err)
     }
-  }, [currentSessionId, queryClient])
+    loadMessages()
+  }, [currentSessionId])
 
   // 发送消息
   async function handleSend() {
@@ -178,7 +156,7 @@ function Chat() {
         const session = await sessionApi.create({ title: '新对话' })
         sessionId = session.id
         setCurrentSessionId(session.id)
-        queryClient.invalidateQueries({ queryKey: ['sessions'] })
+        refreshSessions()
       } catch (e) {
         console.error('自动创建会话失败', e)
       }
@@ -472,7 +450,7 @@ function Chat() {
       })
     } finally {
       setIsStreaming(false)
-      queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      refreshSessions()
     }
   }
 
@@ -504,85 +482,53 @@ function Chat() {
   const selectedModelName = llmConfigs.find((c) => c.id === selectedModel)?.name || ''
 
   return (
-    <div className="h-full flex">
-      {/* 会话侧边栏 */}
-      <div
-        className={`shrink-0 border-r border-border/60 bg-card/30 transition-[width] duration-200 ease-in-out ${
-          sidebarOpen ? 'w-56' : 'w-0 border-r-0'
-        }`}
-      >
-        <div className={`w-56 h-full transition-opacity duration-200 ${sidebarOpen ? 'opacity-100' : 'opacity-0'}`}>
-          <SessionSidebar
-            sessions={sessions as SessionItem[]}
-            currentSessionId={currentSessionId}
-            isNewChat={currentSessionId === null || messages.length === 0}
-            onNewSession={handleNewSession}
-            onSwitchSession={handleSwitchSession}
-            onDeleteSession={handleDeleteSession}
-          />
-        </div>
+    <div className="h-full flex flex-col relative">
+      {/* 消息列表 */}
+      <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-36">
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="w-14 h-14 rounded-2xl bg-muted/50 flex items-center justify-center mb-4">
+              <Bot className="h-7 w-7 text-muted-foreground/50" />
+            </div>
+            <p className="text-muted-foreground text-sm">开始对话，向知识库提问</p>
+          </div>
+        ) : (
+          <div className="max-w-3xl mx-auto py-6 px-4 space-y-5">
+            {messages.map((msg, idx) => (
+              <MessageBubble
+                key={idx}
+                message={msg}
+                index={idx}
+                isStreaming={isStreaming}
+                isLast={idx === messages.length - 1}
+                expandedRefs={expandedRefs}
+                expandedRefDetails={expandedRefDetails}
+                onToggleRef={toggleRef}
+                onToggleRefDetail={toggleRefDetail}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* 主内容区 */}
-      <div className="relative flex-1 flex flex-col min-w-0">
-        {/* 侧边栏切换 */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="absolute top-2 left-2 z-10 h-8 w-8"
-          onClick={() => setSidebarOpen((v) => !v)}
-          title={sidebarOpen ? '收起侧边栏' : '展开侧边栏'}
-        >
-          {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
-        </Button>
-
-        {/* 消息列表 */}
-        <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-36">
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <div className="w-14 h-14 rounded-2xl bg-muted/50 flex items-center justify-center mb-4">
-                <Bot className="h-7 w-7 text-muted-foreground/50" />
-              </div>
-              <p className="text-muted-foreground text-sm">开始对话，向知识库提问</p>
-            </div>
-          ) : (
-            <div className="max-w-3xl mx-auto py-6 px-4 space-y-5">
-              {messages.map((msg, idx) => (
-                <MessageBubble
-                  key={idx}
-                  message={msg}
-                  index={idx}
-                  isStreaming={isStreaming}
-                  isLast={idx === messages.length - 1}
-                  expandedRefs={expandedRefs}
-                  expandedRefDetails={expandedRefDetails}
-                  onToggleRef={toggleRef}
-                  onToggleRefDetail={toggleRefDetail}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 输入区域 */}
-        <ChatInput
-          input={input}
-          isStreaming={isStreaming}
-          selectedKb={selectedKb}
-          selectedModel={selectedModel}
-          selectedModelName={selectedModelName}
-          retrievalMode={retrievalMode}
-          auxiliaryKbIds={auxiliaryKbIds}
-          knowledgeBases={knowledgeBases}
-          llmConfigs={llmConfigs}
-          onInputChange={setInput}
-          onSend={handleSend}
-          onKbChange={setSelectedKb}
-          onModelChange={setSelectedModel}
-          onRetrievalModeChange={setRetrievalMode}
-          onToggleAuxiliaryKb={toggleAuxiliaryKb}
-        />
-      </div>
+      {/* 输入区域 */}
+      <ChatInput
+        input={input}
+        isStreaming={isStreaming}
+        selectedKb={selectedKb}
+        selectedModel={selectedModel}
+        selectedModelName={selectedModelName}
+        retrievalMode={retrievalMode}
+        auxiliaryKbIds={auxiliaryKbIds}
+        knowledgeBases={knowledgeBases}
+        llmConfigs={llmConfigs}
+        onInputChange={setInput}
+        onSend={handleSend}
+        onKbChange={setSelectedKb}
+        onModelChange={setSelectedModel}
+        onRetrievalModeChange={setRetrievalMode}
+        onToggleAuxiliaryKb={toggleAuxiliaryKb}
+      />
     </div>
   )
 }
