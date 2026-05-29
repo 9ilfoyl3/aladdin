@@ -334,6 +334,15 @@ export interface AgentPresetItem {
 
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
+  placeholders: () => request<{
+    placeholders: { name: string; description: string }[]
+    default_prompt: string
+  }>('/agent-presets/placeholders'),
+  rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
+    request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean }) =>
     request<unknown>('/agent-presets', {
       method: 'POST',

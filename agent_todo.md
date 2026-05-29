@@ -295,3 +295,57 @@ CSV 的 table 标记是格式转换导致的，不代表内容是辅助性表格
 | `internal/models/embedding/embedder.go` | Embedding 工厂 |
 | `internal/models/rerank/reranker.go` | Rerank 工厂 |
 | `docs/CHUNKING.md` | Chunking 参数指南 |
+
+---
+
+## P1 — Agent 预设能力对标 WeKnora 智能体（CustomAgent）
+
+> 背景：我们的「Agent 配置」预设（AgentPreset）已与 WeKnora 的智能体配置做了部分对标。
+> 已完成：`max_iterations` / `temperature` / `thinking_enabled` / `agent_mode`（快速问答=hybrid 单轮 / 智能推理=agent 多步）/ `allowed_tools`（按预设过滤工具注册）/ `system_prompt`（预设自定义提示词，覆盖默认 Progressive RAG）。
+> 以下为推迟项，按价值排列。
+
+### 19. 知识库绑定（knowledge_bases）
+
+**WeKnora：** 智能体可绑定专属知识库列表，对话时自动限定检索范围。
+
+**现状：** 预设不能绑定 KB，知识库在对话输入框单独选择。
+
+**改进方向：** 预设 `config_json` 加 `knowledge_base_ids`，对话时若预设绑定了 KB 则优先使用（或与输入框选择合并）。AgentConfig 已有 `knowledge_base_ids` 字段，需在 chat.py 接入。
+
+### 20. 反思开关（reflection_enabled）
+
+**WeKnora：** 可配置是否启用 Agent 反思步骤。
+
+**现状：** 反思逻辑固定，无开关。
+
+**改进方向：** 预设加 `reflection_enabled`，engine 据此决定是否执行反思。
+
+### 21. LLM 调用超时（llm_call_timeout）
+
+**现状：** `AgentConfig.llm_call_timeout` 有字段（默认 120s），但预设未暴露。
+
+**改进方向：** 预设 `config_json` 加 `llm_call_timeout`，UI 暴露，注入 AgentConfig。
+
+### 22. 类型预设（agent_type）
+
+**WeKnora：** rag-qa / wiki-qa / hybrid-rag-wiki / data-analysis 等一键套用「系统提示词 + 工具 + KB 兼容性」组合。
+
+**现状：** 无。
+
+**改进方向：** 依赖 system_prompt + allowed_tools（已实现），可在此基础上做几套预置组合的「模板」。
+
+### 23. MCP 服务接入（mcp_services）
+
+**WeKnora：** 智能体可选择启用的 MCP 服务（all / selected / none）。
+
+**现状：** 代码层有 `MCPToolWrapper`，但**没有 MCP 服务的管理页面**，无法配置 MCP 服务列表。
+
+**前置依赖：** 需要先做 MCP 服务管理页面（CRUD MCP server 配置）。
+
+### 24. Agent Skills（selected_skills）
+
+**WeKnora：** 渐进式披露的能力扩展，通过注入 system prompt 让 Agent 学会新能力。代码层有 `read_skill` 工具和 skill_manager。
+
+**现状：** 代码层有 `ReadSkillTool`，但**没有 Skills 的管理页面**，无法上传/管理 skill。
+
+**前置依赖：** 需要先做 Skills 管理页面（skill 文件上传、列表、启用）。

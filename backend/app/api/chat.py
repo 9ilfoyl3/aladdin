@@ -629,29 +629,47 @@ async def _stream_response(
 
         event_bus.on(None, _event_to_queue)
 
-        # 注册工具
-        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
-        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
-        tool_registry.register(ListKnowledgeChunksTool())
+        # 注册工具（按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止）
+        preset_allowed = preset_cfg.get("allowed_tools")
+
+        def _tool_enabled(tool_name: str) -> bool:
+            if tool_name == "final_answer":
+                return True
+            if not preset_allowed:
+                return True
+            return tool_name in preset_allowed
+
+        if _tool_enabled("knowledge_search"):
+            tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
+        if _tool_enabled("grep_chunks"):
+            tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
+        if _tool_enabled("list_knowledge_chunks"):
+            tool_registry.register(ListKnowledgeChunksTool())
         tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
 
-        # 注册可选工具：web_search（当 searxng_url 配置时启用）
+        # 注册可选工具：web_search（需配置 searxng_url 且预设允许）
         settings = get_settings()
-        if settings.searxng_url:
+        web_search_on = bool(settings.searxng_url) and _tool_enabled("web_search")
+        if web_search_on:
             tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
 
         # 创建 AgentConfig
+        # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
+        # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
+        preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
+        system_prompt = render_system_prompt(
+            AgentConfig(system_prompt=preset_system_prompt),
+            kb_names=[kb_id],
+            available_tools=tool_registry.list_tools(),
+            web_search_enabled=web_search_on,
+        )
         config = AgentConfig(
             max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
             max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
             temperature=preset_cfg.get("temperature", AgentConfig.temperature),
-            web_search_enabled=bool(settings.searxng_url),
+            web_search_enabled=web_search_on,
             thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
-            system_prompt=render_system_prompt(
-                AgentConfig(),
-                kb_names=[kb_id],
-                available_tools=tool_registry.list_tools(),
-            ),
+            system_prompt=system_prompt,
         )
 
         # 创建 AgentEngine

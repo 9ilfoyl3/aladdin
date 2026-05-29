@@ -12,6 +12,18 @@ if TYPE_CHECKING:
     from app.agent.config import AgentConfig
 
 
+# 系统提示词支持的占位符变量。键为占位符名（不含花括号），值为对该变量的人类可读说明。
+# 自定义 system_prompt 中出现的这些 {变量} 会在渲染时被替换为实际值；
+# 其余花括号原样保留，避免误伤用户 prompt 中的 JSON/代码示例。
+SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
+    "knowledge_base_names": "当前绑定的知识库名称列表",
+    "available_tools": "当前 Agent 可用的工具列表",
+    "web_search_status": "网络搜索是否启用（Enabled / Disabled）",
+    "current_time": "当前系统时间（格式：YYYY-MM-DD HH:MM:SS）",
+    "current_date": "当前日期（格式：YYYY-MM-DD）",
+}
+
+
 PROGRESSIVE_RAG_PROMPT = """\
 ### Role
 You are Aladdin 知识库问答助手, an intelligent retrieval assistant powered by Progressive \
@@ -175,20 +187,24 @@ def render_system_prompt(
     config: "AgentConfig",
     kb_names: list[str] | None = None,
     available_tools: list[str] | None = None,
+    web_search_enabled: bool | None = None,
 ) -> str:
-    """渲染系统提示词，替换 placeholder 为实际值。
+    """渲染系统提示词，替换占位符为实际值。
+
+    无论使用默认 Progressive RAG 模板还是用户自定义 system_prompt，都会对其中的
+    占位符（见 SYSTEM_PROMPT_PLACEHOLDERS）做安全替换。只替换已知占位符，其余
+    花括号原样保留，避免误伤用户 prompt 中的 JSON/代码示例。
 
     Args:
-        config: Agent 运行配置。若 config.system_prompt 非空则直接使用自定义提示词。
+        config: Agent 运行配置。若 config.system_prompt 非空则使用自定义提示词。
         kb_names: 可用知识库名称列表。
         available_tools: 可用工具名称列表。
+        web_search_enabled: 网络搜索是否启用；None 时回退到 config.web_search_enabled。
 
     Returns:
         渲染后的完整系统提示词字符串。
     """
-    # 如果用户配置了自定义系统提示词，直接使用
-    if config.system_prompt:
-        return config.system_prompt
+    from datetime import datetime
 
     # 格式化知识库名称
     if kb_names:
@@ -200,11 +216,39 @@ def render_system_prompt(
     if available_tools:
         tools_section = "\n".join(f"- `{tool}`" for tool in available_tools)
     else:
-        tools_section = "\n".join(
-            f"- `{tool}`" for tool in config.allowed_tools
-        )
+        tools_section = "\n".join(f"- `{tool}`" for tool in config.allowed_tools)
 
-    return PROGRESSIVE_RAG_PROMPT.format(
-        knowledge_base_names=kb_section,
-        available_tools=tools_section,
-    )
+    web_on = config.web_search_enabled if web_search_enabled is None else web_search_enabled
+    now = datetime.now()
+
+    values = {
+        "knowledge_base_names": kb_section,
+        "available_tools": tools_section,
+        "web_search_status": "Enabled" if web_on else "Disabled",
+        "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "current_date": now.strftime("%Y-%m-%d"),
+    }
+
+    # 自定义提示词优先；否则使用默认 Progressive RAG 模板
+    template = config.system_prompt or PROGRESSIVE_RAG_PROMPT
+
+    return _safe_substitute(template, values)
+
+
+def _safe_substitute(template: str, values: dict[str, str]) -> str:
+    """仅替换已知占位符，保留其余花括号不变。
+
+    避免使用 str.format（会因用户 prompt 中的任意 {} 抛 KeyError/ValueError）。
+    逐个把 "{name}" 替换为对应值，未知的 {xxx} 原样保留。
+
+    Args:
+        template: 含占位符的模板字符串。
+        values: 占位符名 -> 替换值。
+
+    Returns:
+        替换后的字符串。
+    """
+    result = template
+    for name, value in values.items():
+        result = result.replace("{" + name + "}", value)
+    return result
