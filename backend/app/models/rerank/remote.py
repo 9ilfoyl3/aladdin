@@ -100,6 +100,7 @@ class RemoteReranker(RerankProvider):
                 payload = {
                     "query": query,
                     "documents": documents,
+                    "texts": documents,  # TEI 兼容（TEI 用 texts 字段）
                     "top_n": top_k,
                 }
                 if self.model:
