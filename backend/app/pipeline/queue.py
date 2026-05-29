@@ -354,7 +354,15 @@ class TaskQueue:
         """工厂方法，Redis 不可用时返回 None"""
         try:
             client = aioredis.from_url(
-                redis_url, decode_responses=False, socket_connect_timeout=5
+                redis_url,
+                decode_responses=False,
+                socket_connect_timeout=5,
+                # socket 读超时必须大于 consume() 的 block 时长（XREADGROUP block=5s 长轮询）。
+                # 否则队列空闲时，客户端会在服务端长轮询返回前先判定读超时，
+                # 持续抛出 "Timeout reading from redis"。取 10s 给足网络往返余量。
+                socket_timeout=10,
+                # 定期 PING 保活，连接异常时自动重连，避免长时间空闲后连接失效。
+                health_check_interval=30,
             )
             # 测试连接
             await client.ping()
