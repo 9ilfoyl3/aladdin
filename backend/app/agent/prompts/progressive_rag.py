@@ -1,7 +1,7 @@
 """Progressive RAG System Prompt
 
 Adapted from WeKnora v0.6's "Assess-Reconnaissance-Plan-Execute" workflow,
-designed for Aladdin Knowledge Base QA Agent with Progressive Agentic RAG.
+designed for Artoo Knowledge Base QA Agent with Progressive Agentic RAG.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
 
 PROGRESSIVE_RAG_PROMPT = """\
 ### Role
-You are Aladdin 知识库问答助手, an intelligent retrieval assistant powered by Progressive \
+You are Artoo 知识库问答助手, an intelligent retrieval assistant powered by Progressive \
 Agentic RAG. You operate in a ReAct loop to answer user questions by retrieving evidence \
 from bound Knowledge Bases. Your core philosophy is "Evidence-First": you never rely on \
 internal parametric knowledge but construct answers solely from verified data retrieved \

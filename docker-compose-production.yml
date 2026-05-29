@@ -1,4 +1,4 @@
-# Aladdin 生产部署 docker-compose
+# Artoo 生产部署 docker-compose
 # 镜像名称通过 .env 中的 IMAGE_* 变量配置，支持不同架构和镜像库
 
 services:
@@ -63,7 +63,7 @@ services:
     container_name: arag-postgres
     image: ${IMAGE_POSTGRES:-postgres:16-alpine}
     environment:
-      POSTGRES_DB: aladdin
+      POSTGRES_DB: artoo
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     expose:
@@ -96,11 +96,11 @@ services:
 
   backend:
     container_name: arag-backend
-    image: ${IMAGE_BACKEND:-aladdin-backend:latest}
+    image: ${IMAGE_BACKEND:-artoo-backend:latest}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
@@ -128,10 +128,10 @@ services:
 
   worker:
     container_name: arag-worker
-    image: ${IMAGE_BACKEND:-aladdin-backend:latest}
+    image: ${IMAGE_BACKEND:-artoo-backend:latest}
     command: ["python", "-m", "app.worker_main"]
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBED_BASE_URL=${EMBED_BASE_URL:-}
@@ -164,7 +164,7 @@ services:
 
   frontend:
     container_name: arag-frontend
-    image: ${IMAGE_FRONTEND:-aladdin-frontend:latest}
+    image: ${IMAGE_FRONTEND:-artoo-frontend:latest}
     ports:
       - "${FRONTEND_PORT:-8888}:80"
     volumes:

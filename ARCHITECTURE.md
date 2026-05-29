@@ -1,4 +1,4 @@
-# Aladdin 技术架构详解
+# Artoo 技术架构详解
 
 本文档详细描述系统的核心流程、切片策略、Agent 编排机制、环境变量配置等技术细节。
 
@@ -251,7 +251,7 @@ OCRProvider (抽象基类)
 | `RERANK_BASE_URL` | - | Rerank 远程服务地址 |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型 |
 | `RERANK_API_KEY` | - | Rerank 服务密钥 |
-| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL 连接地址 |
+| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/artoo | PostgreSQL 连接地址 |
 | `MILVUS_HOST` | localhost | Milvus 地址 |
 | `MILVUS_PORT` | 19530 | Milvus 端口 |
 | `REDIS_URL` | redis://localhost:6379/0 | Redis 连接地址（任务队列 + 缓存） |

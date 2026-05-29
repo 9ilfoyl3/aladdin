@@ -1,8 +1,8 @@
-# Agent 代码审查报告：Aladdin vs WeKnora
+# Agent 代码审查报告：Artoo vs WeKnora
 
 ## 审查范围
 
-对照 `WeKnora/internal/agent/` 的实现，检查 Aladdin `backend/app/agent/` 中的关键集成点。
+对照 `WeKnora/internal/agent/` 的实现，检查 Artoo `backend/app/agent/` 中的关键集成点。
 
 **WeKnora 参考文件：**
 - `internal/agent/engine.go` — ReAct 循环主引擎
@@ -35,7 +35,7 @@
 
 ### 4. ✅ Registry 缺少 first-wins 策略和 error hint（已修复）
 
-**问题：** WeKnora 的 `RegisterTool()` 使用 first-wins 策略防止工具名称劫持，`ExecuteTool()` 在失败时追加 error hint 引导 LLM 换策略。Aladdin 的 registry 允许覆盖且无 error hint。
+**问题：** WeKnora 的 `RegisterTool()` 使用 first-wins 策略防止工具名称劫持，`ExecuteTool()` 在失败时追加 error hint 引导 LLM 换策略。Artoo 的 registry 允许覆盖且无 error hint。
 
 **修复：** 
 - `register()` 改为 first-wins：重复注册时保留第一个，记录 warning
@@ -43,11 +43,11 @@
 
 ### 5. ✅ System Prompt 已正确集成（无需修复）
 
-Aladdin 已在 `execute()` 中检查 `knowledge_base_ids` 并调用 `render_system_prompt()`，与 WeKnora 的 `BuildSystemPromptWithOptions()` 模式一致。
+Artoo 已在 `execute()` 中检查 `knowledge_base_ids` 并调用 `render_system_prompt()`，与 WeKnora 的 `BuildSystemPromptWithOptions()` 模式一致。
 
 ## 与 WeKnora 的剩余差异（非阻塞）
 
-| 特性 | WeKnora | Aladdin | 状态 |
+| 特性 | WeKnora | Artoo | 状态 |
 |------|---------|---------|------|
 | LLM 驱动的记忆压缩 | `memory.Consolidator`（调用 LLM 总结历史） | 仅简单压缩（保留最近 2 轮） | 可后续增强 |
 | API Usage 驱动的 token 估算 | 使用上一轮 API 返回的 `Usage.TotalTokens` + BPE delta | 纯字符估算 | 可后续增强 |

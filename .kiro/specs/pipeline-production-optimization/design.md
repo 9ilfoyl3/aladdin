@@ -2,7 +2,7 @@
 
 ## Overview
 
-本设计将 Aladdin RAG 系统的文档处理管道从当前基于 `asyncio.create_task` 的临时方案升级为生产级任务处理系统。核心改造包括五个方面：
+本设计将 Artoo RAG 系统的文档处理管道从当前基于 `asyncio.create_task` 的临时方案升级为生产级任务处理系统。核心改造包括五个方面：
 
 1. **持久化任务队列**：基于 Redis Stream + Consumer Group 实现任务持久化、自动恢复、重试与死信处理
 2. **进度实时追踪**：各阶段加权进度更新，前端可轮询获取百分比和阶段描述

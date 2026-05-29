@@ -604,7 +604,7 @@ def print_summary(load_data: dict, chunk_data: dict, embed_data: dict, storage_d
 
 async def main():
     print("\n" + "=" * 60)
-    print("  Aladdin RAG 性能基准测试")
+    print("  Artoo RAG 性能基准测试")
     print(f"  目标文件: 民事裁定书(2023)冀0984民初125号_3.pdf")
     print("=" * 60)
 

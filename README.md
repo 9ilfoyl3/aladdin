@@ -1,6 +1,6 @@
 <div align="center">
 
-# Aladdin
+# Artoo
 
 **开源 Agentic RAG 知识库系统**
 
@@ -24,7 +24,7 @@
 
 ## 📌 概览
 
-Aladdin 是一个开源的 Agentic RAG 知识库系统，围绕三个核心能力构建：
+Artoo 是一个开源的 Agentic RAG 知识库系统，围绕三个核心能力构建：
 
 - **混合检索** — 稠密语义 + 稀疏关键词三路召回，RRF 融合 + Rerank 精排
 - **Agent 推理** — ReAct 风格的渐进式多步推理，自主编排检索、改写与反思
@@ -109,7 +109,7 @@ Aladdin 是一个开源的 Agentic RAG 知识库系统，围绕三个核心能�
 
 ```bash
 git clone <repo-url>
-cd aladdin
+cd artoo
 
 # 启动基础设施（Milvus + PostgreSQL + Redis）
 docker compose up -d
@@ -137,8 +137,8 @@ make dev
 
 ```powershell
 # 创建 Python 环境（必须 3.12）
-conda create -n aladdin python=3.12 -y
-conda activate aladdin
+conda create -n artoo python=3.12 -y
+conda activate artoo
 
 # 安装依赖
 pip install --upgrade pip
@@ -177,7 +177,7 @@ npm run dev
 ## 🐳 Docker 部署（生产环境）
 
 ```bash
-mkdir -p /opt/aladdin && cd /opt/aladdin
+mkdir -p /opt/artoo && cd /opt/artoo
 
 docker load -i app.tar
 docker load -i infra.tar    # 首次部署
@@ -236,7 +236,7 @@ docker image prune -f
 ## 📂 项目结构
 
 ```
-aladdin/
+artoo/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口

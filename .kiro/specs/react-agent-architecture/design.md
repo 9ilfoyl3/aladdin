@@ -2,7 +2,7 @@
 
 ## Overview
 
-将 Aladdin 的 Agent 层从固定管道（Planner→Executor→Reflector）重构为真正的 ReAct（Reasoning + Acting）循环架构，参考 WeKnora v0.6 的设计。LLM 作为 Agent 自主决策调用什么工具、搜几次、从什么角度搜，而不是由代码预设检索策略。
+将 Artoo 的 Agent 层从固定管道（Planner→Executor→Reflector）重构为真正的 ReAct（Reasoning + Acting）循环架构，参考 WeKnora v0.6 的设计。LLM 作为 Agent 自主决策调用什么工具、搜几次、从什么角度搜，而不是由代码预设检索策略。
 
 核心变更：
 - 删除 orchestrator/planner/reflector/rewriter/router/executor 六个模块
@@ -583,7 +583,7 @@ class SkillManager:
 
 **文件**: `backend/app/mcp_server.py`
 
-将 Aladdin 的知识库能力暴露为 MCP 协议，让外部 AI 工具（Claude、Cursor 等）可以直接调用：
+将 Artoo 的知识库能力暴露为 MCP 协议，让外部 AI 工具（Claude、Cursor 等）可以直接调用：
 
 ```python
 # MCP Tools 暴露：

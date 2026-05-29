@@ -1,6 +1,6 @@
 <div align="center">
 
-# Aladdin
+# Artoo
 
 **Open-Source Agentic RAG Knowledge Base System**
 
@@ -85,7 +85,7 @@ English | [中文](./README.md)
 
 ```bash
 git clone <repo-url>
-cd aladdin
+cd artoo
 ```
 
 ### 2. Start Infrastructure
@@ -110,8 +110,8 @@ make install
 <summary><b>Windows (PowerShell)</b></summary>
 
 ```powershell
-conda create -n aladdin python=3.12 -y
-conda activate aladdin
+conda create -n artoo python=3.12 -y
+conda activate artoo
 
 pip install --upgrade pip
 pip install -r backend/requirements-base.txt
@@ -199,7 +199,7 @@ npm run dev
 ## 🐳 Docker Deployment (Production)
 
 ```bash
-mkdir -p /opt/aladdin && cd /opt/aladdin
+mkdir -p /opt/artoo && cd /opt/artoo
 
 docker load -i app.tar
 docker load -i infra.tar    # First deployment only
@@ -240,7 +240,7 @@ See [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) for details.
 ## 📂 Project Structure
 
 ```
-aladdin/
+artoo/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI entry point

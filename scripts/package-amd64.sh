@@ -1,5 +1,5 @@
 #!/bin/bash
-# Aladdin AMD64 部署打包
+# Artoo AMD64 部署打包
 # 用法:
 #   ./scripts/package-amd64.sh              # 远程模式，首次
 #   ./scripts/package-amd64.sh --gpu        # GPU 模式（CUDA + FlagEmbedding），首次
@@ -19,26 +19,26 @@ for arg in "$@"; do
     esac
 done
 
-echo "=== Aladdin AMD64 打包 ==="
+echo "=== Artoo AMD64 打包 ==="
 mkdir -p "$OUT"
 
 echo ""
 echo "[1] 构建后端镜像..."
 if [ "$GPU" = true ]; then
     echo "  模式: GPU（CUDA + FlagEmbedding）"
-    docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+    docker build -t artoo-backend:latest -f backend/Dockerfile.production backend/
 else
     echo "  模式: 远程（轻量）"
-    docker build -t aladdin-backend:latest backend/
+    docker build -t artoo-backend:latest backend/
 fi
 
 echo ""
 echo "[2] 构建前端镜像..."
-docker build -t aladdin-frontend:latest frontend/
+docker build -t artoo-frontend:latest frontend/
 
 echo ""
 echo "[3] 导出应用镜像..."
-docker save aladdin-backend:latest aladdin-frontend:latest -o "$OUT/app.tar"
+docker save artoo-backend:latest artoo-frontend:latest -o "$OUT/app.tar"
 
 if [ "$SKIP_INFRA" = false ]; then
     echo ""

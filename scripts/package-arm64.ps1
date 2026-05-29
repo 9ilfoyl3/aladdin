@@ -1,4 +1,4 @@
-# Aladdin ARM64 部署打包
+# Artoo ARM64 部署打包
 param(
     [switch]$SkipInfra,    # 跳过中间件（非首次部署）
     [switch]$BackendOnly,  # 只构建后端
@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $OUT = "deploy-arm64"
 $env:DOCKER_BUILDKIT = "1"
 
-Write-Host "=== Aladdin ARM64 打包 ===" -ForegroundColor Green
+Write-Host "=== Artoo ARM64 打包 ===" -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
 $cacheFlag = if ($NoCache) { "--no-cache" } else { "" }
@@ -19,7 +19,7 @@ $buildBoth = -not $BackendOnly -and -not $FrontendOnly
 # 后端镜像
 if ($buildBoth -or $BackendOnly) {
     Write-Host "`n[1] 构建后端镜像（ARM64）..." -ForegroundColor Cyan
-    $cmd = "docker build --platform linux/arm64 $cacheFlag -t aladdin-backend:latest backend/"
+    $cmd = "docker build --platform linux/arm64 $cacheFlag -t artoo-backend:latest backend/"
     Invoke-Expression $cmd
     if ($LASTEXITCODE -ne 0) { Write-Host "后端构建失败！" -ForegroundColor Red; exit 1 }
 }
@@ -27,7 +27,7 @@ if ($buildBoth -or $BackendOnly) {
 # 前端镜像
 if ($buildBoth -or $FrontendOnly) {
     Write-Host "`n[2] 构建前端镜像（ARM64）..." -ForegroundColor Cyan
-    $cmd = "docker build --platform linux/arm64 $cacheFlag -t aladdin-frontend:latest frontend/"
+    $cmd = "docker build --platform linux/arm64 $cacheFlag -t artoo-frontend:latest frontend/"
     Invoke-Expression $cmd
     if ($LASTEXITCODE -ne 0) { Write-Host "前端构建失败！" -ForegroundColor Red; exit 1 }
 }
@@ -35,11 +35,11 @@ if ($buildBoth -or $FrontendOnly) {
 # 导出应用镜像
 Write-Host "`n[3] 导出应用镜像..." -ForegroundColor Cyan
 if ($BackendOnly) {
-    docker save aladdin-backend:latest -o "$OUT\app.tar"
+    docker save artoo-backend:latest -o "$OUT\app.tar"
 } elseif ($FrontendOnly) {
-    docker save aladdin-frontend:latest -o "$OUT\app.tar"
+    docker save artoo-frontend:latest -o "$OUT\app.tar"
 } else {
-    docker save aladdin-backend:latest aladdin-frontend:latest -o "$OUT\app.tar"
+    docker save artoo-backend:latest artoo-frontend:latest -o "$OUT\app.tar"
 }
 
 # 中间件

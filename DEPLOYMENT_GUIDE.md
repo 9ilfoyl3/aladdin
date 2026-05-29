@@ -1,4 +1,4 @@
-# Aladdin 本地开发指南（Windows）
+# Artoo 本地开发指南（Windows）
 
 适用于 Windows + Docker Desktop + 远程 LLM/Embedding/Rerank 服务的开发环境搭建。
 
@@ -21,7 +21,7 @@
 ## 第一步：启动基础设施
 
 ```powershell
-cd C:\your-workspace\aladdin
+cd C:\your-workspace\artoo
 docker compose up -d
 ```
 
@@ -38,8 +38,8 @@ docker compose ps
 > ⚠️ **必须使用 Python 3.12**，3.13+ 存在兼容问题。
 
 ```powershell
-conda create -n aladdin python=3.12 -y
-conda activate aladdin
+conda create -n artoo python=3.12 -y
+conda activate artoo
 ```
 
 ---
@@ -69,7 +69,7 @@ cp backend/.env.example backend/.env
 
 ```env
 # 数据库
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/artoo
 
 # Milvus
 MILVUS_HOST=localhost
@@ -145,7 +145,7 @@ docker compose ps
 # 如果没运行：docker compose up -d
 
 # 2. 激活环境，启动后端
-conda activate aladdin
+conda activate artoo
 cd backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
@@ -178,7 +178,7 @@ docker compose down -v
 
 ### Q: Python 进程无输出直接退出
 
-Python 版本过高（3.13+）。使用 3.12：`conda create -n aladdin python=3.12 -y`
+Python 版本过高（3.13+）。使用 3.12：`conda create -n artoo python=3.12 -y`
 
 ### Q: `.env` 配置不生效
 

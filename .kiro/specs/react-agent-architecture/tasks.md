@@ -2,7 +2,7 @@
 
 ## Overview
 
-将 Aladdin 的 Agent 层重构为 ReAct 循环架构，分 4 个 Phase 实施。Phase 1 为核心引擎，Phase 2 为深度能力，Phase 3 为 Skill/MCP 扩展，Phase 4 为高级特性。
+将 Artoo 的 Agent 层重构为 ReAct 循环架构，分 4 个 Phase 实施。Phase 1 为核心引擎，Phase 2 为深度能力，Phase 3 为 Skill/MCP 扩展，Phase 4 为高级特性。
 
 ## Tasks
 
@@ -122,7 +122,7 @@
 - [x] 23. 完整测试与代码审查
   - [x] 23.1 编写 Agent 核心模块单元测试：为 AgentEngine（ReAct 循环/重试/stuck loop/graceful degradation）、ToolRegistry、EventBus、ContextManager 编写完整的 pytest 测试用例，使用 Mock LLM 验证各种场景
   - [x] 23.2 编写内置工具单元测试：为 knowledge_search/grep_chunks/final_answer/thinking/list_chunks/web_search 编写测试，Mock Retriever 和数据库，验证参数校验、去重逻辑、XML 输出格式
-  - [x] 23.3 对照 WeKnora 代码审查：对比 `/Users/bobby/Documents/git_code/aladdin/WeKnora` 中 agent/tools/engine 的实现，检查是否遗漏关键逻辑（如 tool output 截断集成到 engine、context compression 集成到循环、error recovery 策略等），输出审查报告并修复发现的问题
+  - [x] 23.3 对照 WeKnora 代码审查：对比 `/Users/bobby/Documents/git_code/artoo/WeKnora` 中 agent/tools/engine 的实现，检查是否遗漏关键逻辑（如 tool output 截断集成到 engine、context compression 集成到循环、error recovery 策略等），输出审查报告并修复发现的问题
 
 ## Notes
 

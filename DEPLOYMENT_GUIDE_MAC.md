@@ -1,4 +1,4 @@
-# Aladdin 打包部署指南（macOS）
+# Artoo 打包部署指南（macOS）
 
 在 Mac 上构建 Docker 镜像包，用于部署到内网服务器。
 
@@ -37,8 +37,8 @@ make docker-package-amd64        # AMD64
 迭代更新包：
 ```
 deploy-package-arm/
-├── aladdin-backend.tar          # 后端镜像（~500MB）
-├── aladdin-frontend.tar         # 前端镜像（~30MB）
+├── artoo-backend.tar          # 后端镜像（~500MB）
+├── artoo-frontend.tar         # 前端镜像（~30MB）
 ├── docker-compose.yml           # 生产编排文件
 └── .env.example                 # 环境变量模板
 ```
@@ -61,10 +61,10 @@ deploy-package-arm/
 
 ```bash
 # 1. 上传部署包到服务器
-scp -r deploy-package-arm/ user@server:/opt/aladdin/
+scp -r deploy-package-arm/ user@server:/opt/artoo/
 
 # 2. 执行部署脚本
-cd /opt/aladdin
+cd /opt/artoo
 chmod +x deploy-intranet.sh
 ./deploy-intranet.sh
 ```
@@ -74,7 +74,7 @@ chmod +x deploy-intranet.sh
 ### 手动部署
 
 ```bash
-cd /opt/aladdin
+cd /opt/artoo
 
 # 加载镜像
 docker load -i postgres_16-alpine.tar
@@ -82,8 +82,8 @@ docker load -i milvusdb_milvus_v2.4.6.tar
 docker load -i quay.io_coreos_etcd_*.tar
 docker load -i minio_minio_*.tar
 docker load -i redis_7-alpine.tar
-docker load -i aladdin-backend.tar
-docker load -i aladdin-frontend.tar
+docker load -i artoo-backend.tar
+docker load -i artoo-frontend.tar
 
 # 配置
 cp .env.example .env
@@ -96,9 +96,9 @@ docker compose up -d
 ### 迭代更新
 
 ```bash
-cd /opt/aladdin
-docker load -i aladdin-backend.tar
-docker load -i aladdin-frontend.tar
+cd /opt/artoo
+docker load -i artoo-backend.tar
+docker load -i artoo-frontend.tar
 docker compose up -d --force-recreate backend worker frontend
 docker image prune -f
 ```

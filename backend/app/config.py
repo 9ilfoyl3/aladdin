@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # 数据库
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/aladdin"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/artoo"
 
     # Milvus
     milvus_host: str = "localhost"

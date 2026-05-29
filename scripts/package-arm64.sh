@@ -1,5 +1,5 @@
 #!/bin/bash
-# Aladdin ARM64 部署打包
+# Artoo ARM64 部署打包
 # 用法:
 #   ./scripts/package-arm64.sh              # 远程模式，首次
 #   ./scripts/package-arm64.sh --gpu        # 本地模型（CPU + FlagEmbedding），首次
@@ -19,26 +19,26 @@ for arg in "$@"; do
     esac
 done
 
-echo "=== Aladdin ARM64 打包 ==="
+echo "=== Artoo ARM64 打包 ==="
 mkdir -p "$OUT"
 
 echo ""
 echo "[1] 构建后端镜像（ARM64）..."
 if [ "$GPU" = true ]; then
     echo "  模式: 本地模型（FlagEmbedding + CPU PyTorch）"
-    docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:latest backend/
+    docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t artoo-backend:latest backend/
 else
     echo "  模式: 远程（轻量）"
-    docker build --platform linux/arm64 -t aladdin-backend:latest backend/
+    docker build --platform linux/arm64 -t artoo-backend:latest backend/
 fi
 
 echo ""
 echo "[2] 构建前端镜像（ARM64）..."
-docker build --platform linux/arm64 -t aladdin-frontend:latest frontend/
+docker build --platform linux/arm64 -t artoo-frontend:latest frontend/
 
 echo ""
 echo "[3] 导出应用镜像..."
-docker save aladdin-backend:latest aladdin-frontend:latest -o "$OUT/app.tar"
+docker save artoo-backend:latest artoo-frontend:latest -o "$OUT/app.tar"
 
 if [ "$SKIP_INFRA" = false ]; then
     echo ""

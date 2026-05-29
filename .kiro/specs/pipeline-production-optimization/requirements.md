@@ -2,7 +2,7 @@
 
 ## Introduction
 
-本 spec 覆盖 Aladdin RAG 系统文档处理管道的 P0/P1 优化项，目标是将当前基于 `asyncio.create_task` 的临时方案升级为生产级可用的任务处理系统。参考 RAGFlow 的设计理念，重点解决：任务持久化、进度可观测、多策略切分、并发控制、链路追踪。
+本 spec 覆盖 Artoo RAG 系统文档处理管道的 P0/P1 优化项，目标是将当前基于 `asyncio.create_task` 的临时方案升级为生产级可用的任务处理系统。参考 RAGFlow 的设计理念，重点解决：任务持久化、进度可观测、多策略切分、并发控制、链路追踪。
 
 ## Glossary
 

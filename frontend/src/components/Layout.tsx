@@ -74,7 +74,7 @@ function Layout() {
         >
           {/* 顶部：标题 + toggle */}
           <div className="flex items-center justify-between px-4 py-3">
-            <h1 className="text-lg font-semibold text-sidebar-foreground">Aladdin</h1>
+            <h1 className="text-lg font-semibold text-sidebar-foreground font-serif">Artoo</h1>
             <button
               className="h-7 w-7 flex items-center justify-center rounded-md text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
               onClick={() => setSidebarOpen(false)}
@@ -173,7 +173,7 @@ function Layout() {
             title="展开侧边栏"
           >
             <div className="group h-8 w-8 flex items-center justify-center rounded-md hover:bg-sidebar-accent transition-colors">
-              <span className="text-lg font-semibold text-sidebar-foreground group-hover:hidden">Al</span>
+              <span className="text-lg font-semibold text-sidebar-foreground font-serif group-hover:hidden">Ar</span>
               <PanelLeft className="h-4 w-4 text-sidebar-foreground hidden group-hover:block" />
             </div>
           </div>

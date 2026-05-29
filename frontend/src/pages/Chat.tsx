@@ -583,7 +583,7 @@ function Chat() {
       <div className="h-full flex flex-col items-center justify-center px-4">
         <div className="w-full max-w-3xl flex flex-col items-center -mt-12">
           <h1 className="text-3xl font-semibold text-foreground text-center mb-8">
-            基于知识库内容问答 · AI 问答
+            我是 <span className="font-serif">Artoo</span>，你的知识库问答助手
           </h1>
 
           <div className="mb-8 w-full">

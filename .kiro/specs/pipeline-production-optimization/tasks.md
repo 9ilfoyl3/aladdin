@@ -2,7 +2,7 @@
 
 ## Overview
 
-将 Aladdin RAG 文档处理管道从 `asyncio.create_task` 临时方案升级为基于 Redis Stream 的生产级任务处理系统。实施按模块递进：配置扩展 → 数据模型 → 核心基础设施（队列/日志/进度） → Chunker 策略 → Worker 编排 → API 集成 → Pipeline 改造。
+将 Artoo RAG 文档处理管道从 `asyncio.create_task` 临时方案升级为基于 Redis Stream 的生产级任务处理系统。实施按模块递进：配置扩展 → 数据模型 → 核心基础设施（队列/日志/进度） → Chunker 策略 → Worker 编排 → API 集成 → Pipeline 改造。
 
 ## Tasks
 

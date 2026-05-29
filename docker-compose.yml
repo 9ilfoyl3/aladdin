@@ -55,7 +55,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: aladdin
+      POSTGRES_DB: artoo
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:

@@ -6,7 +6,7 @@
 $ErrorActionPreference = "Stop"
 $DEPLOY_DIR = "deploy-package"
 
-Write-Host "=== Aladdin 内网部署打包 ===" -ForegroundColor Green
+Write-Host "=== Artoo 内网部署打包 ===" -ForegroundColor Green
 
 # 创建输出目录
 New-Item -ItemType Directory -Force -Path $DEPLOY_DIR | Out-Null
@@ -43,13 +43,13 @@ if (Test-Path $BGE_RERANKER) {
 # 2. 构建后端 Docker 镜像
 # ============================================================
 Write-Host "`n[2/5] 构建后端镜像..." -ForegroundColor Cyan
-docker build -t aladdin-backend:latest -f backend/Dockerfile.production backend/
+docker build -t artoo-backend:latest -f backend/Dockerfile.production backend/
 
 # ============================================================
 # 3. 构建前端 Docker 镜像
 # ============================================================
 Write-Host "`n[3/5] 构建前端镜像..." -ForegroundColor Cyan
-docker build -t aladdin-frontend:latest frontend/
+docker build -t artoo-frontend:latest frontend/
 
 # ============================================================
 # 4. 导出所有 Docker 镜像
@@ -57,8 +57,8 @@ docker build -t aladdin-frontend:latest frontend/
 Write-Host "`n[4/5] 导出 Docker 镜像..." -ForegroundColor Cyan
 
 $images = @(
-    "aladdin-backend:latest",
-    "aladdin-frontend:latest",
+    "artoo-backend:latest",
+    "artoo-frontend:latest",
     "postgres:16-alpine",
     "milvusdb/milvus:v2.4.6",
     "quay.io/coreos/etcd:v3.5.18",
@@ -81,7 +81,7 @@ Copy-Item backend\.env.example "$DEPLOY_DIR\.env.example"
 
 # 生成部署说明
 @"
-# Aladdin 内网部署步骤
+# Artoo 内网部署步骤
 
 ## 1. 加载 Docker 镜像
 ```bash

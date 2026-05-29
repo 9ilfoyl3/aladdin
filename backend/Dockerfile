@@ -2,7 +2,7 @@
 # Embedding/Rerank 统一使用远程服务，无需 ML 模型库
 #
 # 示例：
-#   docker build -t aladdin-backend .
+#   docker build -t artoo-backend .
 
 FROM python:3.12-slim
 

@@ -1,4 +1,4 @@
-# Aladdin 部署运维手册
+# Artoo 部署运维手册
 
 ---
 
@@ -70,7 +70,7 @@ deploy-amd64/ (或 deploy-arm64/)
 
 ```bash
 # 1. 创建部署目录
-mkdir -p /opt/aladdin && cd /opt/aladdin
+mkdir -p /opt/artoo && cd /opt/artoo
 
 # 2. 加载镜像
 docker load -i infra.tar
@@ -92,7 +92,7 @@ docker compose ps    # 所有服务应为 healthy
 ### 迭代更新
 
 ```bash
-cd /opt/aladdin
+cd /opt/artoo
 
 # 加载新镜像
 docker load -i app.tar
@@ -235,8 +235,8 @@ make dev-frontend   # 前端 (http://localhost:5173)
 docker compose up -d
 
 # 2. 创建 Python 环境
-conda create -n aladdin python=3.12 -y
-conda activate aladdin
+conda create -n artoo python=3.12 -y
+conda activate artoo
 pip install -r backend/requirements-base.txt
 
 # 3. 安装前端依赖

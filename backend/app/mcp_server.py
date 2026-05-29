@@ -1,7 +1,7 @@
-"""MCP Server - 将 Aladdin 知识库能力暴露为 MCP 协议
+"""MCP Server - 将 Artoo 知识库能力暴露为 MCP 协议
 
 提供 /mcp/tools/list 和 /mcp/tools/call 端点，
-让外部 AI 工具（Claude、Cursor 等）可以直接调用 Aladdin 的知识库能力。
+让外部 AI 工具（Claude、Cursor 等）可以直接调用 Artoo 的知识库能力。
 
 暴露的工具：
 - knowledge_search: 语义检索

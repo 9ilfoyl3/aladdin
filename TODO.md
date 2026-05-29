@@ -65,7 +65,7 @@
     - 自动提取：标题层级、表格/图片位置、段落类型（正文/摘要/脚注）
     - 元数据字段扩展：`element_type`（text/table/figure/title）、`bbox` 坐标
     - 为 #7 文档预处理提供更精准的 header/footer 识别能力
-- **参考**: RAGFlow 的 Auto-metadata 用 LLM 提取自定义字段（成本高），Dify 的 chunk 继承文档级 metadata。Aladdin 走"自动提取 + 零用户配置"路线，符合 ima 式体验
+- **参考**: RAGFlow 的 Auto-metadata 用 LLM 提取自定义字段（成本高），Dify 的 chunk 继承文档级 metadata。Artoo 走"自动提取 + 零用户配置"路线，符合 ima 式体验
 - **优先级**: 高（元数据过滤和 embedding 上下文增强的前提）
 - **预估工作量**: Step 1: 2-3 天，Step 2: 3-5 天
 
@@ -190,7 +190,7 @@
 - RAGFlow 对表格的处理：按行切分为 chunk，但官方也承认大表格效果有限
 - Dify 的建议：大型 CSV 用 External Knowledge API 或 Code 节点做预处理
 
-#### 对 Aladdin 的建议方案
+#### 对 Artoo 的建议方案
 
 **短期（当前优先级低）**:
 - 维持现有上传限制（建议设为 100MB），覆盖 99% 的文档类文件
@@ -258,7 +258,7 @@
 ## 七、对标 WeKnora 的新方向（参考腾讯开源 WeKnora v0.6）
 
 > WeKnora（维娜拉）是腾讯开源的 LLM 知识管理框架，围绕 RAG 快速问答、ReAct Agent 智能推理、Wiki 自动生成三大核心能力构建。
-> 以下方向基于对 WeKnora 架构和特性的分析，结合 Aladdin 现状提炼出可借鉴的改进点。
+> 以下方向基于对 WeKnora 架构和特性的分析，结合 Artoo 现状提炼出可借鉴的改进点。
 
 ### 15. Rerank 分数阈值 + 兜底回复机制
 - **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`

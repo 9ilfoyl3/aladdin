@@ -6,7 +6,7 @@
 
 set -e
 
-echo "=== Aladdin 内网部署 ==="
+echo "=== Artoo 内网部署 ==="
 
 # 1. 加载 Docker 镜像
 echo ""
@@ -21,7 +21,7 @@ done
 # 2. 加载模型文件（如果存在）
 echo ""
 echo "[2/4] 加载模型文件..."
-MODEL_DIR="/var/lib/aladdin/models"
+MODEL_DIR="/var/lib/artoo/models"
 if [ -f "models.tar.gz" ]; then
     echo "  解压模型到 $MODEL_DIR ..."
     mkdir -p "$MODEL_DIR"

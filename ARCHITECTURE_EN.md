@@ -1,4 +1,4 @@
-# Aladdin Technical Architecture
+# Artoo Technical Architecture
 
 This document provides in-depth technical details about the system's core workflows, chunking strategies, Agent orchestration mechanisms, environment variables, and more.
 
@@ -251,7 +251,7 @@ The system calls external Embedding and Rerank services via HTTP API, supporting
 | `RERANK_BASE_URL` | - | Rerank remote service URL |
 | `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank model |
 | `RERANK_API_KEY` | - | Rerank service key |
-| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/aladdin | PostgreSQL connection URL |
+| `DATABASE_URL` | postgresql+asyncpg://...localhost:5432/artoo | PostgreSQL connection URL |
 | `MILVUS_HOST` | localhost | Milvus address |
 | `MILVUS_PORT` | 19530 | Milvus port |
 | `REDIS_URL` | redis://localhost:6379/0 | Redis connection URL (task queue + cache) |

@@ -127,7 +127,7 @@ class WebSearchTool(BaseTool):
             url = "https://html.duckduckgo.com/html/"
             data = {"q": query}
             headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; AladdinBot/1.0)",
+                "User-Agent": "Mozilla/5.0 (compatible; ArtooBot/1.0)",
             }
             async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT, follow_redirects=True) as client:
                 resp = await client.post(url, data=data, headers=headers)

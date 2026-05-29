@@ -113,25 +113,25 @@ prepare-models:
 # 构建 ARM64 Docker 镜像（服务镜像，不含模型，默认远程模式）
 docker-build-arm:
 	@echo "构建 ARM64 后端镜像（远程模式，不含 ML 依赖）..."
-	docker build --platform linux/arm64 -t aladdin-backend:$(VERSION) -f backend/Dockerfile backend/
+	docker build --platform linux/arm64 -t artoo-backend:$(VERSION) -f backend/Dockerfile backend/
 	@echo "构建 ARM64 前端镜像..."
-	docker build --platform linux/arm64 -t aladdin-frontend:$(VERSION) frontend/
+	docker build --platform linux/arm64 -t artoo-frontend:$(VERSION) frontend/
 	@echo "ARM64 镜像构建完成"
 
 # 构建包含 ML 依赖的 ARM64 镜像（本地模型模式，CPU 版 PyTorch）
 docker-build-arm-ml:
 	@echo "构建 ARM64 后端镜像（含 ML 依赖，本地模型模式）..."
-	docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t aladdin-backend:$(VERSION)-ml -f backend/Dockerfile backend/
+	docker build --platform linux/arm64 --build-arg INSTALL_ML=true -t artoo-backend:$(VERSION)-ml -f backend/Dockerfile backend/
 	@echo "构建 ARM64 前端镜像..."
-	docker build --platform linux/arm64 -t aladdin-frontend:$(VERSION) frontend/
+	docker build --platform linux/arm64 -t artoo-frontend:$(VERSION) frontend/
 	@echo "ARM64 ML 镜像构建完成"
 
 # 构建包含模型的 ARM64 后端镜像（首次部署用）
 docker-build-arm-full: prepare-models
 	@echo "构建 ARM64 后端镜像（含模型）..."
-	docker build --platform linux/arm64 -t aladdin-backend:$(VERSION)-full -f backend/Dockerfile.production backend/
+	docker build --platform linux/arm64 -t artoo-backend:$(VERSION)-full -f backend/Dockerfile.production backend/
 	@echo "构建 ARM64 前端镜像..."
-	docker build --platform linux/arm64 -t aladdin-frontend:$(VERSION) frontend/
+	docker build --platform linux/arm64 -t artoo-frontend:$(VERSION) frontend/
 	@echo "ARM64 完整镜像构建完成"
 
 # 导出模型为独立 tar 包（与服务镜像分离，后续迭代不需要重复打包）
@@ -146,8 +146,8 @@ docker-export-models: prepare-models
 docker-export-arm:
 	@echo "导出 ARM64 服务镜像..."
 	@mkdir -p $(DEPLOY_DIR_ARM)
-	docker save aladdin-backend:$(VERSION) -o $(DEPLOY_DIR_ARM)/aladdin-backend.tar
-	docker save aladdin-frontend:$(VERSION) -o $(DEPLOY_DIR_ARM)/aladdin-frontend.tar
+	docker save artoo-backend:$(VERSION) -o $(DEPLOY_DIR_ARM)/artoo-backend.tar
+	docker save artoo-frontend:$(VERSION) -o $(DEPLOY_DIR_ARM)/artoo-frontend.tar
 	@echo "拉取并导出基础设施镜像（ARM64）..."
 	docker pull --platform linux/arm64 postgres:16-alpine
 	docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
@@ -178,8 +178,8 @@ docker-package-arm: docker-build-arm docker-export-arm docker-export-models
 docker-package-arm-update: docker-build-arm
 	@echo "导出服务镜像（仅更新用）..."
 	@mkdir -p $(DEPLOY_DIR_ARM)
-	docker save aladdin-backend:$(VERSION) -o $(DEPLOY_DIR_ARM)/aladdin-backend.tar
-	docker save aladdin-frontend:$(VERSION) -o $(DEPLOY_DIR_ARM)/aladdin-frontend.tar
+	docker save artoo-backend:$(VERSION) -o $(DEPLOY_DIR_ARM)/artoo-backend.tar
+	docker save artoo-frontend:$(VERSION) -o $(DEPLOY_DIR_ARM)/artoo-frontend.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_ARM)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_ARM)/.env.example
 	@echo ""
@@ -192,25 +192,25 @@ docker-package-arm-update: docker-build-arm
 # 构建 AMD64 Docker 镜像
 docker-build-amd64:
 	@echo "构建 AMD64 后端镜像（远程模式，交叉编译）..."
-	docker build --platform linux/amd64 -t aladdin-backend:$(VERSION)-amd64 -f backend/Dockerfile backend/
+	docker build --platform linux/amd64 -t artoo-backend:$(VERSION)-amd64 -f backend/Dockerfile backend/
 	@echo "构建 AMD64 前端镜像..."
-	docker build --platform linux/amd64 -t aladdin-frontend:$(VERSION)-amd64 frontend/
+	docker build --platform linux/amd64 -t artoo-frontend:$(VERSION)-amd64 frontend/
 	@echo "AMD64 镜像构建完成"
 
 # 构建包含 ML 依赖的 AMD64 镜像
 docker-build-amd64-ml:
 	@echo "构建 AMD64 后端镜像（含 ML 依赖，交叉编译，耗时较长）..."
-	docker build --platform linux/amd64 --build-arg INSTALL_ML=true -t aladdin-backend:$(VERSION)-amd64-ml -f backend/Dockerfile backend/
+	docker build --platform linux/amd64 --build-arg INSTALL_ML=true -t artoo-backend:$(VERSION)-amd64-ml -f backend/Dockerfile backend/
 	@echo "构建 AMD64 前端镜像..."
-	docker build --platform linux/amd64 -t aladdin-frontend:$(VERSION)-amd64 frontend/
+	docker build --platform linux/amd64 -t artoo-frontend:$(VERSION)-amd64 frontend/
 	@echo "AMD64 ML 镜像构建完成"
 
 # 导出 AMD64 镜像为 tar 包
 docker-export-amd64:
 	@echo "导出 AMD64 镜像..."
 	@mkdir -p $(DEPLOY_DIR_AMD64)
-	docker save aladdin-backend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/aladdin-backend.tar
-	docker save aladdin-frontend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/aladdin-frontend.tar
+	docker save artoo-backend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/artoo-backend.tar
+	docker save artoo-frontend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/artoo-frontend.tar
 	@echo "拉取并导出基础设施镜像（AMD64）..."
 	docker pull --platform linux/amd64 postgres:16-alpine
 	docker pull --platform linux/amd64 milvusdb/milvus:v2.4.6
@@ -239,8 +239,8 @@ docker-package-amd64: docker-build-amd64 docker-export-amd64 docker-export-model
 docker-package-amd64-update: docker-build-amd64
 	@echo "导出 AMD64 服务镜像（仅更新用）..."
 	@mkdir -p $(DEPLOY_DIR_AMD64)
-	docker save aladdin-backend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/aladdin-backend.tar
-	docker save aladdin-frontend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/aladdin-frontend.tar
+	docker save artoo-backend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/artoo-backend.tar
+	docker save artoo-frontend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/artoo-frontend.tar
 	@cp docker-compose-production.yml $(DEPLOY_DIR_AMD64)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_AMD64)/.env.example
 	@echo ""
