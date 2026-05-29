@@ -145,6 +145,9 @@ function Chat() {
                   } else {
                     segments.push({ type: 'answer', content: String(step.content) })
                   }
+                } else if (step.type === 'complete' && typeof (step as Record<string, unknown>).total_duration_ms === 'number') {
+                  // 恢复整体耗时
+                  base.totalDurationMs = (step as Record<string, unknown>).total_duration_ms as number
                 }
               }
               // 如果没有从 steps 中还原出 answer 段落，但有 content，补一个
@@ -246,6 +249,7 @@ function Chat() {
       let segments: ContentSegment[] = []
       let buffer = ''
       let isAgentMode = false
+      let totalDurationMs: number | undefined = undefined
 
       if (reader) {
         while (true) {
@@ -389,6 +393,20 @@ function Chat() {
 
                   // 执行完成
                   case 'complete': {
+                    if (typeof parsed.total_duration_ms === 'number') {
+                      totalDurationMs = parsed.total_duration_ms
+                      setMessages((prev) => {
+                        const updated = [...prev]
+                        updated[updated.length - 1] = {
+                          role: 'assistant',
+                          content: fullContent,
+                          references,
+                          segments,
+                          totalDurationMs,
+                        }
+                        return updated
+                      })
+                    }
                     break
                   }
 
@@ -483,6 +501,7 @@ function Chat() {
             content: fullContent,
             references,
             segments,
+            totalDurationMs,
           }
           return updated
         })

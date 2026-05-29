@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -679,6 +680,7 @@ async def _stream_response(
         llm_context = history if history else None
 
         # 启动 Agent 执行任务
+        agent_start_time = time.time()
         agent_task = asyncio.create_task(
             engine.execute(session_id or "", query, llm_context=llm_context)
         )
@@ -705,8 +707,14 @@ async def _stream_response(
                 agent_steps_collected.append(sse_data)
                 yield json.dumps(sse_data, ensure_ascii=False)
 
-        # 发射 complete 事件
-        complete_event = {"type": "complete", "total_steps": len(result_state.steps)}
+        # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
+        total_duration_ms = int((time.time() - agent_start_time) * 1000)
+        complete_event = {
+            "type": "complete",
+            "total_steps": len(result_state.steps),
+            "total_duration_ms": total_duration_ms,
+        }
+        agent_steps_collected.append(complete_event)
         yield json.dumps(complete_event, ensure_ascii=False)
 
         # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用

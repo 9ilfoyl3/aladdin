@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { Badge } from '@/components/ui/badge'
@@ -22,6 +22,8 @@ export interface Message {
   agentSteps?: AgentStep[]
   // 新格式：交错流式段落
   segments?: ContentSegment[]
+  // Agent 执行整体耗时（毫秒），来自 complete 事件
+  totalDurationMs?: number
   // 旧格式兼容
   thoughts?: string[]
   toolCalls?: ToolCallStatus[]
@@ -113,6 +115,7 @@ function MessageBubble({
             segments={msg.segments}
             isStreaming={isStreaming}
             isLast={isLast}
+            totalDurationMs={msg.totalDurationMs}
           />
         ) : (
           <>
@@ -185,75 +188,44 @@ function AgentStreamContent({
   segments,
   isStreaming,
   isLast,
+  totalDurationMs,
 }: {
   segments: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
+  totalDurationMs?: number
 }) {
-  // 判断某个 segment 是否是最后一个内容段（用于动画控制）
-  const lastContentIdx = segments.length - 1
+  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染
+  const processSegments = segments.filter(
+    (s) => s.type === 'thought' || s.type === 'tool_call'
+  )
+  const answerSegments = segments.filter((s) => s.type === 'answer')
 
   return (
-    <div className="px-4 py-3 space-y-2">
-      {segments.map((seg, i) => {
-        const isLastSegment = i === lastContentIdx && isStreaming && isLast
+    <div className="px-4 py-3 space-y-3">
+      {/* 步骤统计面板 */}
+      {processSegments.length > 0 && (
+        <StepSummaryPanel
+          steps={processSegments}
+          isStreaming={isStreaming}
+          isLast={isLast}
+          totalDurationMs={totalDurationMs}
+        />
+      )}
 
-        if (seg.type === 'thought') {
-          return (
-            <div key={i} className="text-sm leading-relaxed text-muted-foreground/70">
-              <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground/70 **:text-muted-foreground/70">
-                <Streamdown
-                  plugins={{ cjk: cjk }}
-                  isAnimating={isLastSegment}
-                >
-                  {seg.content}
-                </Streamdown>
-              </div>
+      {/* 回答内容 */}
+      {answerSegments.map((seg, i) => {
+        const isLastSegment =
+          i === answerSegments.length - 1 && isStreaming && isLast
+        return (
+          <div key={`ans-${i}`} className="text-sm leading-relaxed">
+            <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
+              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment}>
+                {seg.content}
+              </Streamdown>
             </div>
-          )
-        }
-
-        if (seg.type === 'answer') {
-          return (
-            <div key={i} className="text-sm leading-relaxed">
-              <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-                <Streamdown
-                  plugins={{ cjk: cjk }}
-                  isAnimating={isLastSegment}
-                >
-                  {seg.content}
-                </Streamdown>
-              </div>
-            </div>
-          )
-        }
-
-        if (seg.type === 'tool_call' || seg.type === 'tool_result') {
-          return (
-            <div
-              key={i}
-              className="flex items-center gap-2 text-xs text-muted-foreground py-1 px-2 rounded-lg bg-muted/20"
-            >
-              {seg.type === 'tool_call' && !seg.success && seg.durationMs === undefined && (
-                <Loader2 className="h-3 w-3 animate-spin text-primary/70 shrink-0" />
-              )}
-              {seg.success === true && (
-                <CheckCircle2 className="h-3 w-3 text-green-500 shrink-0" />
-              )}
-              {seg.success === false && (
-                <XCircle className="h-3 w-3 text-red-500 shrink-0" />
-              )}
-              <span className="font-mono text-[11px]">{seg.toolName || seg.content}</span>
-              {seg.durationMs !== undefined && (
-                <span className="text-[10px] text-muted-foreground/70 ml-auto">
-                  {seg.durationMs}ms
-                </span>
-              )}
-            </div>
-          )
-        }
-
-        return null
+          </div>
+        )
       })}
 
       {/* 流式中但还没有任何段落内容时显示加载动画 */}
@@ -264,6 +236,168 @@ function AgentStreamContent({
           <span className="w-2 h-2 rounded-full bg-primary/70 animate-[bounce_1.4s_ease-in-out_0.4s_infinite]" />
         </div>
       )}
+    </div>
+  )
+}
+
+// 耗时格式化：>=1s 显示秒，否则显示毫秒
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  return `${m}m${s}s`
+}
+
+// 步骤统计面板：顶部汇总（步骤数 + 整体耗时），可折叠展开各步骤
+function StepSummaryPanel({
+  steps,
+  isStreaming,
+  isLast,
+  totalDurationMs,
+}: {
+  steps: ContentSegment[]
+  isStreaming: boolean
+  isLast: boolean
+  totalDurationMs?: number
+}) {
+  const [open, setOpen] = useState(true)
+  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
+  const running = isStreaming && isLast
+
+  function toggleStep(i: number) {
+    setExpandedSteps((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
+
+  return (
+    <div className="rounded-xl border border-border/50 bg-muted/20 overflow-hidden">
+      {/* 汇总头部 */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-muted/40 transition-colors cursor-pointer"
+      >
+        {running ? (
+          <Loader2 className="h-4 w-4 shrink-0 text-primary animate-spin" />
+        ) : (
+          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+        )}
+        <span className="text-foreground/80">
+          {running ? '正在执行' : '已完成'}
+          <span className="text-primary font-medium mx-1">{steps.length}</span>
+          个步骤
+        </span>
+        {totalDurationMs !== undefined && (
+          <span className="text-muted-foreground">
+            ，耗时
+            <span className="text-primary font-medium ml-1">
+              {formatDuration(totalDurationMs)}
+            </span>
+          </span>
+        )}
+        {open ? (
+          <ChevronUp className="h-4 w-4 ml-auto text-muted-foreground shrink-0" />
+        ) : (
+          <ChevronDown className="h-4 w-4 ml-auto text-muted-foreground shrink-0" />
+        )}
+      </button>
+
+      {/* 步骤列表 */}
+      <div
+        className="grid transition-all duration-300 ease-in-out"
+        style={{
+          gridTemplateRows: open ? '1fr' : '0fr',
+          opacity: open ? 1 : 0,
+        }}
+      >
+        <div className="overflow-hidden">
+          <div className="px-2 pb-2 pt-1 space-y-1.5 border-t border-border/40">
+            {steps.map((seg, i) => {
+              const isActive = running && i === steps.length - 1
+              return (
+                <StepRow
+                  key={i}
+                  seg={seg}
+                  // 流式中自动展开当前步骤以实时显示内容；完成后默认折叠
+                  expanded={expandedSteps.has(i) || isActive}
+                  onToggle={() => toggleStep(i)}
+                  animating={isActive}
+                />
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 单个步骤行：思考显示文本摘要，工具调用显示「调用 xxx」前缀，均可折叠
+function StepRow({
+  seg,
+  expanded,
+  onToggle,
+  animating,
+}: {
+  seg: ContentSegment
+  expanded: boolean
+  onToggle: () => void
+  animating: boolean
+}) {
+  const isTool = seg.type === 'tool_call'
+
+  return (
+    <div className="rounded-lg border border-border/40 bg-background/40 overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-2.5 py-2 text-xs hover:bg-muted/40 transition-colors cursor-pointer text-left"
+      >
+        {isTool ? (
+          <Monitor className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        ) : (
+          <Lightbulb className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        )}
+        {isTool ? (
+          <span className="truncate text-foreground/80">
+            调用 <span className="font-mono">{seg.toolName || seg.content}</span>
+          </span>
+        ) : (
+          <span className="truncate text-muted-foreground">{seg.content}</span>
+        )}
+        <ChevronDown
+          className="h-3.5 w-3.5 ml-auto text-muted-foreground/60 shrink-0 transition-transform duration-200"
+          style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+        />
+      </button>
+
+      <div
+        className="grid transition-all duration-200 ease-in-out"
+        style={{
+          gridTemplateRows: expanded ? '1fr' : '0fr',
+          opacity: expanded ? 1 : 0,
+        }}
+      >
+        <div className="overflow-hidden">
+          <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
+            {isTool ? (
+              <p className="text-xs text-muted-foreground">
+                调用工具 <span className="font-mono">{seg.toolName || seg.content}</span>
+              </p>
+            ) : (
+              <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
+                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating}>
+                  {seg.content}
+                </Streamdown>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
