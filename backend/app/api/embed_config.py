@@ -5,6 +5,7 @@
 
 import uuid
 import logging
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -273,12 +274,15 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
                 resp = await client.get(health_url)
                 if resp.status_code != 200:
                     return EmbedTestResponse(success=False, message=f"服务不可达 (HTTP {resp.status_code})")
-                data = resp.json()
                 # 兼容多种 health 响应格式：
                 # - embedding-rerank-server: {"status": "ready", ...}
                 # - Infinity: {"unix": 1748490407.766}（200 即健康）
-                # - TEI: {"status": "ok"} 或直接 200
-                status = data.get("status")
+                # - TEI: {"status": "ok"} 或直接 200（响应体可能为空或纯文本）
+                try:
+                    data = resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    data = {}
+                status = data.get("status") if isinstance(data, dict) else None
                 if status and status not in ("ready", "ok"):
                     return EmbedTestResponse(success=False, message=f"服务未就绪: {status}")
         except httpx.ConnectError:
