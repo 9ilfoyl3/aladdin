@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧞 Artoo — Let the Knowledge Base Retrieve Itself: A ReAct-Agent-Driven Agentic RAG Framework
+# 🤖 Artoo — Let the Knowledge Base Retrieve Itself: A ReAct-Agent-Driven Agentic RAG Framework
 
 **Open-source · LLM-powered · Self-hostable intelligent knowledge base**
 

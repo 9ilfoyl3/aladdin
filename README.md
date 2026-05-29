@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧞 Artoo — 让知识库自己去检索：ReAct Agent 驱动的 Agentic RAG 框架
+# 🤖 Artoo — 让知识库自己去检索：ReAct Agent 驱动的 Agentic RAG 框架
 
 **开源 · LLM 驱动 · 可私有化部署的智能知识库系统**
 
