@@ -28,7 +28,6 @@ class KnowledgeBaseCreate(BaseModel):
     """创建知识库请求"""
     name: str = Field(..., min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(default=None, description="描述")
-    retrieval_mode: str = Field(default="hybrid", description="检索模式: direct / hybrid / agent")
     config: dict | None = Field(default=None, description="检索参数配置")
 
 
@@ -36,7 +35,6 @@ class KnowledgeBaseUpdate(BaseModel):
     """更新知识库请求"""
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
-    retrieval_mode: str | None = None
     config: dict | None = None
 
 
@@ -47,7 +45,6 @@ class KnowledgeBaseResponse(BaseModel):
     id: str
     name: str
     description: str | None
-    retrieval_mode: str
     config: dict | None
     doc_count: int
     created_at: datetime
@@ -90,7 +87,6 @@ async def list_knowledge_bases(db: AsyncSession = Depends(get_db)):
             id=kb.id,
             name=kb.name,
             description=kb.description,
-            retrieval_mode=kb.retrieval_mode,
             config=kb.config,
             doc_count=count_map.get(kb.id, 0),
             created_at=kb.created_at,
@@ -110,7 +106,6 @@ async def create_knowledge_base(
         id=str(uuid.uuid4()),
         name=body.name,
         description=body.description,
-        retrieval_mode=body.retrieval_mode,
         config=body.config,
         doc_count=0,
     )

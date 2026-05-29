@@ -19,7 +19,6 @@ class KnowledgeBase(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    retrieval_mode: Mapped[str] = mapped_column(String, default="hybrid")
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     doc_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

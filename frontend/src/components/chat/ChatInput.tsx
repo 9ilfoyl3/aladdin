@@ -34,11 +34,13 @@ interface ChatInputProps {
   llmConfigs: LLMConfigItem[]
   agentPresets: AgentPresetItem[]
   onInputChange: (value: string) => void
-  onSend: () => void
+  onSend: (query?: string) => void
   onKbChange: (value: string) => void
   onModelChange: (value: string) => void
   onPresetChange: (value: string) => void
   onToggleAuxiliaryKb: (kbId: string) => void
+  /** 居中静态布局（用于新对话空态），默认 false 时固定在底部 */
+  centered?: boolean
 }
 
 function ChatInput({
@@ -59,6 +61,7 @@ function ChatInput({
   onModelChange,
   onPresetChange,
   onToggleAuxiliaryKb,
+  centered = false,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -74,6 +77,122 @@ function ChatInput({
       e.preventDefault()
       onSend()
     }
+  }
+
+  // 居中静态布局（新对话空态）
+  if (centered) {
+    return (
+      <div className="w-full">
+        <div className="rounded-3xl border border-border bg-card shadow-lg transition-shadow focus-within:shadow-xl focus-within:border-primary/30">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => onInputChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="输入问题，将基于知识库和网络搜索回答..."
+            className="w-full px-5 pt-5 pb-2 text-sm bg-transparent border-none outline-none resize-none placeholder:text-muted-foreground/60 min-h-[60px] max-h-[160px]"
+            rows={2}
+            disabled={isStreaming}
+          />
+
+          <div className="flex items-center justify-between px-3.5 pb-3.5 gap-2 flex-wrap">
+            {/* 左侧工具栏 */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <Select value={selectedKb} onValueChange={onKbChange}>
+                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <Database className="h-3 w-3 shrink-0" />
+                  <SelectValue placeholder="全部知识库" />
+                </SelectTrigger>
+                <SelectContent>
+                  {knowledgeBases.map((kb) => (
+                    <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Select value={selectedPreset} onValueChange={onPresetChange}>
+                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <Bot className="h-3 w-3 shrink-0" />
+                  <SelectValue placeholder="选择智能体" />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentPresets.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
+                    <Library className="h-3 w-3 shrink-0" />
+                    <span>关联知识库</span>
+                    {auxiliaryKbIds.length > 0 && (
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
+                        {auxiliaryKbIds.length}
+                      </Badge>
+                    )}
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="top" align="start">
+                  {knowledgeBases.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
+                  ) : (
+                    knowledgeBases
+                      .filter((kb) => kb.id !== selectedKb)
+                      .map((kb) => (
+                        <DropdownMenuCheckboxItem
+                          key={kb.id}
+                          checked={auxiliaryKbIds.includes(kb.id)}
+                          onCheckedChange={() => onToggleAuxiliaryKb(kb.id)}
+                          onSelect={(e) => e.preventDefault()}
+                        >
+                          {kb.name}
+                        </DropdownMenuCheckboxItem>
+                      ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* 右侧 */}
+            <div className="flex items-center gap-2">
+              <ContextUsageRing
+                currentTokens={contextUsage.current}
+                maxTokens={contextUsage.max}
+                visible={contextUsage.max > 0}
+              />
+
+              <Select value={selectedModel} onValueChange={onModelChange}>
+                <SelectTrigger className="h-7 w-auto border-none bg-transparent hover:bg-muted/50 rounded-lg px-2 gap-1 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <Cpu className="h-3 w-3 shrink-0" />
+                  <span className="max-w-[15em] truncate">{selectedModelName || '模型'}</span>
+                </SelectTrigger>
+                <SelectContent>
+                  {llmConfigs.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用的对话模型</div>
+                  ) : (
+                    llmConfigs.map((config) => (
+                      <SelectItem key={config.id} value={config.id}>{config.name}</SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+
+              <Button
+                size="icon"
+                className="h-9 w-9 rounded-full shrink-0"
+                onClick={() => onSend()}
+                disabled={!input.trim() || isStreaming}
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -179,7 +298,7 @@ function ChatInput({
               <Button
                 size="icon"
                 className="h-8 w-8 rounded-full shrink-0"
-                onClick={onSend}
+                onClick={() => onSend()}
                 disabled={!input.trim() || isStreaming}
               >
                 <Send className="h-4 w-4" />

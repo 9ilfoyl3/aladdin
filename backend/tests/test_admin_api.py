@@ -70,13 +70,11 @@ class TestKnowledgeBaseCRUD:
         resp = await client.post("/api/knowledge-bases", json={
             "name": "测试知识库",
             "description": "用于测试",
-            "retrieval_mode": "hybrid",
         })
         assert resp.status_code == 201
         data = resp.json()
         assert data["name"] == "测试知识库"
         assert data["description"] == "用于测试"
-        assert data["retrieval_mode"] == "hybrid"
         assert data["doc_count"] == 0
         assert "id" in data
 
@@ -116,12 +114,10 @@ class TestKnowledgeBaseCRUD:
 
         resp = await client.put(f"/api/knowledge-bases/{kb_id}", json={
             "name": "新名称",
-            "retrieval_mode": "agent",
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "新名称"
-        assert data["retrieval_mode"] == "agent"
 
     @pytest.mark.asyncio
     async def test_delete_knowledge_base(self, client):

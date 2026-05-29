@@ -38,7 +38,7 @@ async def test_tables_created(db_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_knowledge_base_crud(db_session: AsyncSession):
     """测试知识库 CRUD"""
-    kb = KnowledgeBase(id="kb_001", name="测试知识库", description="用于测试", retrieval_mode="hybrid")
+    kb = KnowledgeBase(id="kb_001", name="测试知识库", description="用于测试")
     db_session.add(kb)
     await db_session.commit()
 
@@ -47,7 +47,6 @@ async def test_knowledge_base_crud(db_session: AsyncSession):
     fetched = result.scalar_one()
 
     assert fetched.name == "测试知识库"
-    assert fetched.retrieval_mode == "hybrid"
     assert fetched.doc_count == 0
 
 

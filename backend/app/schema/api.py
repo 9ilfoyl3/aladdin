@@ -28,7 +28,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = Field(default=False, description="是否流式返回")
     knowledge_base_id: Optional[str] = Field(default=None, description="知识库 ID，为空时使用全部知识库")
     retrieval_mode: Optional[str] = Field(
-        default=None, description="检索模式: direct / hybrid / agent，为空时使用知识库默认配置"
+        default=None, description="检索模式: direct / hybrid / agent，为空时使用 Agent 预设配置"
     )
     model_config_id: Optional[str] = Field(
         default=None, description="LLM 模型配置 ID，为空时使用系统默认模型"

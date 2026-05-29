@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot } from 'lucide-react'
 import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
+import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import { useSession } from '@/lib/session-context'
 
 interface KnowledgeBaseItem {
@@ -184,8 +184,8 @@ function Chat() {
   }, [currentSessionId])
 
   // 发送消息
-  async function handleSend() {
-    const query = input.trim()
+  async function handleSend(overrideQuery?: string) {
+    const query = (overrideQuery ?? input).trim()
     if (!query || isStreaming) return
 
     let sessionId = currentSessionId
@@ -535,56 +535,71 @@ function Chat() {
 
   const selectedModelName = llmConfigs.find((c) => c.id === selectedModel)?.name || ''
 
+  const isEmpty = messages.length === 0
+
+  // 共用的输入框 props
+  const chatInputProps = {
+    input,
+    isStreaming,
+    selectedKb,
+    selectedModel,
+    selectedModelName,
+    selectedPreset,
+    auxiliaryKbIds,
+    contextUsage,
+    knowledgeBases,
+    llmConfigs,
+    agentPresets,
+    onInputChange: setInput,
+    onSend: handleSend,
+    onKbChange: setSelectedKb,
+    onModelChange: setSelectedModel,
+    onPresetChange: setSelectedPreset,
+    onToggleAuxiliaryKb: toggleAuxiliaryKb,
+  }
+
+  // 空态：标题 + 提问示例气泡 + 居中输入框（参考 WeKnora 新对话布局）
+  if (isEmpty) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center px-4">
+        <div className="w-full max-w-3xl flex flex-col items-center -mt-12">
+          <h1 className="text-3xl font-semibold text-foreground text-center mb-8">
+            基于知识库内容问答 · AI 问答
+          </h1>
+
+          <div className="mb-8 w-full">
+            <SuggestedQuestions onSelect={(q) => setInput(q)} />
+          </div>
+
+          <ChatInput {...chatInputProps} centered />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col relative">
       {/* 消息列表 */}
       <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-36">
-        {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-center">
-            <div className="w-14 h-14 rounded-2xl bg-muted/50 flex items-center justify-center mb-4">
-              <Bot className="h-7 w-7 text-muted-foreground/50" />
-            </div>
-            <p className="text-muted-foreground text-sm">开始对话，向知识库提问</p>
-          </div>
-        ) : (
-          <div className="max-w-3xl mx-auto py-6 px-4 space-y-5">
-            {messages.map((msg, idx) => (
-              <MessageBubble
-                key={idx}
-                message={msg}
-                index={idx}
-                isStreaming={isStreaming}
-                isLast={idx === messages.length - 1}
-                expandedRefs={expandedRefs}
-                expandedRefDetails={expandedRefDetails}
-                onToggleRef={toggleRef}
-                onToggleRefDetail={toggleRefDetail}
-              />
-            ))}
-          </div>
-        )}
+        <div className="max-w-3xl mx-auto py-6 px-4 space-y-5">
+          {messages.map((msg, idx) => (
+            <MessageBubble
+              key={idx}
+              message={msg}
+              index={idx}
+              isStreaming={isStreaming}
+              isLast={idx === messages.length - 1}
+              expandedRefs={expandedRefs}
+              expandedRefDetails={expandedRefDetails}
+              onToggleRef={toggleRef}
+              onToggleRefDetail={toggleRefDetail}
+            />
+          ))}
+        </div>
       </div>
 
       {/* 输入区域 */}
-      <ChatInput
-        input={input}
-        isStreaming={isStreaming}
-        selectedKb={selectedKb}
-        selectedModel={selectedModel}
-        selectedModelName={selectedModelName}
-        selectedPreset={selectedPreset}
-        auxiliaryKbIds={auxiliaryKbIds}
-        contextUsage={contextUsage}
-        knowledgeBases={knowledgeBases}
-        llmConfigs={llmConfigs}
-        agentPresets={agentPresets}
-        onInputChange={setInput}
-        onSend={handleSend}
-        onKbChange={setSelectedKb}
-        onModelChange={setSelectedModel}
-        onPresetChange={setSelectedPreset}
-        onToggleAuxiliaryKb={toggleAuxiliaryKb}
-      />
+      <ChatInput {...chatInputProps} />
     </div>
   )
 }

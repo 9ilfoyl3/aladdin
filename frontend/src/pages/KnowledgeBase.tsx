@@ -6,7 +6,6 @@ import { knowledgeBaseApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 
@@ -15,7 +14,6 @@ interface KnowledgeBaseItem {
   id: string
   name: string
   description: string
-  retrieval_mode: string
   doc_count: number
   created_at: string
 }
@@ -84,11 +82,10 @@ function KnowledgeBase() {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    const submitData = { ...form, retrieval_mode: 'agent' }
     if (editingItem) {
-      updateMutation.mutate({ id: editingItem.id, data: submitData })
+      updateMutation.mutate({ id: editingItem.id, data: form })
     } else {
-      createMutation.mutate(submitData)
+      createMutation.mutate(form)
     }
   }
 
@@ -168,9 +165,6 @@ function KnowledgeBase() {
 
               {/* 底部信息 */}
               <div className="flex items-center gap-3 mt-4 pt-3 border-t border-border/60">
-                <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20">
-                  {kb.retrieval_mode}
-                </Badge>
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
                   <FileText className="h-3 w-3" />
                   {kb.doc_count} 篇文档
