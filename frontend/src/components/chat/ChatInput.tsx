@@ -110,18 +110,6 @@ function ChatInput({
                 </SelectContent>
               </Select>
 
-              <Select value={selectedPreset} onValueChange={onPresetChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Bot className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="选择智能体" />
-                </SelectTrigger>
-                <SelectContent>
-                  {agentPresets.map((preset) => (
-                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
@@ -154,6 +142,18 @@ function ChatInput({
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <Select value={selectedPreset} onValueChange={onPresetChange}>
+                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <Bot className="h-3 w-3 shrink-0" />
+                  <SelectValue placeholder="选择智能体" />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentPresets.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             {/* 右侧 */}
@@ -225,18 +225,6 @@ function ChatInput({
                 </SelectContent>
               </Select>
 
-              <Select value={selectedPreset} onValueChange={onPresetChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Bot className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="选择智能体" />
-                </SelectTrigger>
-                <SelectContent>
-                  {agentPresets.map((preset) => (
-                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
@@ -269,6 +257,18 @@ function ChatInput({
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <Select value={selectedPreset} onValueChange={onPresetChange}>
+                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
+                  <Bot className="h-3 w-3 shrink-0" />
+                  <SelectValue placeholder="选择智能体" />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentPresets.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             {/* 右侧 */}
