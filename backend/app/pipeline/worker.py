@@ -177,7 +177,14 @@ class PipelineWorker:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data.get("status") == "ready"
+                    # 兼容多种 health 响应格式：
+                    # - embedding-rerank-server: {"status": "ready"}
+                    # - Infinity: {"unix": 1748490407.766}（200 即健康）
+                    # - TEI: 200 即健康
+                    status = data.get("status")
+                    if status and status not in ("ready", "ok"):
+                        return False
+                    return True
             return False
         except Exception as e:
             logger.debug("Embedding health check failed: %s", e)

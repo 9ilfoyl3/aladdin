@@ -274,8 +274,13 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
                 if resp.status_code != 200:
                     return EmbedTestResponse(success=False, message=f"服务不可达 (HTTP {resp.status_code})")
                 data = resp.json()
-                if data.get("status") != "ready":
-                    return EmbedTestResponse(success=False, message=f"服务未就绪: {data.get('status')}")
+                # 兼容多种 health 响应格式：
+                # - embedding-rerank-server: {"status": "ready", ...}
+                # - Infinity: {"unix": 1748490407.766}（200 即健康）
+                # - TEI: {"status": "ok"} 或直接 200
+                status = data.get("status")
+                if status and status not in ("ready", "ok"):
+                    return EmbedTestResponse(success=False, message=f"服务未就绪: {status}")
         except httpx.ConnectError:
             return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
         except httpx.TimeoutException:
@@ -290,36 +295,18 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
                 timeout=body.timeout,
                 sparse_enabled=body.sparse_enabled,
             )
-            result = await embedder.embed(["测试文本"])
-            if not result or len(result[0]) == 0:
-                return EmbedTestResponse(success=False, message="Dense 返回结果为空")
-
-            msg = f"连接成功，向量维度: {len(result[0])}"
-
-            # 测试 sparse 端点
+            # 只验证 health 通过即可，不发实际推理请求（避免阻塞推理队列）
+            msg = "连接成功，服务在线"
             if body.sparse_enabled:
                 sparse_ok = await embedder.check_sparse_support()
                 if sparse_ok:
                     msg += "；Sparse 端点可用 ✓"
                 else:
                     msg += "；Sparse 端点不可用（将降级为 BM25 兜底）"
-
             return EmbedTestResponse(success=True, message=msg)
         else:
-            from app.models.rerank.remote import RemoteReranker
-            reranker = RemoteReranker(
-                base_url=body.base_url,
-                model=body.model_name,
-                api_key=body.api_key or "",
-                timeout=body.timeout,
-            )
-            result = await reranker.rerank("测试查询", ["文档A", "文档B"], top_k=2)
-            if result:
-                return EmbedTestResponse(
-                    success=True,
-                    message=f"连接成功，返回 {len(result)} 个结果"
-                )
-            return EmbedTestResponse(success=False, message="返回结果为空")
+            # Rerank 同样只依赖 health 检查，不发实际推理请求
+            return EmbedTestResponse(success=True, message="连接成功，服务在线")
 
     except Exception as e:
         logger.exception("Embed/Rerank 测试失败")

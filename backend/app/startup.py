@@ -104,6 +104,7 @@ async def load_embed_configs() -> None:
                 api_key=embed_config.api_key or "",
                 timeout=embed_config.timeout,
                 sparse_enabled=embed_config.sparse_enabled,
+                max_connections=settings.pipeline_embed_max_connections,
             )
             logger.info(
                 "Embedding 配置已加载: %s (%s, sparse=%s)",

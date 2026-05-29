@@ -110,6 +110,7 @@ class ModelManager:
             api_key=kwargs.get("api_key", ""),
             timeout=kwargs.get("timeout", 60.0),
             sparse_enabled=kwargs.get("sparse_enabled", True),
+            max_connections=kwargs.get("max_connections", 20),
         )
         logger.info("Embedding Provider 已重新加载: base_url=%s", kwargs.get("base_url"))
 
