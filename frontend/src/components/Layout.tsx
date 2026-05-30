@@ -13,22 +13,26 @@ import {
   SquarePen,
   Trash2,
   PanelLeft,
+  LogOut,
+  KeyRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
+import { useAuth } from '@/lib/auth-context'
 
-// 导航项配置
+// 导航项配置。menuPerm 为驱动可见性的菜单权限点（超管恒可见）；
+// 配置/管理类页面归 config:manage。null 表示任意登录用户可见。
 const navItems = [
-  { to: '/knowledge-bases', label: '知识库', icon: Database },
-  { to: '/retrieval', label: '检索测试', icon: Search },
-  { to: '/models', label: '模型管理', icon: Cpu },
-  { to: '/agent-config', label: '智能体', icon: Bot },
-  { to: '/embed-config', label: 'Embedding', icon: Layers },
-  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText },
-  { to: '/api-keys', label: 'API Key', icon: Key },
-  { to: '/settings', label: '系统配置', icon: Settings },
-]
+  { to: '/knowledge-bases', label: '知识库', icon: Database, menuPerm: 'menu:knowledge' },
+  { to: '/retrieval', label: '检索测试', icon: Search, menuPerm: 'menu:retrieval' },
+  { to: '/models', label: '模型管理', icon: Cpu, menuPerm: 'config:manage' },
+  { to: '/agent-config', label: '智能体', icon: Bot, menuPerm: 'config:manage' },
+  { to: '/embed-config', label: 'Embedding', icon: Layers, menuPerm: 'config:manage' },
+  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, menuPerm: 'config:manage' },
+  { to: '/api-keys', label: 'API Key', icon: Key, menuPerm: 'apikey:manage' },
+  { to: '/settings', label: '系统配置', icon: Settings, menuPerm: 'config:manage' },
+] as const
 
 // 布局组件：侧边栏 + 主内容区
 function Layout() {
@@ -37,6 +41,10 @@ function Layout() {
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const confirm = useConfirm()
+  const { hasPermission, logout } = useAuth()
+
+  // 依据菜单权限点过滤导航项（超管恒可见，由 hasPermission 内部处理）
+  const visibleNavItems = navItems.filter((item) => hasPermission(item.menuPerm))
 
   const {
     sessions,
@@ -110,7 +118,7 @@ function Layout() {
               <SquarePen className="h-4 w-4" />
               <span>新对话</span>
             </button>
-            {navItems.map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -169,6 +177,24 @@ function Layout() {
               </div>
             )}
           </div>
+
+          {/* 底部：账号操作（改密 / 登出） */}
+          <div className="border-t border-sidebar-border px-3 py-2 space-y-1">
+            <button
+              onClick={() => navigate('/change-password')}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
+            >
+              <KeyRound className="h-4 w-4" />
+              <span>修改口令</span>
+            </button>
+            <button
+              onClick={logout}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-destructive/10 hover:text-destructive transition-colors cursor-pointer"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>退出登录</span>
+            </button>
+          </div>
         </div>
 
         {/* 收起状态内容 */}
@@ -206,7 +232,7 @@ function Layout() {
                 <SquarePen className="h-4 w-4" />
               </div>
             </button>
-            {navItems.map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

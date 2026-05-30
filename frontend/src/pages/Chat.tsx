@@ -7,6 +7,7 @@ import ChatInput from '@/components/chat/ChatInput'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import { useSession } from '@/lib/session-context'
+import { authHeaders, handleUnauthorized } from '@/lib/auth'
 
 interface KnowledgeBaseItem {
   id: string
@@ -244,7 +245,7 @@ function Chat() {
 
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           model: 'rag',
           messages: [{ role: 'user', content: query }],
@@ -257,6 +258,10 @@ function Chat() {
         }),
       })
 
+      if (response.status === 401) {
+        handleUnauthorized()
+        throw new Error('登录态已失效，请重新登录')
+      }
       if (!response.ok) throw new Error(`请求失败: ${response.status}`)
 
       const reader = response.body?.getReader()

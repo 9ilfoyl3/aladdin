@@ -1,5 +1,7 @@
 // API 客户端：统一请求封装
 
+import { authHeaders, handleUnauthorized } from './auth'
+
 const BASE_URL = '/api'
 
 // 通用请求方法
@@ -11,12 +13,16 @@ async function request<T>(
   const response = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
-      ...options.headers,
+      ...authHeaders(options.headers as Record<string, string> | undefined),
     },
     ...options,
   })
 
   if (!response.ok) {
+    // 401：清除登录态并跳转登录页（展示层防御；真正鉴权在后端）
+    if (response.status === 401) {
+      handleUnauthorized()
+    }
     const error = await response.json().catch(() => ({}))
     throw new Error(error.detail || `请求失败: ${response.status}`)
   }
@@ -80,8 +86,12 @@ export const documentApi = {
       : `${BASE_URL}/knowledge-bases/${kbId}/documents/upload`
     return fetch(url, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
-    }).then((res) => res.json())
+    }).then((res) => {
+      if (res.status === 401) handleUnauthorized()
+      return res.json()
+    })
   },
   validateFolder: (kbId: string, paths: string[]) =>
     request<{
@@ -101,8 +111,10 @@ export const documentApi = {
     }
     return fetch(`${BASE_URL}/knowledge-bases/${kbId}/documents/upload-folder`, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
     }).then(async (res) => {
+      if (res.status === 401) handleUnauthorized()
       if (!res.ok) {
         const error = await res.json().catch(() => ({}))
         throw new Error(error.detail || `请求失败: ${res.status}`)
@@ -469,4 +481,42 @@ export const sessionApi = {
     request<SessionMessageItem[]>(`/sessions/${id}/messages`),
   clearMessages: (id: string) =>
     request<void>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+}
+
+
+// ============================================================
+// 认证相关接口（tenant-auth）
+// ============================================================
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  must_change_password: boolean
+  is_super_admin: boolean
+}
+
+export interface PermissionItem {
+  code: string
+  type: string // api | menu | btn
+}
+
+export interface MePermissionsResponse {
+  user_id: string
+  tenant_id: string | null
+  is_super_admin: boolean
+  permissions: PermissionItem[]
+}
+
+export const authApi = {
+  login: (username: string, password: string, tenantId?: string) =>
+    request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, tenant_id: tenantId ?? null }),
+    }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    request<{ detail: string }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
+  myPermissions: () => request<MePermissionsResponse>('/auth/me/permissions'),
 }
