@@ -11,11 +11,16 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.config import AgentConfig
 from app.api.agent_config import get_effective_preset_config
+from app.api.deps import authorization_guard
+from app.auth.constants import PermissionEnum
+from app.auth.identity import IdentityContext
+from app.auth.kb_authz import KbAccessEnum
+from app.auth.kb_scope import authorize_requested_kbs
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
@@ -139,8 +144,12 @@ def _summarize_agent_steps(agent_steps: list) -> str:
     return f"[Agent used: {', '.join(tool_calls)}]"
 
 
-async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None) -> None:
-    """保存一条消息到会话"""
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None) -> None:
+    """保存一条消息到会话。
+
+    tenant_id 由调用方在请求处理期间从 IdentityContext 取好后传入（后台任务在响应返回后
+    执行，届时请求级 contextvar 已失效，故必须显式透传，不在此重新解析身份）。
+    """
     msg = ChatMessageRecord(
         id=str(uuid.uuid4()),
         session_id=session_id,
@@ -150,6 +159,7 @@ async def _save_message(session_id: str, role: str, content: str, references: li
         agent_steps=agent_steps,
         kb_id=kb_id,
         kb_ids=kb_ids,
+        tenant_id=tenant_id,
     )
     async with async_session() as session:
         session.add(msg)
@@ -590,6 +600,7 @@ async def _stream_response(
     history: list[dict] | None = None,
     session_id: str | None = None,
     preset_cfg: dict | None = None,
+    tenant_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件"""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -740,10 +751,10 @@ async def _stream_response(
         # 保存消息到会话（不阻塞 SSE 关闭）
         if session_id and full_response:
             try:
-                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids)
+                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
-                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids)
+                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
                 # 标题生成放到后台，不阻塞 SSE 关闭
                 asyncio.create_task(_auto_title_session(session_id, query, full_response))
             except Exception as e:
@@ -833,10 +844,10 @@ async def _stream_response(
     # 保存消息到会话（如果指定了 session_id）
     if session_id and full_response:
         try:
-            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids)
+            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
-            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids)
+            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
             await _auto_title_session(session_id, query, full_response)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
@@ -844,7 +855,12 @@ async def _stream_response(
 
 @router.post("/v1/chat/completions")
 @router.post("/api/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(
+    request: ChatCompletionRequest,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.QA_INVOKE.value})
+    ),
+):
     """Chat Completion 端点（OpenAI 兼容）
 
     支持流式和非流式两种响应模式，集成三档检索模式调度。
@@ -858,6 +874,19 @@ async def chat_completions(request: ChatCompletionRequest):
 
     if not user_query:
         raise HTTPException(status_code=400, detail="消息列表中缺少 user 角色消息")
+
+    tenant_id = identity.tenant_id
+
+    # 检索范围授权：触达 Milvus 前先校验所有被指定 KB 处于身份可读范围
+    # （跨租户/不可读 -> 404；跨库问答 MultiKBRetriever 逻辑不变，仅前置裁剪）。
+    requested_kb_ids: list[str] = []
+    if request.kb_ids:
+        requested_kb_ids = list(request.kb_ids)
+    elif request.knowledge_base_id:
+        requested_kb_ids = [request.knowledge_base_id]
+    if requested_kb_ids:
+        async with async_session() as _authz_session:
+            await authorize_requested_kbs(_authz_session, identity, requested_kb_ids, KbAccessEnum.READ)
 
     # 加载生效的 Agent 预设（指定 > 默认 > 内置兜底）
     preset_cfg = await get_effective_preset_config(request.agent_preset_id)
@@ -894,7 +923,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id),
             media_type="text/event-stream",
         )
 
@@ -962,9 +991,9 @@ async def chat_completions(request: ChatCompletionRequest):
     if request.session_id and answer:
         try:
             msg_kb_ids = request.kb_ids if use_multi_kb else None
-            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids)
+            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
             refs_data = [ref.model_dump() for ref in references] if references else None
-            await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids)
+            await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
             await _auto_title_session(request.session_id, user_query, answer)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
