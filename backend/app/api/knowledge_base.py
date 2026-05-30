@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.schema.api import PageResult
 from app.schema.db import Document, KnowledgeBase
 from app.storage.database import get_db
 from app.storage.milvus import MilvusClient
@@ -62,15 +63,31 @@ def _get_milvus() -> MilvusClient:
     return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
 
 
-@router.get("", response_model=list[KnowledgeBaseResponse])
-async def list_knowledge_bases(db: AsyncSession = Depends(get_db)):
-    """获取知识库列表，doc_count 实时统计"""
+@router.get("", response_model=PageResult[KnowledgeBaseResponse])
+async def list_knowledge_bases(
+    page: int = 1,
+    page_size: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取知识库列表（分页/滚动加载），doc_count 实时统计"""
+    # 参数兜底，避免一次拉取过多
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
+    # 总数
+    total = await db.scalar(select(func.count(KnowledgeBase.id))) or 0
+
+    # 当前页数据
     result = await db.execute(
-        select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc())
+        select(KnowledgeBase)
+        .order_by(KnowledgeBase.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
     )
     kbs = result.scalars().all()
 
-    # 实时统计每个知识库的文档数
+    # 实时统计当前页知识库的文档数
     kb_ids = [kb.id for kb in kbs]
     if kb_ids:
         count_result = await db.execute(
@@ -82,7 +99,7 @@ async def list_knowledge_bases(db: AsyncSession = Depends(get_db)):
     else:
         count_map = {}
 
-    return [
+    items = [
         KnowledgeBaseResponse(
             id=kb.id,
             name=kb.name,
@@ -94,6 +111,14 @@ async def list_knowledge_bases(db: AsyncSession = Depends(get_db)):
         )
         for kb in kbs
     ]
+
+    return PageResult[KnowledgeBaseResponse](
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("", response_model=KnowledgeBaseResponse, status_code=201)

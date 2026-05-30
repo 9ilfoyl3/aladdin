@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, Database, FileText, FolderOpen } from 'lucide-react'
 import { knowledgeBaseApi } from '@/lib/api'
+import type { PageResult } from '@/lib/api'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -31,10 +33,30 @@ function KnowledgeBase() {
   const [editingItem, setEditingItem] = useState<KnowledgeBaseItem | null>(null)
   const [form, setForm] = useState<FormData>({ name: '', description: '' })
 
-  // 获取知识库列表
-  const { data: knowledgeBases = [], isLoading } = useQuery({
-    queryKey: ['knowledge-bases'],
-    queryFn: () => knowledgeBaseApi.list() as Promise<KnowledgeBaseItem[]>,
+  // 获取知识库列表（分页 + 滚动加载）
+  const PAGE_SIZE = 20
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['knowledge-bases', 'infinite'],
+    queryFn: ({ pageParam }) =>
+      knowledgeBaseApi.list({ page: pageParam, page_size: PAGE_SIZE }) as Promise<
+        PageResult<KnowledgeBaseItem>
+      >,
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.page + 1 : undefined,
+  })
+
+  const knowledgeBases = data?.pages.flatMap((p) => p.items) ?? []
+
+  const sentinelRef = useInfiniteScroll(fetchNextPage, {
+    hasMore: !!hasNextPage,
+    loading: isFetchingNextPage,
   })
 
   // 创建知识库
@@ -172,6 +194,15 @@ function KnowledgeBase() {
               </div>
             </Link>
           ))}
+
+          {/* 滚动加载哨兵 + 加载状态 */}
+          {hasNextPage && (
+            <div ref={sentinelRef} className="col-span-full flex items-center justify-center py-6">
+              {isFetchingNextPage && (
+                <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -62,7 +62,8 @@ function Retrieval() {
   // 获取知识库列表
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
-    queryFn: () => knowledgeBaseApi.list() as Promise<KnowledgeBaseItem[]>,
+    queryFn: () =>
+      knowledgeBaseApi.list({ page_size: 100 }).then((res) => res.items as KnowledgeBaseItem[]),
   })
 
   // 获取 LLM 模型列表

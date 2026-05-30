@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   Upload,
@@ -21,6 +21,8 @@ import {
   X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
+import type { PageResult } from '@/lib/api'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -115,23 +117,63 @@ function Documents() {
     enabled: !!kbId,
   })
 
-  // 获取当前目录下的文件夹
-  const { data: folders = [] } = useQuery({
+  // 获取当前目录下的文件夹（分页 + 滚动加载）
+  const PAGE_SIZE = 20
+  const {
+    data: foldersData,
+    fetchNextPage: fetchNextFolders,
+    hasNextPage: hasMoreFolders,
+    isFetchingNextPage: isFetchingFolders,
+  } = useInfiniteQuery({
     queryKey: ['folders', kbId, currentFolderId],
-    queryFn: () => folderApi.list(kbId!, currentFolderId) as Promise<FolderData[]>,
+    queryFn: ({ pageParam }) =>
+      folderApi.list(kbId!, currentFolderId, { page: pageParam, page_size: PAGE_SIZE }) as Promise<
+        PageResult<FolderData>
+      >,
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.page + 1 : undefined),
     enabled: !!kbId,
   })
+  const folders = foldersData?.pages.flatMap((p) => p.items) ?? []
 
-  // 获取当前目录下的文档
-  const { data: documents = [], isLoading } = useQuery({
+  // 获取当前目录下的文档（分页 + 滚动加载）
+  const {
+    data: documentsData,
+    isLoading,
+    fetchNextPage: fetchNextDocuments,
+    hasNextPage: hasMoreDocuments,
+    isFetchingNextPage: isFetchingDocuments,
+  } = useInfiniteQuery({
     queryKey: ['documents', kbId, currentFolderId],
-    queryFn: () => documentApi.list(kbId!, currentFolderId) as Promise<DocumentItem[]>,
+    queryFn: ({ pageParam }) =>
+      documentApi.list(kbId!, currentFolderId, { page: pageParam, page_size: PAGE_SIZE }) as Promise<
+        PageResult<DocumentItem>
+      >,
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.page + 1 : undefined),
     enabled: !!kbId,
     refetchInterval: (query) => {
-      const docs = query.state.data as DocumentItem[] | undefined
-      const hasProcessing = docs?.some((d) => d.status === 'processing' || d.status === 'pending')
+      const pages = query.state.data?.pages as PageResult<DocumentItem>[] | undefined
+      const hasProcessing = pages?.some((p) =>
+        p.items.some((d) => d.status === 'processing' || d.status === 'pending')
+      )
       return hasProcessing || uploadingFiles.length > 0 ? 2000 : 5000
     },
+  })
+  const documents = documentsData?.pages.flatMap((p) => p.items) ?? []
+
+  // 滚动加载哨兵：先加载文件夹，文件夹加载完再加载文档
+  const loadMore = useCallback(() => {
+    if (hasMoreFolders) {
+      fetchNextFolders()
+    } else if (hasMoreDocuments) {
+      fetchNextDocuments()
+    }
+  }, [hasMoreFolders, hasMoreDocuments, fetchNextFolders, fetchNextDocuments])
+
+  const sentinelRef = useInfiniteScroll(loadMore, {
+    hasMore: !!hasMoreFolders || !!hasMoreDocuments,
+    loading: isFetchingFolders || isFetchingDocuments,
   })
 
   // 获取面包屑
@@ -933,6 +975,15 @@ function Documents() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* 滚动加载哨兵 + 加载状态（网格/列表视图共用） */}
+        {!isLoading && totalItems > 0 && (hasMoreFolders || hasMoreDocuments) && (
+          <div ref={sentinelRef} className="flex items-center justify-center py-6">
+            {(isFetchingFolders || isFetchingDocuments) && (
+              <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+            )}
           </div>
         )}
       </div>
