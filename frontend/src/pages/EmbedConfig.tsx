@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, CheckCircle, XCircle, Zap, Globe, Power } from 'lucide-react'
 import { embedConfigApi } from '@/lib/api'
 import type { EmbedConfigItem } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -35,6 +36,7 @@ const emptyForm: FormData = {
 
 function EmbedConfig() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<EmbedConfigItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -79,6 +81,15 @@ function EmbedConfig() {
       queryClient.invalidateQueries({ queryKey: ['embed-configs'] })
     },
   })
+
+  // 删除配置（统一确认交互）
+  async function handleDelete(item: EmbedConfigItem) {
+    const ok = await confirm({
+      title: '删除配置',
+      description: <>确定要删除「{item.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(item.id)
+  }
 
   const activateMutation = useMutation({
     mutationFn: (id: string) => embedConfigApi.update(id, { is_active: true }),
@@ -258,7 +269,7 @@ function EmbedConfig() {
             size="sm"
             variant="ghost"
             className="h-7 w-7 p-0 text-destructive cursor-pointer"
-            onClick={() => { if (confirm('确定删除？')) deleteMutation.mutate(item.id) }}
+            onClick={() => handleDelete(item)}
             disabled={item.is_active}
           >
             <Trash2 className="h-3.5 w-3.5" />

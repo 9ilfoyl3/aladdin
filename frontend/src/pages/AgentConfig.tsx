@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Sparkles, Eraser, Wand2, Loader2 } from 'lucide-react'
 import { agentPresetApi } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -62,10 +63,10 @@ const ALL_TOOLS = [
 
 function AgentConfig() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<AgentPresetItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
   const promptRef = useRef<PromptEditorHandle>(null)
   const [showRewrite, setShowRewrite] = useState(false)
   const [rewriteInput, setRewriteInput] = useState('')
@@ -124,9 +125,17 @@ function AgentConfig() {
     mutationFn: (id: string) => agentPresetApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['agent-presets'] })
-      setShowDeleteConfirm(null)
     },
   })
+
+  // 删除预设（统一确认交互）
+  async function handleDelete(preset: AgentPresetItem) {
+    const ok = await confirm({
+      title: '删除预设',
+      description: <>确定要删除预设「{preset.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(preset.id)
+  }
 
   const rewriteMutation = useMutation({
     mutationFn: (instruction: string) =>
@@ -262,7 +271,7 @@ function AgentConfig() {
                   variant="ghost"
                   size="sm"
                   className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
-                  onClick={() => setShowDeleteConfirm(preset.id)}
+                  onClick={() => handleDelete(preset)}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   删除
@@ -532,27 +541,6 @@ function AgentConfig() {
               </Button>
             </DialogFooter>
           </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* 删除确认对话框 */}
-      <Dialog open={!!showDeleteConfirm} onOpenChange={() => setShowDeleteConfirm(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认删除</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">确定要删除此预设吗？此操作不可撤销。</p>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDeleteConfirm(null)} className="cursor-pointer">取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => showDeleteConfirm && deleteMutation.mutate(showDeleteConfirm)}
-              disabled={deleteMutation.isPending}
-              className="cursor-pointer"
-            >
-              删除
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

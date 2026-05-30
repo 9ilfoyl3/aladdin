@@ -5,6 +5,7 @@ import { Plus, Pencil, Trash2, Database, FileText, FolderOpen } from 'lucide-rea
 import { knowledgeBaseApi } from '@/lib/api'
 import type { PageResult } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -30,6 +31,7 @@ interface FormData {
 // 知识库管理页面
 function KnowledgeBase() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<KnowledgeBaseItem | null>(null)
   const [form, setForm] = useState<FormData>({ name: '', description: '' })
@@ -98,6 +100,19 @@ function KnowledgeBase() {
     setShowDialog(true)
   }
 
+  // 删除知识库（统一确认交互）
+  async function handleDelete(kb: KnowledgeBaseItem) {
+    const ok = await confirm({
+      title: '删除知识库',
+      description: (
+        <>
+          确定要删除知识库「{kb.name}」吗？该知识库下的所有文档与向量数据将被一并清除，此操作不可撤销。
+        </>
+      ),
+    })
+    if (ok) deleteMutation.mutate(kb.id)
+  }
+
   function closeDialog() {
     setShowDialog(false)
     setEditingItem(null)
@@ -158,7 +173,7 @@ function KnowledgeBase() {
                   <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
                 </button>
                 <button
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); deleteMutation.mutate(kb.id) }}
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDelete(kb) }}
                   className="h-7 w-7 rounded-md flex items-center justify-center hover:bg-destructive/10 transition-colors"
                   title="删除"
                 >

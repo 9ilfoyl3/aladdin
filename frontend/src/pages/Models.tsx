@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Search, LayoutGrid, List } from 'lucide-react'
 import { llmConfigApi } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -53,6 +54,7 @@ const emptyForm: FormData = {
 
 function Models() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<LLMConfigItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -113,6 +115,15 @@ function Models() {
       queryClient.invalidateQueries({ queryKey: ['llm-configs'] })
     },
   })
+
+  // 删除模型配置（统一确认交互）
+  async function handleDelete(config: LLMConfigItem) {
+    const ok = await confirm({
+      title: '删除模型配置',
+      description: <>确定要删除模型配置「{config.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(config.id)
+  }
 
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string; reply?: string }>>({})
   const [testingId, setTestingId] = useState<string | null>(null)
@@ -307,7 +318,7 @@ function Models() {
                     <Pencil className="h-3.5 w-3.5" />
                     编辑
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer" onClick={() => handleDelete(config)}>
                     <Trash2 className="h-3.5 w-3.5" />
                     删除
                   </Button>
@@ -364,7 +375,7 @@ function Models() {
                       <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={() => openEdit(config)}>
                         <Pencil className="h-3 w-3" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={() => handleDelete(config)}>
                         <Trash2 className="h-3 w-3" />
                       </Button>
                     </div>

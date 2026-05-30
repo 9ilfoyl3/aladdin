@@ -23,6 +23,7 @@ import {
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
 import type { PageResult } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -68,6 +69,7 @@ interface BreadcrumbItem {
 function Documents() {
   const { id: kbId } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
 
@@ -85,7 +87,6 @@ function Documents() {
   // 批量选择状态
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   // 上传状态
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([])
@@ -280,13 +281,51 @@ function Documents() {
       toast(`已删除 ${data.deleted_count} 个文档`)
       setSelectedIds(new Set())
       setSelectionMode(false)
-      setShowDeleteConfirm(false)
     },
     onError: (err) => {
       toast(`批量删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
-      setShowDeleteConfirm(false)
     },
   })
+
+  // ============================================================
+  // 统一删除确认交互
+  // ============================================================
+
+  // 删除文件夹
+  async function handleDeleteFolder(folder: FolderData) {
+    const ok = await confirm({
+      title: '删除文件夹',
+      description: (
+        <>
+          确定要删除文件夹「{folder.name}」吗？文件夹内的所有文档与子文件夹将被一并删除，此操作不可撤销。
+        </>
+      ),
+    })
+    if (ok) deleteFolderMutation.mutate(folder.id)
+  }
+
+  // 删除单个文档
+  async function handleDeleteDocument(doc: MergedFile) {
+    const ok = await confirm({
+      title: '删除文档',
+      description: <>确定要删除文档「{doc.filename}」吗？相关的向量数据也将被清除，此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(doc.id)
+  }
+
+  // 批量删除文档
+  async function handleBatchDelete() {
+    if (selectedIds.size === 0) return
+    const ok = await confirm({
+      title: '批量删除文档',
+      description: (
+        <>
+          确定要删除选中的 {selectedIds.size} 个文档吗？相关的向量数据也将被清除，此操作不可撤销。
+        </>
+      ),
+    })
+    if (ok) batchDeleteMutation.mutate(Array.from(selectedIds))
+  }
 
   const batchRetryMutation = useMutation({
     mutationFn: (docIds: string[]) => documentApi.batchRetry(docIds),
@@ -570,7 +609,7 @@ function Documents() {
                 variant="default"
                 size="sm"
                 disabled={selectedIds.size === 0}
-                onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true) }}
+                onClick={(e) => { e.stopPropagation(); handleBatchDelete() }}
                 className="gap-1.5 cursor-pointer"
               >
                 <Trash2 className="h-4 w-4" />
@@ -735,7 +774,7 @@ function Documents() {
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     destructive
-                    onClick={() => deleteFolderMutation.mutate(folder.id)}
+                    onClick={() => handleDeleteFolder(folder)}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
                     删除文件夹
@@ -822,7 +861,7 @@ function Documents() {
                     )}
                     <ContextMenuItem
                       destructive
-                      onClick={() => deleteMutation.mutate(doc.id)}
+                      onClick={() => handleDeleteDocument(doc)}
                     >
                       <Trash2 className="h-4 w-4 mr-2" />
                       删除文件
@@ -890,7 +929,7 @@ function Documents() {
                         <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={(e) => { e.stopPropagation(); setRenamingFolder(folder) }}>
                           <Pencil className="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteFolderMutation.mutate(folder.id) }}>
+                        <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder) }}>
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
@@ -964,7 +1003,7 @@ function Documents() {
                               variant="ghost"
                               size="sm"
                               className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer"
-                              onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(doc.id) }}
+                              onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc) }}
                             >
                               <Trash2 className="h-3 w-3" />
                             </Button>
@@ -1108,44 +1147,6 @@ function Documents() {
         </DialogContent>
       </Dialog>
 
-      {/* 批量删除确认对话框 */}
-      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>确认删除</DialogTitle>
-            <DialogDescription>
-              确定要删除选中的 {selectedIds.size} 个文档吗？此操作不可撤销，相关的向量数据也将被清除。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowDeleteConfirm(false)}
-              disabled={batchDeleteMutation.isPending}
-            >
-              取消
-            </Button>
-            <Button
-              variant="default"
-              onClick={() => batchDeleteMutation.mutate(Array.from(selectedIds))}
-              disabled={batchDeleteMutation.isPending}
-              className="gap-1.5"
-            >
-              {batchDeleteMutation.isPending ? (
-                <>
-                  <div className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  删除中...
-                </>
-              ) : (
-                <>
-                  <Trash2 className="h-4 w-4" />
-                  确认删除
-                </>
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

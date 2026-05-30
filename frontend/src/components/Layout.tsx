@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
+import { useConfirm } from '@/lib/confirm-context'
 
 // 导航项配置
 const navItems = [
@@ -35,6 +36,7 @@ function Layout() {
   const navigate = useNavigate()
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const confirm = useConfirm()
 
   const {
     sessions,
@@ -54,6 +56,16 @@ function Layout() {
   function onSwitchSession(sessionId: string) {
     setCurrentSessionId(sessionId)
     navigate('/chat')
+  }
+
+  // 删除会话（统一确认交互）
+  async function onDeleteSession(session: { id: string; title: string }, e: React.MouseEvent) {
+    e.stopPropagation()
+    const ok = await confirm({
+      title: '删除对话',
+      description: <>确定要删除对话「{session.title}」吗？此操作不可撤销。</>,
+    })
+    if (ok) handleDeleteSession(session.id, e)
   }
 
   return (
@@ -133,7 +145,7 @@ function Layout() {
               >
                 <span className="flex-1 truncate leading-snug">{session.title}</span>
                 <button
-                  onClick={(e) => handleDeleteSession(session.id, e)}
+                  onClick={(e) => onDeleteSession(session, e)}
                   className={cn(
                     'opacity-0 group-hover:opacity-100 h-5 w-5 rounded flex items-center justify-center transition-opacity cursor-pointer',
                     currentSessionId === session.id && isChat

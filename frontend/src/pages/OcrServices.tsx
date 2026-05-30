@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
 import { ocrConfigApi } from '@/lib/api'
 import type { OCRConfigItem, OCRTestResult } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -33,11 +35,11 @@ const emptyForm: OCRFormData = {
 
 function OcrServices() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [testResults, setTestResults] = useState<Record<string, OCRTestResult>>({})
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<OCRConfigItem | null>(null)
-  const [deletingItem, setDeletingItem] = useState<OCRConfigItem | null>(null)
   const [form, setForm] = useState<OCRFormData>(emptyForm)
   const [formError, setFormError] = useState<string | null>(null)
   const [dialogTestResult, setDialogTestResult] = useState<OCRTestResult | null>(null)
@@ -98,12 +100,21 @@ function OcrServices() {
     mutationFn: (id: string) => ocrConfigApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['ocr-configs'] })
-      setDeletingItem(null)
+      toast('OCR 服务已删除')
     },
     onError: (err: Error) => {
-      setFormError(err.message)
+      toast(`删除失败: ${err.message}`)
     },
   })
+
+  // 删除 OCR 服务（统一确认交互）
+  async function handleDelete(config: OCRConfigItem) {
+    const ok = await confirm({
+      title: '删除 OCR 服务',
+      description: <>确定要删除 OCR 服务「{config.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(config.id)
+  }
 
   function openCreate() {
     setEditingItem(null)
@@ -127,11 +138,6 @@ function OcrServices() {
     setFormError(null)
     setDialogTestResult(null)
     setShowDialog(true)
-  }
-
-  function openDelete(item: OCRConfigItem) {
-    setFormError(null)
-    setDeletingItem(item)
   }
 
   function closeDialog() {
@@ -292,7 +298,7 @@ function OcrServices() {
                   variant="ghost"
                   size="sm"
                   className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
-                  onClick={() => openDelete(config)}
+                  onClick={() => handleDelete(config)}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   删除
@@ -432,37 +438,6 @@ function OcrServices() {
               </Button>
             </DialogFooter>
           </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* 删除确认对话框 */}
-      <Dialog open={!!deletingItem} onOpenChange={() => setDeletingItem(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认删除</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            确定要删除 OCR 服务 <span className="font-medium text-foreground">{deletingItem?.name}</span> 吗？此操作不可撤销。
-          </p>
-          {formError && (
-            <div className="p-2.5 rounded-lg text-xs bg-red-50 text-red-700 border border-red-200">
-              <div className="flex items-center gap-1.5">
-                <XCircle className="h-3.5 w-3.5" />
-                <span>{formError}</span>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeletingItem(null)} className="cursor-pointer">取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => deletingItem && deleteMutation.mutate(deletingItem.id)}
-              disabled={deleteMutation.isPending}
-              className="cursor-pointer"
-            >
-              {deleteMutation.isPending ? '删除中...' : '确认删除'}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
