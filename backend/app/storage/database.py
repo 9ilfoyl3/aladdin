@@ -28,6 +28,12 @@ engine = create_async_engine(
 # 异步会话工厂
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# 安装租户隔离兜底（方案 B）：对所有 TenantScopedMixin 模型按 contextvar 三态自动
+# 注入 tenant 过滤。幂等，API 与 Worker 各 import 一次本模块即生效。
+from app.repositories.tenant_repo import install_tenant_loader_criteria  # noqa: E402
+
+install_tenant_loader_criteria()
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """获取数据库会话（用于 FastAPI 依赖注入）"""
@@ -81,10 +87,15 @@ async def _migrate_db() -> None:
 
 
 async def init_db() -> None:
-    """初始化数据库，创建所有表并执行迁移"""
+    """初始化数据库，创建所有表并执行迁移与引导（API 与 Worker 共用入口）。"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_db()
+    # tenant-auth 全新初始化引导（幂等）：内置 External_User_Tenant/管理员/公共库、
+    # 预置权限点与 admin/user 角色、Super_Admin。API 进程与 Worker 进程都会经此，
+    # 引导内部幂等并容忍并发首启。不做历史数据迁移/回填。
+    from app.auth.bootstrap import run_bootstrap
+    await run_bootstrap(async_session)
     # 重置被中断的任务（上次服务重启时正在处理的文档）
     await _reset_interrupted_tasks()
 
