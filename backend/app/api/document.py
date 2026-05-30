@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -19,6 +19,7 @@ from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
+from app.schema.api import PageResult
 from app.schema.db import Chunk, Document, Folder, KnowledgeBase, OCRConfig
 from app.storage.database import async_session, get_db
 from app.storage.milvus import MilvusClient
@@ -230,19 +231,33 @@ async def _enqueue_or_fallback(
 # ============================================================
 
 
-@router.get("/api/knowledge-bases/{kb_id}/documents", response_model=list[DocumentResponse])
-async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    """获取知识库下的文档列表（支持按文件夹过滤）"""
+@router.get("/api/knowledge-bases/{kb_id}/documents", response_model=PageResult[DocumentResponse])
+async def list_documents(
+    kb_id: str,
+    folder_id: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取知识库下的文档列表（支持按文件夹过滤 + 分页/滚动加载）"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     if kb_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
+    # 参数兜底
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
     # 按文件夹过滤
     if folder_id:
-        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id == folder_id)
+        cond = (Document.kb_id == kb_id, Document.folder_id == folder_id)
     else:
-        query = select(Document).where(Document.kb_id == kb_id, Document.folder_id.is_(None))
+        cond = (Document.kb_id == kb_id, Document.folder_id.is_(None))
+
+    # 总数
+    total = await db.scalar(select(func.count(Document.id)).where(*cond)) or 0
 
     # 排序：completed > failed > processing > pending，同状态按创建时间倒序
     from sqlalchemy import case
@@ -253,9 +268,15 @@ async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSess
         (Document.status == "pending", 3),
         else_=4,
     )
-    result = await db.execute(query.order_by(status_order, Document.created_at.desc()))
+    result = await db.execute(
+        select(Document)
+        .where(*cond)
+        .order_by(status_order, Document.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
     docs = result.scalars().all()
-    return [
+    items = [
         DocumentResponse(
             id=d.id,
             kb_id=d.kb_id,
@@ -271,6 +292,13 @@ async def list_documents(kb_id: str, folder_id: str | None = None, db: AsyncSess
         )
         for d in docs
     ]
+    return PageResult[DocumentResponse](
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("/api/knowledge-bases/{kb_id}/documents/upload", response_model=DocumentResponse, status_code=201)
@@ -1055,30 +1083,52 @@ async def preview_document_file(doc_id: str, db: AsyncSession = Depends(get_db))
     raise HTTPException(status_code=400, detail="该文件类型不支持预览")
 
 
-@router.get("/api/documents/{doc_id}/chunks", response_model=list[ChunkResponse])
-async def list_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
-    """查看文档的切片列表（返回父块 + 子块内容用于高亮）"""
+@router.get("/api/documents/{doc_id}/chunks", response_model=PageResult[ChunkResponse])
+async def list_document_chunks(
+    doc_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """查看文档的切片列表（父块分页 + 当前页父块对应的子块内容用于高亮）"""
     # 验证文档存在
     doc_result = await db.execute(select(Document).where(Document.id == doc_id))
     if doc_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="文档不存在")
 
-    # 查询父块
+    # 参数兜底
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
+    # 父块总数
+    total = await db.scalar(
+        select(func.count(Chunk.id)).where(Chunk.doc_id == doc_id, Chunk.parent_id.is_(None))
+    ) or 0
+
+    # 当前页父块
     result = await db.execute(
-        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.parent_id.is_(None)).order_by(Chunk.chunk_index)
+        select(Chunk)
+        .where(Chunk.doc_id == doc_id, Chunk.parent_id.is_(None))
+        .order_by(Chunk.chunk_index)
+        .offset(offset)
+        .limit(page_size)
     )
     parent_chunks = result.scalars().all()
 
-    # 查询所有子块，按 parent_id 分组
-    child_result = await db.execute(
-        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.parent_id.isnot(None)).order_by(Chunk.chunk_index)
-    )
-    all_children = child_result.scalars().all()
+    # 仅查询当前页父块对应的子块（一次 in_ 查询，避免 N+1 与全量加载）
+    parent_ids = [c.id for c in parent_chunks]
     children_by_parent: dict[str, list[str]] = {}
-    for child in all_children:
-        children_by_parent.setdefault(child.parent_id, []).append(child.content)
+    if parent_ids:
+        child_result = await db.execute(
+            select(Chunk)
+            .where(Chunk.doc_id == doc_id, Chunk.parent_id.in_(parent_ids))
+            .order_by(Chunk.chunk_index)
+        )
+        for child in child_result.scalars().all():
+            children_by_parent.setdefault(child.parent_id, []).append(child.content)
 
-    return [
+    items = [
         ChunkResponse(
             id=c.id,
             doc_id=c.doc_id,
@@ -1091,3 +1141,11 @@ async def list_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
         )
         for c in parent_chunks
     ]
+
+    return PageResult[ChunkResponse](
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=offset + len(items) < total,
+    )

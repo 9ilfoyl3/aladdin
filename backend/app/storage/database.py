@@ -55,17 +55,25 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
-        # 知识库表移除废弃的 retrieval_mode 列（检索模式已交由 Agent 预设统一管理）
-        # 旧库该列为 NOT NULL 且无 server_default，模型删字段后插入会触发 NotNullViolation
-        "ALTER TABLE knowledge_bases DROP COLUMN IF EXISTS retrieval_mode",
+        # 对话消息表新增知识库追踪字段
+        "ALTER TABLE chat_messages ADD COLUMN kb_id VARCHAR",
+        "ALTER TABLE chat_messages ADD COLUMN kb_ids JSON",
+        # 清理历史遗留列：旧版本 knowledge_bases 表带 retrieval_mode NOT NULL 列，
+        # 当前模型已移除该字段，插入时不再赋值，会触发 NOT NULL 约束错误。
+        # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。
+        "ALTER TABLE knowledge_bases ALTER COLUMN retrieval_mode DROP NOT NULL",
     ]
     for sql in migrations:
         try:
             async with engine.begin() as conn:
                 await conn.execute(text(sql))
         except Exception as e:
-            # 列已存在是正常的，其他错误需要关注
-            if "already exists" in str(e) or "DuplicateColumn" in str(e):
+            # 列已存在 / 列不存在 等均属正常（幂等迁移），其他错误需要关注
+            msg = str(e)
+            if any(
+                kw in msg
+                for kw in ("already exists", "DuplicateColumn", "does not exist", "UndefinedColumn")
+            ):
                 pass
             else:
                 import logging

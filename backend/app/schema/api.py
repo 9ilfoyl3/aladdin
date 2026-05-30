@@ -3,9 +3,29 @@
 定义 Chat API 的 OpenAI 兼容请求和响应结构。
 """
 
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, Field
+
+
+# ============================================================
+# 通用分页响应模型
+# ============================================================
+
+T = TypeVar("T")
+
+
+class PageResult(BaseModel, Generic[T]):
+    """统一分页响应结构
+
+    用于知识库、文件夹、文档等列表接口的滚动加载（infinite scroll）。
+    """
+
+    items: list[T] = Field(default_factory=list, description="当前页数据列表")
+    total: int = Field(default=0, description="总记录数")
+    page: int = Field(default=1, description="当前页码，从 1 开始")
+    page_size: int = Field(default=20, description="每页数量")
+    has_more: bool = Field(default=False, description="是否还有下一页")
 
 
 # ============================================================

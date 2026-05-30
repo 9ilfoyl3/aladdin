@@ -29,9 +29,21 @@ async function request<T>(
   return response.json()
 }
 
+// 通用分页响应结构（与后端 PageResult 对应，用于滚动加载）
+export interface PageResult<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
 // 知识库相关接口
 export const knowledgeBaseApi = {
-  list: () => request<unknown[]>('/knowledge-bases'),
+  list: (params?: { page?: number; page_size?: number }) =>
+    request<PageResult<unknown>>(
+      `/knowledge-bases?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
+    ),
   get: (id: string) => request<unknown>(`/knowledge-bases/${id}`),
   create: (data: unknown) =>
     request<unknown>('/knowledge-bases', {
@@ -49,8 +61,17 @@ export const knowledgeBaseApi = {
 
 // 文档相关接口
 export const documentApi = {
-  list: (kbId: string, folderId?: string | null) =>
-    request<unknown[]>(`/knowledge-bases/${kbId}/documents${folderId ? `?folder_id=${folderId}` : ''}`),
+  list: (
+    kbId: string,
+    folderId?: string | null,
+    params?: { page?: number; page_size?: number }
+  ) => {
+    const qs = new URLSearchParams()
+    if (folderId) qs.set('folder_id', folderId)
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    return request<PageResult<unknown>>(`/knowledge-bases/${kbId}/documents?${qs.toString()}`)
+  },
   upload: (kbId: string, file: File, folderId?: string | null) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -110,13 +131,25 @@ export const documentApi = {
     }),
   retry: (id: string) =>
     request<unknown>(`/documents/${id}/retry`, { method: 'POST' }),
-  chunks: (id: string) => request<unknown[]>(`/documents/${id}/chunks`),
+  chunks: (id: string, params?: { page?: number; page_size?: number }) =>
+    request<PageResult<unknown>>(
+      `/documents/${id}/chunks?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
+    ),
 }
 
 // 文件夹相关接口
 export const folderApi = {
-  list: (kbId: string, parentId?: string | null) =>
-    request<unknown[]>(`/knowledge-bases/${kbId}/folders${parentId ? `?parent_id=${parentId}` : ''}`),
+  list: (
+    kbId: string,
+    parentId?: string | null,
+    params?: { page?: number; page_size?: number }
+  ) => {
+    const qs = new URLSearchParams()
+    if (parentId) qs.set('parent_id', parentId)
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    return request<PageResult<unknown>>(`/knowledge-bases/${kbId}/folders?${qs.toString()}`)
+  },
   create: (kbId: string, data: { name: string; parent_id?: string | null }) =>
     request<unknown>(`/knowledge-bases/${kbId}/folders`, {
       method: 'POST',
@@ -385,6 +418,8 @@ export interface SessionMessageItem {
     max_context_tokens?: number
     current_context_tokens?: number
   }[] | null
+  kb_id: string | null
+  kb_ids: string[] | null
   created_at: string
 }
 

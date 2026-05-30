@@ -203,6 +203,8 @@ class ChatMessageRecord(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     references: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 检索引用来源
     agent_steps: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # Agent 思考步骤
+    kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 本条消息使用的主知识库 ID
+    kb_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # 多知识库联合检索时的知识库 ID 列表
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # 关联

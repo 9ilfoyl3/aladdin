@@ -42,7 +42,8 @@ function Chat() {
 
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
-    queryFn: () => knowledgeBaseApi.list() as Promise<KnowledgeBaseItem[]>,
+    queryFn: () =>
+      knowledgeBaseApi.list({ page_size: 100 }).then((res) => res.items as KnowledgeBaseItem[]),
   })
 
   const { data: llmConfigs = [] } = useQuery({
@@ -181,6 +182,18 @@ function Chat() {
           }
         }
         if (restoredUsage) setContextUsage(restoredUsage)
+
+        // 恢复该会话最近一次使用的知识库选择：从最后一条带 kb 信息的消息读取
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i]
+          if (m.kb_id || (m.kb_ids && m.kb_ids.length > 0)) {
+            setSelectedKb(m.kb_id || '')
+            setAuxiliaryKbIds(
+              (m.kb_ids || []).filter((id) => id && id !== m.kb_id)
+            )
+            break
+          }
+        }
       } catch (e) {
         console.error('加载会话消息失败', e)
         setMessages([])

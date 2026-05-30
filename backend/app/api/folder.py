@@ -9,10 +9,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.validators import NameValidationError, validate_folder_name
+from app.schema.api import PageResult
 from app.schema.db import Document, Folder, KnowledgeBase
 from app.storage.database import get_db
 from app.storage.milvus import MilvusClient
@@ -75,54 +76,81 @@ class BreadcrumbItem(BaseModel):
 # ============================================================
 
 
-@router.get("/api/knowledge-bases/{kb_id}/folders", response_model=list[FolderResponse])
+@router.get("/api/knowledge-bases/{kb_id}/folders", response_model=PageResult[FolderResponse])
 async def list_folders(
     kb_id: str,
     parent_id: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
-    """获取指定目录下的文件夹列表"""
+    """获取指定目录下的文件夹列表（分页/滚动加载）"""
     # 验证知识库存在
     kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     if kb_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    # 查询文件夹
-    if parent_id:
-        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id == parent_id)
-    else:
-        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id.is_(None))
+    # 参数兜底
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
 
-    result = await db.execute(query.order_by(Folder.name))
+    # 构造同级文件夹过滤条件
+    if parent_id:
+        cond = (Folder.kb_id == kb_id, Folder.parent_id == parent_id)
+    else:
+        cond = (Folder.kb_id == kb_id, Folder.parent_id.is_(None))
+
+    # 总数
+    total = await db.scalar(select(func.count(Folder.id)).where(*cond)) or 0
+
+    # 当前页文件夹
+    result = await db.execute(
+        select(Folder).where(*cond).order_by(Folder.name).offset(offset).limit(page_size)
+    )
     folders = result.scalars().all()
 
-    # 统计每个文件夹的子文件夹数和文档数
-    responses = []
-    for folder in folders:
-        # 子文件夹数
-        sub_result = await db.execute(
-            select(Folder).where(Folder.parent_id == folder.id)
-        )
-        subfolder_count = len(sub_result.scalars().all())
+    folder_ids = [f.id for f in folders]
 
-        # 文档数
-        doc_result = await db.execute(
-            select(Document).where(Document.folder_id == folder.id)
+    # 一次聚合查询统计本页文件夹的文档数（避免 N+1）
+    doc_count_map: dict[str, int] = {}
+    sub_count_map: dict[str, int] = {}
+    if folder_ids:
+        doc_rows = await db.execute(
+            select(Document.folder_id, func.count(Document.id))
+            .where(Document.folder_id.in_(folder_ids))
+            .group_by(Document.folder_id)
         )
-        doc_count = len(doc_result.scalars().all())
+        doc_count_map = {row[0]: row[1] for row in doc_rows.all()}
 
-        responses.append(FolderResponse(
+        sub_rows = await db.execute(
+            select(Folder.parent_id, func.count(Folder.id))
+            .where(Folder.parent_id.in_(folder_ids))
+            .group_by(Folder.parent_id)
+        )
+        sub_count_map = {row[0]: row[1] for row in sub_rows.all()}
+
+    items = [
+        FolderResponse(
             id=folder.id,
             kb_id=folder.kb_id,
             parent_id=folder.parent_id,
             name=folder.name,
-            doc_count=doc_count,
-            subfolder_count=subfolder_count,
+            doc_count=doc_count_map.get(folder.id, 0),
+            subfolder_count=sub_count_map.get(folder.id, 0),
             created_at=folder.created_at,
             updated_at=folder.updated_at,
-        ))
+        )
+        for folder in folders
+    ]
 
-    return responses
+    return PageResult[FolderResponse](
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("/api/knowledge-bases/{kb_id}/folders", response_model=FolderResponse, status_code=201)

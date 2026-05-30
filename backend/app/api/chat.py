@@ -139,7 +139,7 @@ def _summarize_agent_steps(agent_steps: list) -> str:
     return f"[Agent used: {', '.join(tool_calls)}]"
 
 
-async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None) -> None:
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None) -> None:
     """保存一条消息到会话"""
     msg = ChatMessageRecord(
         id=str(uuid.uuid4()),
@@ -148,6 +148,8 @@ async def _save_message(session_id: str, role: str, content: str, references: li
         content=content,
         references=references,
         agent_steps=agent_steps,
+        kb_id=kb_id,
+        kb_ids=kb_ids,
     )
     async with async_session() as session:
         session.add(msg)
@@ -738,10 +740,10 @@ async def _stream_response(
         # 保存消息到会话（不阻塞 SSE 关闭）
         if session_id and full_response:
             try:
-                await _save_message(session_id, "user", query)
+                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
-                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data)
+                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids)
                 # 标题生成放到后台，不阻塞 SSE 关闭
                 asyncio.create_task(_auto_title_session(session_id, query, full_response))
             except Exception as e:
@@ -831,10 +833,10 @@ async def _stream_response(
     # 保存消息到会话（如果指定了 session_id）
     if session_id and full_response:
         try:
-            await _save_message(session_id, "user", query)
+            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids)
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
-            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data)
+            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids)
             await _auto_title_session(session_id, query, full_response)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
@@ -959,9 +961,10 @@ async def chat_completions(request: ChatCompletionRequest):
     # 保存消息到会话（如果指定了 session_id）
     if request.session_id and answer:
         try:
-            await _save_message(request.session_id, "user", user_query)
+            msg_kb_ids = request.kb_ids if use_multi_kb else None
+            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids)
             refs_data = [ref.model_dump() for ref in references] if references else None
-            await _save_message(request.session_id, "assistant", answer, references=refs_data)
+            await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids)
             await _auto_title_session(request.session_id, user_query, answer)
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
