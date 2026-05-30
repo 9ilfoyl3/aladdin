@@ -22,8 +22,28 @@
 | Embedding/Rerank | 远程服务 | 需可达的 bge-m3 / reranker 服务 |
 | LLM | 远程/本地 | vLLM 或 Ollama |
 
-> ⚠️ **端口一致性**：前端 `vite.config.ts` 把 `/api`、`/v1` 代理到 `http://localhost:8000`。
-> 所以后端**必须**用 `--port 8000` 启动，否则前端调不通。
+> ⚠️ **端口一致性（本地 dev）**：前端 `vite.config.ts` 默认把 `/api`、`/v1` 代理到
+> `http://localhost:8000`，所以后端默认用 `--port 8000` 启动。若要改端口，见下方「端口可配置」。
+
+### 端口可配置（容器内固定 / 对外可改）
+
+设计原则：**容器内服务端口固定**（后端 `8000`、前端 nginx `80`），**对外暴露端口一律可配置**。
+
+- **容器化部署**（`deploy-arm64` / `deploy-server` / `deploy-amd64` / `docker-compose-production.yml`）：
+  对外端口由 `.env` 的 `BACKEND_PORT`（默认 8000）和 `FRONTEND_PORT`（默认 8888）决定，
+  映射形如 `"${BACKEND_PORT:-8000}:8000"`、`"${FRONTEND_PORT:-8888}:80"`。改 `.env` 即可，
+  容器内部仍是 8000/80，无需动镜像或 nginx 配置。
+- **本地 dev**：`vite.config.ts` 支持环境变量覆盖（默认值不变）：
+  - `FRONTEND_PORT`：前端 dev 端口（默认 3000）
+  - `BACKEND_PROXY_TARGET`：反代后端地址（默认 `http://localhost:8000`）
+  - 后端端口由 uvicorn `--port` 决定；改了后端端口要同步设 `BACKEND_PROXY_TARGET`。
+  例：后端跑 8010、前端跑 3001：
+  ```powershell
+  # 终端：后端
+  & $PY -m uvicorn app.main:app --reload --port 8010
+  # 终端：前端（PowerShell 设环境变量后再 npm run dev）
+  $env:FRONTEND_PORT="3001"; $env:BACKEND_PROXY_TARGET="http://localhost:8010"; npm run dev
+  ```
 
 ---
 

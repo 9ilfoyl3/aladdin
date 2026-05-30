@@ -115,6 +115,16 @@ services:
       - LLM_MODEL=${LLM_MODEL:-}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - REDIS_URL=redis://redis:6379/0
+      # ===== 认证与授权（tenant-auth）=====
+      # 容器内服务端口固定 8000，对外端口由 BACKEND_PORT 配置。
+      # auth_enabled 默认 true：JWT_SECRET 与 SUPER_ADMIN_* 为启动期硬依赖，缺失则 fail-fast。
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-720}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
+      - REGISTRATION_MODE=${REGISTRATION_MODE:-invite_only}
+      - CONTENT_VIEW_BOUNDARY_OPEN=${CONTENT_VIEW_BOUNDARY_OPEN:-false}
     volumes:
       - upload_data:/app/data
     depends_on:
@@ -142,6 +152,12 @@ services:
       - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       - RERANK_API_KEY=${RERANK_API_KEY:-}
       - REDIS_URL=redis://redis:6379/0
+      # 认证（tenant-auth）：Worker 同样经 init_db -> bootstrap，需与 backend 一致，
+      # 否则 auth_enabled=true 时缺 SUPER_ADMIN_* 会在引导阶段 fail-fast。
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
       - PIPELINE_MAX_CONCURRENT=${PIPELINE_MAX_CONCURRENT:-4}
       - PIPELINE_MAX_RETRIES=${PIPELINE_MAX_RETRIES:-3}
       - PIPELINE_EMBED_BATCH_SIZE=${PIPELINE_EMBED_BATCH_SIZE:-32}
