@@ -13,12 +13,20 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import authorization_guard
+from app.auth.constants import PermissionEnum
 from app.schema.db import EmbedConfig
 from app.storage.database import get_db
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/embed-configs", tags=["Embed Config"])
+router = APIRouter(
+    prefix="/api/embed-configs",
+    tags=["Embed Config"],
+    dependencies=[Depends(authorization_guard(
+        required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False
+    ))],
+)
 
 
 # ============================================================

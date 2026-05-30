@@ -4,9 +4,12 @@ import asyncio
 import logging
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.api.deps import authorization_guard
+from app.auth.constants import PermissionEnum
+from app.auth.identity import IdentityContext
 from app.config import get_settings
 from app.pipeline.queue import QueueStats
 from app.storage.milvus import MilvusClient
@@ -144,8 +147,12 @@ def _mask_ocr_api_key(key: str) -> str:
 
 
 @router.get("/config", response_model=SystemConfigResponse)
-async def get_config():
-    """获取系统配置"""
+async def get_config(
+    _identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
+    ),
+):
+    """获取系统配置（密钥脱敏；config:manage，禁 api_key 通道）"""
     settings = get_settings()
     # API Key 脱敏：只显示前8位 + ***
     api_key_display = ""
@@ -175,7 +182,12 @@ async def get_config():
 
 
 @router.put("/config", response_model=SystemConfigResponse)
-async def update_config(body: SystemConfigUpdate):
+async def update_config(
+    body: SystemConfigUpdate,
+    _identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
+    ),
+):
     """更新系统配置
 
     注意：运行时修改配置，重启后会恢复 .env 中的值。
@@ -224,7 +236,12 @@ async def update_config(body: SystemConfigUpdate):
 
 
 @router.get("/queue-stats", response_model=QueueStats)
-async def get_queue_stats(request: Request):
+async def get_queue_stats(
+    request: Request,
+    _identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
+    ),
+):
     """获取任务队列统计信息
 
     返回当前队列深度、pending 任务数、活跃 Worker 数、DLQ 任务数。
