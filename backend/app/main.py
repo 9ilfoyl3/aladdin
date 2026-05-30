@@ -20,7 +20,6 @@ from app.api.folder import router as folder_router
 from app.api.knowledge_base import router as kb_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
-from app.api.middleware import ApiKeyAuthMiddleware
 from app.api.retrieval import router as retrieval_router
 from app.api.session import router as session_router
 from app.api.system import router as system_router
@@ -188,8 +187,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Key 认证中间件（仅拦截 /v1/ 路径）
-app.add_middleware(ApiKeyAuthMiddleware)
+# 注意：原全局 ApiKeyAuthMiddleware 已退役（tenant-auth）。
+# 鉴权改由各路由 Depends(authorization_guard(...)) 统一施加（见任务 9.3）。
 
 # 注册路由
 app.include_router(chat_router, tags=["Chat"])
