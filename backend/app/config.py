@@ -97,6 +97,28 @@ class Settings(BaseSettings):
     upload_max_concurrent: int = 3  # 前端并发上传数
     upload_max_file_size_mb: int = 500  # 单文件最大 MB
 
+    # ============================================================
+    # 认证与授权（tenant-auth）
+    # ============================================================
+    # 鉴权总开关（灰度阀）：False 时旁路 Authorization_Guard，仅用于联调/分步验证。
+    # 见 design.md「显式兼容清单」C1——正式启用后应置 True 或移除旁路。
+    auth_enabled: bool = True
+
+    # JWT（HS256）。jwt_secret 为启动期硬依赖：auth_enabled=True 时缺失则 fail-fast。
+    jwt_secret: str = ""
+    jwt_expire_minutes: int = 720  # JWT 有效期（分钟），默认 12 小时
+
+    # Super_Admin 引导（SuperAdminBootstrap）。首次启动且无 Super_Admin 时据此创建，
+    # 并强制改密。缺失时 fail-fast，禁止用默认口令静默兜底。
+    super_admin_username: str = ""
+    super_admin_password: str = ""
+
+    # 注册模式：invite_only（默认，仅管理员建号）| self_serve（开放自助注册）
+    registration_mode: str = "invite_only"
+
+    # 超管业务内容可见边界：False（默认）= Super_Admin 不可查看业务内容正文。
+    content_view_boundary_open: bool = False
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

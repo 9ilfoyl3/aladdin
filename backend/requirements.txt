@@ -31,6 +31,10 @@ python-pptx>=1.0.2
 # OCR：统一使用远程 API（external_api / textin）
 # httpx 已在上方 HTTP & API 部分引入，OCR Provider 直接复用
 
+# 认证与授权（tenant-auth）
+bcrypt>=4.1          # 口令哈希（自带 salt + 工作因子，纯 C 跨平台 wheel）
+PyJWT>=2.9           # JWT 签发/校验（HS256）
+
 # 测试
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
