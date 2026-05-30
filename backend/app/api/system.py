@@ -233,7 +233,19 @@ async def get_queue_stats(request: Request):
     task_queue = getattr(request.app.state, "task_queue", None)
     if task_queue is None:
         return QueueStats()
-    return await task_queue.get_stats()
+    stats = await task_queue.get_stats()
+
+    # 叠加慢道统计（大文件队列），让前端看到完整的队列深度
+    slow_queue = getattr(request.app.state, "slow_task_queue", None)
+    if slow_queue is not None:
+        slow = await slow_queue.get_stats()
+        stats = QueueStats(
+            stream_length=stats.stream_length + slow.stream_length,
+            pending_count=stats.pending_count + slow.pending_count,
+            active_workers=max(stats.active_workers, slow.active_workers),
+            dlq_length=stats.dlq_length,  # 快慢道共用同一 DLQ，避免重复计数
+        )
+    return stats
 
 
 class FrontendConfigResponse(BaseModel):

@@ -55,6 +55,9 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
+        # 知识库表移除废弃的 retrieval_mode 列（检索模式已交由 Agent 预设统一管理）
+        # 旧库该列为 NOT NULL 且无 server_default，模型删字段后插入会触发 NotNullViolation
+        "ALTER TABLE knowledge_bases DROP COLUMN IF EXISTS retrieval_mode",
     ]
     for sql in migrations:
         try:

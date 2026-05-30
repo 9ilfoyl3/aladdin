@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 // 知识库数据类型
 interface KnowledgeBaseItem {
@@ -105,12 +106,7 @@ function KnowledgeBase() {
 
       {/* 知识库列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={6} />
       ) : knowledgeBases.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -123,7 +119,7 @@ function KnowledgeBase() {
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 animate-in fade-in-0 duration-500">
           {knowledgeBases.map((kb) => (
             <Link
               key={kb.id}

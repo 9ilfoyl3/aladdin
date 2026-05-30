@@ -345,10 +345,11 @@ class TestStartStop:
             return []
 
         with caplog.at_level(logging.INFO, logger="pipeline.worker"):
-            with patch.object(task_queue, "consume", side_effect=mock_consume):
+            with patch.object(task_queue, "consume", side_effect=mock_consume), \
+                 patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
                 await asyncio.wait_for(worker.start(), timeout=3.0)
 
-        assert "Pipeline worker started, max_concurrent=5" in caplog.text
+        assert "Pipeline worker starting, max_concurrent=5" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stop_sets_running_false(
@@ -401,7 +402,8 @@ class TestStartRecoverPending:
                     worker._running = False
                 return []
 
-            with patch.object(task_queue, "consume", side_effect=mock_consume):
+            with patch.object(task_queue, "consume", side_effect=mock_consume), \
+                 patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
                 await asyncio.wait_for(worker.start(), timeout=3.0)
 
             # 验证 claim_pending 被调用
@@ -443,7 +445,8 @@ class TestStartRecoverPending:
                 return []
 
             with caplog.at_level(logging.WARNING, logger="pipeline.worker"):
-                with patch.object(task_queue, "consume", side_effect=mock_consume):
+                with patch.object(task_queue, "consume", side_effect=mock_consume), \
+                     patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
                     await asyncio.wait_for(worker.start(), timeout=3.0)
 
             # Worker 应继续运行（不崩溃）
@@ -483,11 +486,12 @@ class TestRedisDisconnectReconnect:
         with caplog.at_level(logging.ERROR, logger="pipeline.worker"):
             with patch.object(task_queue, "claim_pending", new_callable=AsyncMock, return_value=[]):
                 with patch.object(task_queue, "consume", side_effect=mock_consume):
-                    with patch("app.pipeline.worker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                        await asyncio.wait_for(worker.start(), timeout=3.0)
+                    with patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
+                        with patch("app.pipeline.worker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                            await asyncio.wait_for(worker.start(), timeout=3.0)
 
-                        # 验证等待了 5s 后重试
-                        mock_sleep.assert_called_with(5)
+                            # 验证等待了 5s 后重试
+                            mock_sleep.assert_called_with(5)
 
         # 验证错误日志
         assert "Error consuming tasks" in caplog.text
@@ -520,13 +524,14 @@ class TestRedisDisconnectReconnect:
 
         with patch.object(task_queue, "claim_pending", new_callable=AsyncMock, return_value=[]):
             with patch.object(task_queue, "consume", side_effect=mock_consume):
-                with patch("app.pipeline.worker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                    await asyncio.wait_for(worker.start(), timeout=3.0)
+                with patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
+                    with patch("app.pipeline.worker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                        await asyncio.wait_for(worker.start(), timeout=3.0)
 
-                    # 验证每次断连都等待了 5s
-                    assert mock_sleep.call_count == 3
-                    for call in mock_sleep.call_args_list:
-                        assert call[0][0] == 5
+                        # 验证每次断连都等待了 5s
+                        assert mock_sleep.call_count == 3
+                        for call in mock_sleep.call_args_list:
+                            assert call[0][0] == 5
 
         # 验证 consume 被调用了 4 次
         assert call_count == 4
@@ -547,7 +552,8 @@ class TestRedisDisconnectReconnect:
 
         with patch.object(task_queue, "claim_pending", new_callable=AsyncMock, return_value=[]):
             with patch.object(task_queue, "consume", side_effect=mock_consume):
-                await asyncio.wait_for(worker.start(), timeout=3.0)
+                with patch.object(worker, "_ping_embedding", new_callable=AsyncMock, return_value=True):
+                    await asyncio.wait_for(worker.start(), timeout=3.0)
 
         # Worker 应正常退出，不会无限循环
         # 如果没有正确处理 CancelledError，wait_for 会超时

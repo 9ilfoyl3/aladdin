@@ -9,6 +9,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 interface OCRFormData {
   name: string
@@ -205,12 +206,7 @@ function OcrServices() {
 
       {/* 服务列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <Loader2 className="h-8 w-8 animate-spin mx-auto mb-3 text-primary" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={3} />
       ) : configs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -223,7 +219,7 @@ function OcrServices() {
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 animate-in fade-in-0 duration-500">
           {configs.map((config) => (
             <div
               key={config.id}

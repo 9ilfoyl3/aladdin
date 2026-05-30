@@ -5,6 +5,7 @@ import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
+import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import { useSession } from '@/lib/session-context'
 
 interface KnowledgeBaseItem {
@@ -25,6 +26,7 @@ function Chat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false)
   const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedPreset, setSelectedPreset] = useState('')
@@ -94,6 +96,7 @@ function Chat() {
     }
     // 加载会话消息
     async function loadMessages() {
+      setIsLoadingMessages(true)
       setExpandedRefs(new Set())
       setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
@@ -181,6 +184,8 @@ function Chat() {
       } catch (e) {
         console.error('加载会话消息失败', e)
         setMessages([])
+      } finally {
+        setIsLoadingMessages(false)
       }
     }
     loadMessages()
@@ -555,7 +560,6 @@ function Chat() {
   const selectedModelName = llmConfigs.find((c) => c.id === selectedModel)?.name || ''
 
   const isEmpty = messages.length === 0
-
   // 共用的输入框 props
   const chatInputProps = {
     input,
@@ -578,7 +582,8 @@ function Chat() {
   }
 
   // 空态：标题 + 提问示例气泡 + 居中输入框（参考 WeKnora 新对话布局）
-  if (isEmpty) {
+  // 加载历史消息期间不显示空态，避免「Artoo 欢迎页」闪现
+  if (isEmpty && !isLoadingMessages) {
     return (
       <div className="h-full flex flex-col items-center justify-center px-4">
         <div className="w-full max-w-3xl flex flex-col items-center -mt-12">
@@ -600,21 +605,25 @@ function Chat() {
     <div className="h-full flex flex-col relative">
       {/* 消息列表 */}
       <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-36">
-        <div className="max-w-3xl mx-auto py-6 px-4 space-y-5">
-          {messages.map((msg, idx) => (
-            <MessageBubble
-              key={idx}
-              message={msg}
-              index={idx}
-              isStreaming={isStreaming}
-              isLast={idx === messages.length - 1}
-              expandedRefs={expandedRefs}
-              expandedRefDetails={expandedRefDetails}
-              onToggleRef={toggleRef}
-              onToggleRefDetail={toggleRefDetail}
-            />
-          ))}
-        </div>
+        {isLoadingMessages ? (
+          <ChatMessagesSkeleton />
+        ) : (
+          <div className="max-w-3xl mx-auto py-6 px-4 space-y-5 animate-in fade-in-0 duration-500">
+            {messages.map((msg, idx) => (
+              <MessageBubble
+                key={idx}
+                message={msg}
+                index={idx}
+                isStreaming={isStreaming}
+                isLast={idx === messages.length - 1}
+                expandedRefs={expandedRefs}
+                expandedRefDetails={expandedRefDetails}
+                onToggleRef={toggleRef}
+                onToggleRefDetail={toggleRefDetail}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 输入区域 */}

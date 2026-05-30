@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import PromptEditor, { type PromptEditorHandle } from '@/components/agent/PromptEditor'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 interface AgentPresetItem {
   id: string
@@ -202,12 +203,7 @@ function AgentConfig() {
 
       {/* 预设卡片列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={3} />
       ) : presets.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -220,7 +216,7 @@ function AgentConfig() {
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 animate-in fade-in-0 duration-500">
           {presets.map((preset) => (
             <div
               key={preset.id}

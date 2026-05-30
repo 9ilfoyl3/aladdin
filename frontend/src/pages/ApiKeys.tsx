@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
 // API Key 数据类型
 interface ApiKeyItem {
@@ -104,14 +105,14 @@ function ApiKeys() {
 
       {/* Key 列表 */}
       {isLoading ? (
-        <p className="text-muted-foreground">加载中...</p>
+        <TableSkeleton rows={4} columns={6} />
       ) : apiKeys.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
           <Key className="h-12 w-12 mx-auto mb-4 opacity-50" />
           <p>暂无 API Key，点击上方按钮创建</p>
         </div>
       ) : (
-        <div className="border rounded-lg">
+        <div className="border rounded-lg animate-in fade-in-0 duration-500">
           <Table>
             <TableHeader>
               <TableRow>

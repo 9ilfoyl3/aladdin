@@ -59,7 +59,13 @@ class Settings(BaseSettings):
     ocr_external_api_timeout: float = 30.0
 
     # Pipeline Worker
-    pipeline_max_concurrent: int = 2  # Worker 同时处理的文档数
+    # 文档准入并发数：Worker 同时推进处理的文档数（含 load/chunk/index 等阶段）。
+    # 注意：准入信号量在单个文档「全程」（含 Embedding/OCR I/O 等待）持有，不会中途释放，
+    # 所以小文件并不会自动趁大文件 I/O 间隙插队。保护小文件不被大文件饿死，依赖的是
+    # 「慢道预留」机制（见 pipeline_slow_lane_min_mb / pipeline_slow_max_concurrent）：
+    # 大文件走慢道并受 slow_max_concurrent 限流，快道始终保留
+    # (max_concurrent - slow_max_concurrent) 个名额给小文件。
+    pipeline_max_concurrent: int = 4
     pipeline_max_retries: int = 3
     pipeline_slow_threshold_ms: int = 30000
     pipeline_task_timeout_minutes: int = 60  # 单个文档处理总超时（分钟）
@@ -71,8 +77,21 @@ class Settings(BaseSettings):
     # 导致同一文档重复处理。运行时会强制提升到 task_timeout+5 以下不生效。
     pipeline_claim_min_idle_minutes: int = 65
     pipeline_embed_batch_size: int = 32  # Embedding 每批文本数
-    pipeline_embed_concurrency: int = 4  # Embedding 并发请求数
+    # Embedding 全局并发：所有文档共享的并发上限，保护远程 Embedding 服务不被打爆
+    pipeline_embed_concurrency: int = 6
+    # 单文档 Embedding 并发上限：限制单个文档最多占用多少个全局 slot，
+    # 必须小于 pipeline_embed_concurrency，保证多文档之间交错执行、小文件不被大文件饿死
+    pipeline_embed_per_doc_concurrency: int = 2
+    # OCR 全局并发：所有文档共享的 OCR 调用并发上限
+    pipeline_ocr_concurrency: int = 4
     pipeline_embed_max_connections: int = 20  # httpx 连接池上限
+
+    # 大文件分道（fast/slow 双队列）：文件大小 ≥ 此阈值走 slow 道，避免大文件占满快道。
+    # 该值须低于业务中常见「大文件」的体积，否则大文件全部落入快道、占满 max_concurrent，
+    # 慢道机制失效、小文件被队头阻塞。
+    pipeline_slow_lane_min_mb: int = 10
+    # slow 道在单个 Worker 内的最大在途文档数（小于 max_concurrent，给快道留出固定额度）
+    pipeline_slow_max_concurrent: int = 1
 
     # 前端配置（通过 /api/system/frontend-config 下发）
     upload_max_concurrent: int = 3  # 前端并发上传数

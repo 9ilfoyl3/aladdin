@@ -8,6 +8,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
+import { Skeleton } from '@/components/ui/skeleton'
 
 interface FormData {
   name: string
@@ -275,11 +277,36 @@ function EmbedConfig() {
   }
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-64 text-muted-foreground">加载中...</div>
+    return (
+      <div>
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight">Embedding & Rerank 配置</h1>
+          <p className="text-muted-foreground text-sm mt-1">
+            配置向量化和重排序远程服务地址
+          </p>
+        </div>
+        {/* Embedding 区骨架 */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <Skeleton className="h-6 w-32" />
+            <Skeleton className="h-8 w-24 rounded-md" />
+          </div>
+          <CardGridSkeleton count={3} />
+        </div>
+        {/* Rerank 区骨架 */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <Skeleton className="h-6 w-32" />
+            <Skeleton className="h-8 w-24 rounded-md" />
+          </div>
+          <CardGridSkeleton count={3} />
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div>
+    <div className="animate-in fade-in-0 duration-500">
       <div className="mb-6">
         <h1 className="text-2xl font-bold tracking-tight">Embedding & Rerank 配置</h1>
         <p className="text-muted-foreground text-sm mt-1">

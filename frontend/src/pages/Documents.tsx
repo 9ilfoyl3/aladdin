@@ -43,6 +43,8 @@ import FolderBreadcrumb from '@/components/documents/FolderBreadcrumb'
 import NewFolderDialog from '@/components/documents/NewFolderDialog'
 import RenameDialog from '@/components/documents/RenameDialog'
 import ChunkViewer from '@/components/documents/ChunkViewer'
+import DocumentGridSkeleton from '@/components/skeletons/DocumentGridSkeleton'
+import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
 import type { DocumentItem, UploadingFile, MergedFile } from '@/components/documents/FileItem'
 import { formatSize, statusLabel, statusColor } from '@/components/documents/FileItem'
@@ -633,12 +635,11 @@ function Documents() {
       {/* 内容区域 */}
       <div className="flex-1 min-h-0 overflow-auto">
         {isLoading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="text-center">
-              <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">加载中...</p>
-            </div>
-          </div>
+          viewMode === 'grid' ? (
+            <DocumentGridSkeleton count={18} />
+          ) : (
+            <TableSkeleton rows={6} columns={5} />
+          )
         ) : totalItems === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="w-20 h-20 rounded-2xl bg-muted/40 flex items-center justify-center mb-4">
@@ -668,7 +669,7 @@ function Documents() {
             </div>
           </div>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2">
+          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2 animate-in fade-in-0 duration-500">
             {/* 文件夹列表 */}
             {folders.map((folder) => (
               <ContextMenu key={folder.id}>
@@ -791,7 +792,7 @@ function Documents() {
           </div>
         ) : (
           /* 列表视图 */
-          <div className="border border-border rounded-xl overflow-hidden">
+          <div className="border border-border rounded-xl overflow-hidden animate-in fade-in-0 duration-500">
             <table className="w-full text-sm">
               <thead className="bg-muted/80 border-b border-border">
                 <tr>

@@ -46,9 +46,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 并发 OCR 的最大并行数
-_OCR_CONCURRENCY = 4
-
 
 class CancelledError(Exception):
     """文档处理被取消（文档已删除或用户主动取消）"""
@@ -75,6 +72,7 @@ class DocumentPipeline:
             model_manager=model_manager,
             batch_size=settings.pipeline_embed_batch_size,
             concurrency=settings.pipeline_embed_concurrency,
+            per_doc_concurrency=settings.pipeline_embed_per_doc_concurrency,
         )
 
     async def process(
@@ -146,7 +144,7 @@ class DocumentPipeline:
 
                     if needs_ocr:
                         print(f"[Pipeline] 文档 {doc_id} 文本为空或过短(长度={len(stripped_content)})，触发整文件 OCR")
-                        ocr_result = await self.ocr_manager.recognize(file_path)
+                        ocr_result = await self._recognize_with_limit(file_path)
                         load_result = LoadResult(
                             content=ocr_result.full_text,
                             metadata={
@@ -239,7 +237,7 @@ class DocumentPipeline:
                     await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别（清洗后兜底）")
                     stage_start = time.monotonic()
 
-                    ocr_result = await self.ocr_manager.recognize(file_path)
+                    ocr_result = await self._recognize_with_limit(file_path)
                     final_content = ocr_result.full_text
                     load_result = LoadResult(
                         content=final_content,
@@ -646,12 +644,15 @@ class DocumentPipeline:
         for i in range(0, len(sanitized), batch_size):
             batches.append(sanitized[i:i + batch_size])
 
-        print(f"[Pipeline] 文档 {doc_id} embed 逐批处理: {total_batches} 批, batch_size={batch_size}, 并发={self.embedder.concurrency}")
+        print(f"[Pipeline] 文档 {doc_id} embed 逐批处理: {total_batches} 批, batch_size={batch_size}, 全局并发={self.embedder.concurrency}, 单文档并发={self.embedder.per_doc_concurrency}")
         import sys
         sys.stdout.flush()
 
-        # 并发处理，但每完成一批就更新进度
-        semaphore = asyncio.Semaphore(self.embedder.concurrency)
+        # 并发控制：全局信号量（进程级，所有文档共享，保护远程服务）+ 单文档信号量
+        # （限制本文档占用的全局 slot 数，保证多文档交错执行、小文件不被大文件饿死）。
+        from app.pipeline.concurrency import get_embed_semaphore
+        global_sem = get_embed_semaphore()
+        doc_sem = asyncio.Semaphore(self.embedder.per_doc_concurrency)
         results: list[tuple[list[list[float]], list[dict[int, float]]] | None] = [None] * len(batches)
         completed_count = 0
         progress_lock = asyncio.Lock()
@@ -669,23 +670,24 @@ class DocumentPipeline:
             if _cancelled:
                 return
 
-            async with semaphore:
-                # 获得 semaphore 后再次检查（可能在等待期间被取消）
-                if _cancelled:
-                    return
-                if batch_idx == 0:
-                    print(f"[Pipeline] 文档 {doc_id} 第一批进入 semaphore，开始调用 embed...")
-                    sys.stdout.flush()
-                dense = await provider.embed(batch)
-                if _cancelled:
-                    return
-                if batch_idx == 0:
-                    print(f"[Pipeline] 文档 {doc_id} 第一批 embed 返回，dense 长度: {len(dense)}")
-                    sys.stdout.flush()
-                sparse = await provider.embed_sparse(batch)
-                if _cancelled:
-                    return
-                results[batch_idx] = (dense, sparse)
+            async with doc_sem:
+                async with global_sem:
+                    # 获得 semaphore 后再次检查（可能在等待期间被取消）
+                    if _cancelled:
+                        return
+                    if batch_idx == 0:
+                        print(f"[Pipeline] 文档 {doc_id} 第一批进入 semaphore，开始调用 embed...")
+                        sys.stdout.flush()
+                    dense = await provider.embed(batch)
+                    if _cancelled:
+                        return
+                    if batch_idx == 0:
+                        print(f"[Pipeline] 文档 {doc_id} 第一批 embed 返回，dense 长度: {len(dense)}")
+                        sys.stdout.flush()
+                    sparse = await provider.embed_sparse(batch)
+                    if _cancelled:
+                        return
+                    results[batch_idx] = (dense, sparse)
 
             # 让出事件循环
             await asyncio.sleep(0)
@@ -808,10 +810,20 @@ class DocumentPipeline:
 
         return final_content
 
+    async def _recognize_with_limit(self, file_path: str):
+        """整文件 OCR：通过进程级全局 OCR 信号量限流后调用 ocr_manager.recognize。
+
+        与图片 OCR 共用同一个全局信号量，保证无论多少文档并发，对远程 OCR
+        服务的总并发恒定可控。
+        """
+        from app.pipeline.concurrency import get_ocr_semaphore
+        async with get_ocr_semaphore():
+            return await self.ocr_manager.recognize(file_path)
+
     async def _concurrent_ocr_images(
         self, images: list[EmbeddedImage], doc_id: str
     ) -> list[str]:
-        """并发调用 OCR 识别多张图片，使用 Semaphore 控制并发数
+        """并发调用 OCR 识别多张图片，使用进程级全局 OCR 信号量控制并发数
 
         Args:
             images: 嵌入图片列表
@@ -820,7 +832,9 @@ class DocumentPipeline:
         Returns:
             与 images 等长的列表，每个元素为 OCR 识别文本（失败为空字符串）
         """
-        semaphore = asyncio.Semaphore(_OCR_CONCURRENCY)
+        from app.pipeline.concurrency import get_ocr_semaphore
+        # 进程级全局 OCR 信号量：所有文档的所有图片共享，保护远程 OCR 服务。
+        semaphore = get_ocr_semaphore()
 
         async def _ocr_single(idx: int, img: EmbeddedImage) -> str:
             async with semaphore:

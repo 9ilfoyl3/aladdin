@@ -172,15 +172,41 @@ async def _run_pipeline_safe(file_path: str, doc_id: str, kb_id: str) -> None:
 
 
 def _get_task_queue(request: Request) -> TaskQueue | None:
-    """从 app.state 获取 TaskQueue 实例，不存在或为 None 时返回 None"""
+    """从 app.state 获取快道 TaskQueue 实例，不存在或为 None 时返回 None"""
     return getattr(request.app.state, "task_queue", None)
 
 
+def _get_slow_task_queue(request: Request) -> TaskQueue | None:
+    """从 app.state 获取慢道 TaskQueue 实例（大文件），不存在时返回 None"""
+    return getattr(request.app.state, "slow_task_queue", None)
+
+
+def _select_queue(
+    request: Request, file_size: int | None
+) -> TaskQueue | None:
+    """按文件大小选择入队队列：大文件走慢道，其余走快道。
+
+    慢道不可用（未初始化）时回退到快道。返回 None 表示 Redis 不可用，
+    调用方应降级为进程内处理。
+    """
+    fast = _get_task_queue(request)
+    if fast is None:
+        return None
+    settings = get_settings()
+    threshold = settings.pipeline_slow_lane_min_mb * 1024 * 1024
+    if file_size is not None and file_size >= threshold:
+        slow = _get_slow_task_queue(request)
+        if slow is not None:
+            return slow
+    return fast
+
+
 async def _enqueue_or_fallback(
-    request: Request, file_path: str, doc_id: str, kb_id: str
+    request: Request, file_path: str, doc_id: str, kb_id: str,
+    file_size: int | None = None,
 ) -> None:
-    """尝试将任务入队 Redis Stream，失败时降级为 asyncio.create_task"""
-    queue = _get_task_queue(request)
+    """尝试将任务入队 Redis Stream（按大小选择快/慢道），失败时降级为 asyncio.create_task"""
+    queue = _select_queue(request, file_size)
     if queue is not None:
         try:
             msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path)
@@ -335,8 +361,8 @@ async def upload_document(
     # 生成缩略图（PDF 首页渲染）
     _generate_thumbnail(doc_id, ext)
 
-    # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
-    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
+    # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
+    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size)
 
     return DocumentResponse(
         id=doc.id,
@@ -412,8 +438,8 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
         await db.flush()
         raise HTTPException(status_code=400, detail="原始文件已丢失")
 
-    # 尝试入队 Redis Stream，降级为 create_task
-    queue = _get_task_queue(request)
+    # 尝试入队 Redis Stream（按大小选择快/慢道），降级为 create_task
+    queue = _select_queue(request, doc.file_size)
     if queue is not None:
         try:
             msg = TaskMessage(doc_id=doc_id, kb_id=doc.kb_id, file_path=str(file_path))
@@ -552,8 +578,7 @@ async def batch_retry_documents(body: BatchRetryRequest, request: Request, db: A
         except Exception as e:
             logger.warning("批量重试 - 清除旧向量失败: %s", e)
 
-    # 批量入队
-    queue = _get_task_queue(request)
+    # 批量入队（按文件大小选择快/慢道）
     for doc in retried:
         file_path = _UPLOAD_DIR / f"{doc.id}.{doc.file_type}"
         if not file_path.exists():
@@ -561,6 +586,7 @@ async def batch_retry_documents(body: BatchRetryRequest, request: Request, db: A
             doc.error_message = "原始文件已丢失"
             continue
 
+        queue = _select_queue(request, doc.file_size)
         if queue is not None:
             try:
                 msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path))
@@ -958,8 +984,8 @@ async def upload_folder(
             # 生成缩略图（PDF 首页渲染）
             _generate_thumbnail(doc_id, ext)
 
-            # 后台触发管道处理（优先入队 Redis Stream，降级为 asyncio.create_task）
-            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id)
+            # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
+            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size)
 
             uploaded_count += 1
             results.append(FolderUploadResultItem(

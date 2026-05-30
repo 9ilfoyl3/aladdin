@@ -5,6 +5,7 @@ import { FileText, Copy } from 'lucide-react'
 import { documentApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import ChunkListSkeleton from '@/components/skeletons/ChunkListSkeleton'
 
 // Chunk 数据类型
 interface ChunkItem {
@@ -40,7 +41,7 @@ function highlightChildren(parentContent: string, children: string[]): string {
 
 // 切片查看对话框
 function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
-  const { data: chunks = [] } = useQuery({
+  const { data: chunks = [], isLoading } = useQuery({
     queryKey: ['chunks', documentId],
     queryFn: () => documentApi.chunks(documentId!) as Promise<ChunkItem[]>,
     enabled: !!documentId,
@@ -56,14 +57,16 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
               <DialogTitle className="text-lg">文档切片预览</DialogTitle>
             </DialogHeader>
             <p className="text-xs text-muted-foreground mt-1">
-              共 {chunks.length} 个切片
+              {isLoading ? '加载切片中…' : `共 ${chunks.length} 个切片`}
             </p>
           </div>
         </div>
 
         {/* 切片列表 */}
         <div className="flex-1 overflow-auto px-6 py-4">
-          {chunks.length === 0 ? (
+          {isLoading ? (
+            <ChunkListSkeleton count={4} />
+          ) : chunks.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16">
               <div className="w-12 h-12 rounded-xl bg-muted/60 flex items-center justify-center mb-3">
                 <FileText className="h-6 w-6 text-muted-foreground/50" />
@@ -71,7 +74,7 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
               <p className="text-sm text-muted-foreground">暂无切片数据</p>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-3 animate-in fade-in-0 duration-500">
               {chunks.map((chunk, idx) => (
                 <div
                   key={chunk.id || idx}

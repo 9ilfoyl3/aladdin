@@ -52,13 +52,21 @@ class PipelineWorker:
         db_session_factory: "async_sessionmaker[AsyncSession]",
         max_concurrent: int = 3,
         max_retries: int = 3,
+        slow_queue: "TaskQueue | None" = None,
+        slow_max_concurrent: int = 1,
     ):
         self._queue = queue
+        # 慢道队列（大文件）。为 None 时退化为单队列行为，与历史完全一致。
+        self._slow_queue = slow_queue
         self._pipeline = pipeline
         self._db_session_factory = db_session_factory
         self._max_concurrent = max_concurrent
         self._max_retries = max_retries
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        # 慢道额外信号量：限制慢道在途文档数，保证快道始终有
+        # (max_concurrent - slow_max_concurrent) 个文档准入额度，永不被大文件占满。
+        self._slow_max_concurrent = slow_max_concurrent
+        self._slow_semaphore = asyncio.Semaphore(slow_max_concurrent)
         self._running = False
         self._consumer_name = f"worker-{socket.gethostname()}"
         self._tasks: set[asyncio.Task] = set()
@@ -120,15 +128,29 @@ class PipelineWorker:
                 await self._reclaim_orphan_tasks()
 
             try:
+                # 快道：常规/小文件，吃满 max_concurrent
                 messages = await self._queue.consume(
                     self._consumer_name, count=1, block_ms=5000
                 )
                 for message_id, msg in messages:
                     task = asyncio.create_task(
-                        self._process_task(message_id, msg)
+                        self._process_task(message_id, msg, queue=self._queue)
                     )
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
+
+                # 慢道：大文件，受 _slow_semaphore 限制在途数。非阻塞拉取
+                # （block_ms=0），快道空闲等待已经提供了循环节流，这里不再阻塞。
+                if self._slow_queue is not None and not self._slow_semaphore.locked():
+                    slow_messages = await self._slow_queue.consume(
+                        self._consumer_name, count=1, block_ms=0
+                    )
+                    for message_id, msg in slow_messages:
+                        task = asyncio.create_task(
+                            self._process_task(message_id, msg, queue=self._slow_queue)
+                        )
+                        self._tasks.add(task)
+                        task.add_done_callback(self._tasks.discard)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -136,15 +158,21 @@ class PipelineWorker:
                 await asyncio.sleep(5)
 
     async def _reclaim_orphan_tasks(self) -> None:
-        """认领 PEL 中 idle 超时的孤儿消息并重新处理
+        """认领 PEL 中 idle 超时的孤儿消息并重新处理（快道 + 慢道）
 
         使用 self._claim_min_idle_ms 作为阈值（已强制 > task_timeout），
         确保不会抢走正在被合法处理的消息。毒消息（投递次数超 max_retries）
         由 claim_pending 内部直接移入 DLQ，不会返回到这里。
         """
         self._last_claim_at = time.monotonic()
+        await self._reclaim_from_queue(self._queue)
+        if self._slow_queue is not None:
+            await self._reclaim_from_queue(self._slow_queue)
+
+    async def _reclaim_from_queue(self, queue: TaskQueue) -> None:
+        """从指定队列认领孤儿消息并按所属队列重新派发处理。"""
         try:
-            pending = await self._queue.claim_pending(
+            pending = await queue.claim_pending(
                 self._consumer_name,
                 min_idle_ms=self._claim_min_idle_ms,
                 max_delivery_count=self._claim_max_delivery,
@@ -160,7 +188,7 @@ class PipelineWorker:
         print(f"[Worker] ♻️ 回收 {len(pending)} 个 PEL 孤儿任务重新处理")
         logger.info("Reclaimed %d orphan task(s) from PEL", len(pending))
         for message_id, msg in pending:
-            task = asyncio.create_task(self._process_task(message_id, msg))
+            task = asyncio.create_task(self._process_task(message_id, msg, queue=queue))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -240,8 +268,20 @@ class PipelineWorker:
             logger.debug("Embedding health check failed: %s", e)
             return False
 
-    async def _process_task(self, message_id: str, msg: TaskMessage) -> None:
-        """处理单个任务（带总超时）"""
+    async def _process_task(
+        self, message_id: str, msg: TaskMessage, queue: "TaskQueue | None" = None
+    ) -> None:
+        """处理单个任务（带总超时）
+
+        Args:
+            message_id: 消息 ID
+            msg: 任务消息
+            queue: 该消息所属队列（快道或慢道）。None 时默认为快道 self._queue，
+                   保证旧调用方（及测试）行为不变。
+        """
+        queue = queue or self._queue
+        is_slow = self._slow_queue is not None and queue is self._slow_queue
+
         # 幂等检查：文档已完成则跳过
         if await self._is_document_completed(msg.doc_id):
             print(f"[Worker] 文档 {msg.doc_id} 已完成/取消/删除，跳过")
@@ -249,15 +289,26 @@ class PipelineWorker:
                 "Document %s already completed, skipping (trace_id=%s)",
                 msg.doc_id, msg.trace_id,
             )
-            await self._queue.ack(message_id)
+            await queue.ack(message_id)
             return
 
-        print(f"[Worker] 📄 开始处理文档 {msg.doc_id} (retry={msg.retry_count}, trace_id={msg.trace_id})")
+        print(f"[Worker] 📄 开始处理文档 {msg.doc_id} (lane={'slow' if is_slow else 'fast'}, retry={msg.retry_count}, trace_id={msg.trace_id})")
         logger.info(
-            "Processing doc_id=%s, retry=%d, trace_id=%s",
-            msg.doc_id, msg.retry_count, msg.trace_id,
+            "Processing doc_id=%s, lane=%s, retry=%d, trace_id=%s",
+            msg.doc_id, "slow" if is_slow else "fast", msg.retry_count, msg.trace_id,
         )
 
+        # 慢道任务先占用慢道额度，确保快道始终有剩余准入额度（防止大文件占满）。
+        if is_slow:
+            async with self._slow_semaphore:
+                await self._run_pipeline_guarded(message_id, msg, queue)
+        else:
+            await self._run_pipeline_guarded(message_id, msg, queue)
+
+    async def _run_pipeline_guarded(
+        self, message_id: str, msg: TaskMessage, queue: "TaskQueue"
+    ) -> None:
+        """在文档准入信号量内执行 pipeline，处理成功/超时/失败。"""
         # 通过 semaphore 控制并发
         async with self.semaphore:
             try:
@@ -271,7 +322,7 @@ class PipelineWorker:
                     timeout=self._task_timeout,
                 )
                 # 处理成功，ACK 消息，重置熔断计数
-                await self._queue.ack(message_id)
+                await queue.ack(message_id)
                 self._consecutive_failures = 0
                 print(f"[Worker] ✅ 文档 {msg.doc_id} 处理完成")
                 logger.info(
@@ -287,7 +338,7 @@ class PipelineWorker:
                 )
                 # 超时直接标记失败，不重试
                 await self._mark_failed(msg.doc_id, error_msg)
-                await self._queue.ack(message_id)
+                await queue.ack(message_id)
                 self._record_failure()
             except Exception as e:
                 print(f"[Worker] ❌ 文档 {msg.doc_id} 处理失败: {type(e).__name__}: {e}")
@@ -296,7 +347,7 @@ class PipelineWorker:
                     msg.doc_id, e, msg.trace_id,
                 )
                 self._record_failure()
-                await self._handle_failure(message_id, msg, e)
+                await self._handle_failure(message_id, msg, e, queue=queue)
 
     def _record_failure(self) -> None:
         """记录失败次数，触发熔断"""
@@ -327,14 +378,19 @@ class PipelineWorker:
             logger.warning("Failed to mark document %s as failed: %s", doc_id, e)
 
     async def _handle_failure(
-        self, message_id: str, msg: TaskMessage, error: Exception
+        self, message_id: str, msg: TaskMessage, error: Exception,
+        queue: "TaskQueue | None" = None,
     ) -> None:
         """失败处理
 
         - 不可重试错误直接进 DLQ
-        - retry_count < max_retries 时指数退避重新入队
+        - retry_count < max_retries 时指数退避重新入队（回到原所属队列/lane）
         - 否则移入 DLQ
+
+        Args:
+            queue: 消息所属队列。None 时默认快道 self._queue，保证旧调用方/测试不变。
         """
+        queue = queue or self._queue
         error_str = f"{type(error).__name__}: {error}"
 
         # 不可重试错误直接进 DLQ
@@ -344,7 +400,7 @@ class PipelineWorker:
                 msg.doc_id, error_str, msg.trace_id,
             )
             await self._mark_failed(msg.doc_id, error_str)
-            await self._queue.move_to_dlq(message_id, msg, error_str)
+            await queue.move_to_dlq(message_id, msg, error_str)
             return
 
         # 检查重试次数
@@ -361,7 +417,7 @@ class PipelineWorker:
                 msg.doc_id, next_retry, self._max_retries,
                 delay, error_str, msg.trace_id,
             )
-            await self._queue.ack(message_id)
+            await queue.ack(message_id)
             await asyncio.sleep(delay)
             retry_msg = TaskMessage(
                 doc_id=msg.doc_id,
@@ -371,7 +427,7 @@ class PipelineWorker:
                 created_at=msg.created_at,
                 trace_id=msg.trace_id,
             )
-            await self._queue.enqueue(retry_msg)
+            await queue.enqueue(retry_msg)
         else:
             print(f"[Worker] 💀 文档 {msg.doc_id} 重试 {self._max_retries} 次后放弃，进入死信队列")
             logger.error(
@@ -379,7 +435,7 @@ class PipelineWorker:
                 msg.doc_id, error_str, msg.trace_id,
             )
             await self._mark_failed(msg.doc_id, f"重试 {self._max_retries} 次后失败: {error_str}")
-            await self._queue.move_to_dlq(message_id, msg, error_str)
+            await queue.move_to_dlq(message_id, msg, error_str)
 
     async def _is_document_completed(self, doc_id: str) -> bool:
         """检查文档是否应跳过处理"""

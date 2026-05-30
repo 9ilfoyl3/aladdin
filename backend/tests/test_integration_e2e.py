@@ -121,7 +121,11 @@ class TestFullFlowE2E:
                 new_callable=AsyncMock,
                 return_value=[],
             ):
-                await asyncio.wait_for(worker.start(), timeout=5.0)
+                with patch.object(
+                    worker, "_ping_embedding",
+                    new_callable=AsyncMock, return_value=True,
+                ):
+                    await asyncio.wait_for(worker.start(), timeout=5.0)
 
         # 等待内部 task 完成
         await asyncio.sleep(0.1)
@@ -175,7 +179,11 @@ class TestFullFlowE2E:
                 new_callable=AsyncMock,
                 return_value=[],
             ):
-                await asyncio.wait_for(worker.start(), timeout=5.0)
+                with patch.object(
+                    worker, "_ping_embedding",
+                    new_callable=AsyncMock, return_value=True,
+                ):
+                    await asyncio.wait_for(worker.start(), timeout=5.0)
 
         await asyncio.sleep(0.2)
 

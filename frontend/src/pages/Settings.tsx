@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import SettingsFormSkeleton from '@/components/skeletons/SettingsFormSkeleton'
 
 // 配置数据类型
 interface SystemConfig {
@@ -95,18 +96,13 @@ function Settings() {
             <p className="text-muted-foreground text-sm mt-1">配置模型参数、检索策略和系统设置</p>
           </div>
         </div>
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <SettingsFormSkeleton groups={4} fieldsPerGroup={4} />
       </div>
     )
   }
 
   return (
-    <div>
+    <div className="animate-in fade-in-0 duration-500">
       {/* 页面头部 */}
       <div className="flex items-center justify-between mb-8">
         <div>

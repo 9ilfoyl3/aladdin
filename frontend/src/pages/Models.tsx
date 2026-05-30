@@ -8,6 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 interface LLMConfigItem {
   id: string
@@ -247,12 +248,7 @@ function Models() {
 
       {/* 模型列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={6} />
       ) : configs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -269,7 +265,7 @@ function Models() {
           <p className="text-muted-foreground text-sm">没有匹配的模型</p>
         </div>
       ) : viewMode === 'grid' ? (
-        <div>
+        <div className="animate-in fade-in-0 duration-500">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredConfigs.map((config) => (
               <div
@@ -331,7 +327,7 @@ function Models() {
         </div>
       ) : (
         /* 列表视图 */
-        <div className="border border-border rounded-xl">
+        <div className="border border-border rounded-xl animate-in fade-in-0 duration-500">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
               <tr>

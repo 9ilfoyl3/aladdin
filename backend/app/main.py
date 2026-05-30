@@ -85,27 +85,42 @@ async def _auto_migrate_columns() -> None:
 
 
 async def _init_task_queue(app: FastAPI) -> None:
-    """初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）"""
+    """初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
+
+    同时初始化快道（常规/小文件）和慢道（大文件）两个队列。大文件按
+    PIPELINE_SLOW_LANE_MIN_MB 阈值路由到慢道，避免占满快道导致小文件排队。
+    """
     settings = get_settings()
     task_queue = await TaskQueue.create(settings.redis_url)
     app.state.task_queue = task_queue
 
+    slow_queue = None
     if task_queue is not None:
-        print("[API] TaskQueue 已连接 Redis，文档任务将入队由独立 Worker 处理")
-        logger.info("TaskQueue connected to Redis")
+        slow_queue = await TaskQueue.create(
+            settings.redis_url,
+            stream_key="pipeline:tasks:slow",
+            dlq_key="pipeline:dlq",
+            group_name="pipeline-workers",
+        )
+    app.state.slow_task_queue = slow_queue
+
+    if task_queue is not None:
+        print("[API] TaskQueue 已连接 Redis（快道+慢道），文档任务将入队由独立 Worker 处理")
+        logger.info("TaskQueue connected to Redis (fast + slow lanes)")
     else:
         print("[API] ⚠️ Redis 不可用，文档上传后将使用降级模式处理")
         logger.warning("Redis unavailable, using fallback mode")
 
 
 async def _close_task_queue(app: FastAPI) -> None:
-    """关闭 TaskQueue 连接"""
-    queue = getattr(app.state, "task_queue", None)
-    if queue is not None and hasattr(queue, '_redis'):
-        try:
-            await queue._redis.aclose()
-        except Exception:
-            pass
+    """关闭 TaskQueue 连接（快道 + 慢道）"""
+    for attr in ("task_queue", "slow_task_queue"):
+        queue = getattr(app.state, attr, None)
+        if queue is not None and hasattr(queue, '_redis'):
+            try:
+                await queue._redis.aclose()
+            except Exception:
+                pass
 
 
 async def _cleanup_orphan_files() -> None:

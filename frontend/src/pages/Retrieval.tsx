@@ -8,6 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
+import RetrievalResultsSkeleton from '@/components/skeletons/RetrievalResultsSkeleton'
 
 // 知识库类型
 interface KnowledgeBaseItem {
@@ -344,9 +345,14 @@ function Retrieval() {
         </div>
       )}
 
+      {/* 检索结果骨架屏：检索中且暂无结果时占位（agent 模式有进度步骤时不重复显示） */}
+      {isPending && results.length === 0 && !(mode === 'agent' && agentSteps.length > 0) && (
+        <RetrievalResultsSkeleton count={4} />
+      )}
+
       {/* 检索结果 */}
       {results.length > 0 && (
-        <div>
+        <div className="animate-in fade-in-0 duration-500">
           {/* 结果头部 */}
           <div className="flex items-center justify-between mb-3 pb-3 border-b border-border/60">
             <div className="flex items-center gap-2">
