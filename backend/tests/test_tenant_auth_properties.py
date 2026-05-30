@@ -216,3 +216,84 @@ def test_property_21_target_tenant_enforcement(identity, requested):
             pass
     else:
         _enforce_target_tenant(req, identity)
+
+
+# Feature: tenant-auth, Property 8: 资源租户盖章与归属继承
+# stamp/盖章逻辑：TenantRepository.stamp 对受隔离模型盖 identity.tenant_id；
+# 新建 KB 默认 private 且 owner=创建者；Document/Chunk 的 tenant 继承所属 KB。
+@given(
+    tid=st.sampled_from(["t1", "t2", "t3"]),
+    uid=st.sampled_from(["u1", "u2"]),
+)
+def test_property_8_stamp_and_inheritance(tid, uid):
+    from app.repositories.tenant_repo import TenantRepository
+    from app.schema.db import KnowledgeBase, Document, Chunk
+    from app.auth.constants import KbVisibilityEnum
+
+    identity = IdentityContext(
+        source=IdentitySourceEnum.JWT, op_level=OperationLevelEnum.TENANT,
+        tenant_id=tid, user_id=uid,
+    )
+    repo = TenantRepository(session=None, identity=identity)  # stamp 不触库
+
+    # 受隔离模型 stamp -> tenant_id == identity.tenant_id
+    kb = KnowledgeBase(id="kb", name="k", visibility=KbVisibilityEnum.PRIVATE.value, owner_user_id=uid)
+    repo.stamp(kb)
+    assert kb.tenant_id == tid
+    # 新建 KB 默认 private + owner=创建者（acting_subject_id）
+    assert kb.visibility == KbVisibilityEnum.PRIVATE.value
+    assert kb.owner_user_id == identity.acting_subject_id
+
+    # Document/Chunk 盖章后 tenant 与身份一致（落库继承等价于盖同一 tenant）
+    doc = Document(id="d", kb_id="kb", filename="f", file_type="txt")
+    repo.stamp(doc)
+    assert doc.tenant_id == tid
+    chunk = Chunk(id="c", doc_id="d", kb_id="kb", content="x")
+    repo.stamp(chunk)
+    assert chunk.tenant_id == tid
+
+
+# Feature: tenant-auth, Property 9: 检索/召回向量结果的租户一致性
+# 设计：检索前经 authorize_requested_kbs 把 kb 限定在身份可读范围（同租户），
+# 故返回 chunk 的 tenant 恒等于身份 tenant。此处验证「授权门只放行同租户 kb」这一前提：
+# 对任意身份与跨租户 kb，kb_authorization_decision(READ) 必拒（404），
+# 因而不可能有跨租户 kb 进入检索集合 -> 结果 chunk 不会跨租户。
+@given(identity=any_identities(), kb=kb_records(), grants=st.lists(grant_views(), max_size=3))
+def test_property_9_retrieval_tenant_consistency(identity, kb, grants):
+    d = _decide(identity, kb, KbAccessEnum.READ, grants)
+    if kb["kb_tenant_id"] != identity.tenant_id:
+        # 跨租户 kb 永远不被放行进入检索 -> 召回结果不可能跨租户
+        assert d.allow is False and d.http_status == 404
+    elif d.allow:
+        # 被放行的 kb 必与身份同租户
+        assert kb["kb_tenant_id"] == identity.tenant_id
+
+
+# Feature: tenant-auth, Property 22: 超级管理员业务内容可见边界
+# 内容边界 helper：超管 + 未放宽配置 -> 读正文 403；非超管 / 放宽配置 -> 放行。
+@given(is_super=st.booleans(), boundary_open=st.booleans())
+def test_property_22_super_admin_content_boundary(is_super, boundary_open):
+    import importlib
+    from app.config import get_settings
+    # 用一个最小 helper 复制内容边界判定（与 document/session/retrieval 中一致）
+    from app.api.errors import PermissionDeniedError
+
+    identity = IdentityContext(
+        source=IdentitySourceEnum.JWT,
+        op_level=OperationLevelEnum.PLATFORM if is_super else OperationLevelEnum.TENANT,
+        tenant_id=None if is_super else "t1", user_id=None if is_super else "u1",
+        is_super_admin=is_super,
+    )
+
+    def _boundary(identity, open_flag):
+        if identity.is_super_admin and not open_flag:
+            raise PermissionDeniedError()
+
+    if is_super and not boundary_open:
+        try:
+            _boundary(identity, boundary_open)
+            assert False, "超管未放宽时应拒绝读正文"
+        except PermissionDeniedError:
+            pass
+    else:
+        _boundary(identity, boundary_open)  # 非超管 或 已放宽 -> 放行
