@@ -52,8 +52,7 @@ from app.repositories.tenant_repo import (
 )
 from app.schema.db import Tenant, User
 
-# 改自身口令端点的标识：must_change_password 闸门唯一放行的操作。
-# 端点用 require_self_password_change=True 声明自己属于该豁免。
+# Authorization 头的 Bearer 前缀（大小写不敏感匹配）。
 _BEARER_PREFIX = "bearer "
 
 
