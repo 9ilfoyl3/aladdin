@@ -26,7 +26,7 @@ from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
 from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
-from app.storage.database import async_session, get_db
+from app.storage.database import async_session
 from app.storage.milvus import MilvusClient
 
 logger = logging.getLogger(__name__)
@@ -1115,7 +1115,8 @@ async def upload_folder(
                 message=str(e),
             ))
 
-    await db.flush()
+    # 显式提交（get_db_session 不自动提交）：确保即使无可上传文件，已创建的文件夹也落库。
+    await db.commit()
 
     return FolderUploadResponse(
         total_files=len(files),
