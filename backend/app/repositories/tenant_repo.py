@@ -74,17 +74,26 @@ def tenant_scope(scope: TenantScope | None) -> Iterator[None]:
         reset_tenant_scope(token)
 
 
-def install_tenant_loader_criteria(session_factory) -> None:
-    """在 async_sessionmaker 的同步底层 Session 类上注册 do_orm_execute 事件，
-    对所有 TenantScopedMixin 模型按当前 contextvar 三态自动注入 tenant 过滤（方案 B）。
+_loader_criteria_installed = False
 
-    只对 SELECT（ORM 查询）注入；写入/删除的盖章与归属由方案 A 显式负责，
-    避免对 bulk update/delete 产生意外行为。
+
+def install_tenant_loader_criteria() -> None:
+    """注册全局 do_orm_execute 事件，对所有 TenantScopedMixin 模型按当前 contextvar
+    三态自动注入 tenant 过滤（方案 B 兜底）。在应用与 Worker 启动时各调用一次。
+
+    - 注册在全局 `sqlalchemy.orm.Session` 类上：覆盖 `Depends(get_db)` 注入的会话与
+      函数内自开的 `async_session()`（二者底层都是同一 Session 类）。
+    - 幂等：重复调用只注册一次，避免同一过滤被叠加多遍。
+    - 只对 SELECT（ORM 查询）注入；写入/删除的盖章与归属由方案 A 显式负责，
+      避免对 bulk update/delete 产生意外行为。
     """
+    global _loader_criteria_installed
+    if _loader_criteria_installed:
+        return
+
     from sqlalchemy import event
     from sqlalchemy.orm import Session
 
-    # async_sessionmaker 底层使用同步 Session 执行；事件挂在 Session 类上即可覆盖。
     @event.listens_for(Session, "do_orm_execute")
     def _add_tenant_criteria(orm_execute_state):  # noqa: ANN001
         if not orm_execute_state.is_select:
@@ -105,6 +114,8 @@ def install_tenant_loader_criteria(session_factory) -> None:
                 include_aliases=True,
             )
         )
+
+    _loader_criteria_installed = True
 
 
 class TenantRepository:
