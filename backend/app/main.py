@@ -12,6 +12,8 @@ from sqlalchemy import select
 
 from app.api.agent_config import router as agent_config_router
 from app.api.api_key import router as api_key_router
+from app.api.auth_routes import router as auth_router
+from app.api.admin_routes import router as admin_router
 from app.mcp_server import router as mcp_router
 from app.api.chat import router as chat_router
 from app.api.document import router as document_router
@@ -204,6 +206,14 @@ app.include_router(ocr_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
 app.include_router(mcp_router)
+# tenant-auth：认证与管理路由
+app.include_router(auth_router)
+app.include_router(admin_router)
+
+# 统一异常处理（AppError -> {"detail": ...}，跨租户 404/权限 403 等语义一致）
+from app.api.errors import register_exception_handlers  # noqa: E402
+
+register_exception_handlers(app)
 
 
 @app.get("/")

@@ -187,10 +187,13 @@ def authorization_guard(
                 # 4) 目标租户入口归属校验
                 _enforce_target_tenant(request, identity)
 
-                # 5) 所需权限点校验
-                missing = required - identity.effective_permissions
-                if missing:
-                    raise PermissionDeniedError("权限不足")
+                # 5) 所需权限点校验（Super_Admin 平台身份隐含拥有全部权限点，
+                #    其职权由 is_super_admin 而非 RBAC 角色承载，故跳过权限点缺失校验；
+                #    但内容正文仍受 Content_View_Boundary 约束，由各内容端点单独拦截）
+                if not identity.is_super_admin:
+                    missing = required - identity.effective_permissions
+                    if missing:
+                        raise PermissionDeniedError("权限不足")
 
             # 6) 设置 contextvar 三态（仓储兜底用），yield 给端点，结束后 reset。
             scope_token = set_tenant_scope(scope_from_identity(identity))
