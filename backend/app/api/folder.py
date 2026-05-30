@@ -12,10 +12,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import authorization_guard, get_db_session
+from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_folder_name
+from app.auth.constants import PermissionEnum
+from app.auth.identity import IdentityContext
+from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.schema.api import PageResult
-from app.schema.db import Document, Folder, KnowledgeBase
-from app.storage.database import get_db
+from app.schema.db import Document, Folder, KnowledgeBase, KnowledgeBaseGrant
 from app.storage.milvus import MilvusClient
 from app.config import get_settings
 
@@ -25,6 +29,33 @@ router = APIRouter(tags=["Folder"])
 
 # 上传文件存储目录
 _UPLOAD_DIR = Path("data/uploads")
+
+
+async def _authorize_kb(
+    db: AsyncSession, identity: IdentityContext, kb_id: str, access: KbAccessEnum
+) -> KnowledgeBase:
+    """加载 KB 并经唯一授权判定（读404不泄露 / 写403）。"""
+    kb = await db.get(KnowledgeBase, kb_id)
+    if kb is None:
+        raise CrossTenantError()
+    rows = await db.execute(
+        select(
+            KnowledgeBaseGrant.grantee_type,
+            KnowledgeBaseGrant.grantee_id,
+            KnowledgeBaseGrant.permission,
+        ).where(KnowledgeBaseGrant.kb_id == kb_id)
+    )
+    grants = [GrantView(gt, gid, perm) for gt, gid, perm in rows.all()]
+    decision = kb_authorization_decision(
+        identity,
+        kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
+        kb_visibility=kb.visibility, access=access, grants=grants,
+    )
+    if not decision.allow:
+        if decision.http_status == 403:
+            raise PermissionDeniedError()
+        raise CrossTenantError()
+    return kb
 
 
 # ============================================================
@@ -82,13 +113,12 @@ async def list_folders(
     parent_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """获取指定目录下的文件夹列表（分页/滚动加载）"""
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 校验对该 KB 的读权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.READ)
 
     # 参数兜底
     page = max(1, page)
@@ -157,7 +187,10 @@ async def list_folders(
 async def create_folder(
     kb_id: str,
     body: FolderCreate,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """创建文件夹"""
     # 校验文件夹名称
@@ -166,10 +199,8 @@ async def create_folder(
     except NameValidationError as e:
         raise HTTPException(status_code=422, detail=e.message)
 
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 校验对该 KB 的写权限
+    kb = await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
 
     # 验证父文件夹存在（如果指定了）
     if body.parent_id:
@@ -184,10 +215,12 @@ async def create_folder(
         kb_id=kb_id,
         parent_id=body.parent_id,
         name=cleaned_name,
+        tenant_id=kb.tenant_id,
     )
     db.add(folder)
     await db.flush()
     await db.refresh(folder)
+    await db.commit()
 
     return FolderResponse(
         id=folder.id,
@@ -205,13 +238,18 @@ async def create_folder(
 async def update_folder(
     folder_id: str,
     body: FolderUpdate,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """更新文件夹（重命名/移动）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
-        raise HTTPException(status_code=404, detail="文件夹不存在")
+        raise CrossTenantError()
+    # 校验对所属 KB 的写权限
+    await _authorize_kb(db, identity, folder.kb_id, KbAccessEnum.WRITE)
 
     if body.name is not None:
         try:
@@ -232,6 +270,7 @@ async def update_folder(
     folder.updated_at = datetime.utcnow()
     await db.flush()
     await db.refresh(folder)
+    await db.commit()
 
     return FolderResponse(
         id=folder.id,
@@ -246,14 +285,22 @@ async def update_folder(
 
 
 @router.delete("/api/folders/{folder_id}", status_code=204)
-async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_folder(
+    folder_id: str,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
     """删除文件夹（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
-        raise HTTPException(status_code=404, detail="文件夹不存在")
+        raise CrossTenantError()
 
     kb_id = folder.kb_id
+    # 校验对所属 KB 的写权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
 
     # 递归收集该文件夹及所有子文件夹下的文档信息（用于后台清理）
     all_doc_ids: list[str] = []
@@ -296,7 +343,7 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
 
     # 删除文件夹（ORM cascade 会自动删除子文件夹、文档和 chunks）
     await db.delete(folder)
-    await db.flush()
+    await db.commit()
 
     # 后台异步清理 Milvus 向量和物理文件（不阻塞 API 响应）
     if all_doc_ids or all_doc_info:
@@ -309,9 +356,15 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
 async def move_items(
     kb_id: str,
     body: FolderMoveRequest,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """移动文件或文件夹到目标目录"""
+    # 校验对该 KB 的写权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
+
     # 验证目标文件夹存在
     if body.target_folder_id:
         target_result = await db.execute(
@@ -322,18 +375,18 @@ async def move_items(
 
     if body.item_type == "folder":
         for item_id in body.item_ids:
-            result = await db.execute(select(Folder).where(Folder.id == item_id))
+            result = await db.execute(select(Folder).where(Folder.id == item_id, Folder.kb_id == kb_id))
             folder = result.scalar_one_or_none()
             if folder:
                 folder.parent_id = body.target_folder_id
     elif body.item_type == "document":
         for item_id in body.item_ids:
-            result = await db.execute(select(Document).where(Document.id == item_id))
+            result = await db.execute(select(Document).where(Document.id == item_id, Document.kb_id == kb_id))
             doc = result.scalar_one_or_none()
             if doc:
                 doc.folder_id = body.target_folder_id
 
-    await db.flush()
+    await db.commit()
     return {"message": "移动成功"}
 
 
@@ -341,14 +394,18 @@ async def move_items(
 async def get_breadcrumb(
     kb_id: str,
     folder_id: str,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """获取文件夹的面包屑路径"""
+    # 校验对该 KB 的读权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.READ)
+
     breadcrumb = []
     current_id: str | None = folder_id
 
     while current_id:
-        result = await db.execute(select(Folder).where(Folder.id == current_id))
+        result = await db.execute(select(Folder).where(Folder.id == current_id, Folder.kb_id == kb_id))
         folder = result.scalar_one_or_none()
         if folder is None:
             break
