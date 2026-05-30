@@ -426,6 +426,7 @@ class PipelineWorker:
                 retry_count=next_retry,
                 created_at=msg.created_at,
                 trace_id=msg.trace_id,
+                tenant_id=msg.tenant_id,
             )
             await queue.enqueue(retry_msg)
         else:

@@ -382,6 +382,13 @@ class DocumentPipeline:
                 # 去掉文件扩展名，只保留文档名称
                 doc_title = Path(doc_filename).stem if doc_filename else ""
 
+                # tenant-auth：Chunk 的 tenant_id 以所属 KnowledgeBase 为权威来源反查盖章。
+                # Worker 是独立进程、无 IdentityContext，故不依赖请求上下文（见 design 6.5a）。
+                kb_tenant_result = await session.execute(
+                    select(KnowledgeBase.tenant_id).where(KnowledgeBase.id == kb_id)
+                )
+                kb_tenant_id = kb_tenant_result.scalar_one_or_none()
+
                 parent_ids: list[str] = []
                 for i in range(len(chunk_result.parent_chunks)):
                     parent_ids.append(str(uuid.uuid4()))
@@ -397,6 +404,7 @@ class DocumentPipeline:
                         parent_id=None,
                         content=content,
                         chunk_index=idx,
+                        tenant_id=kb_tenant_id,
                     )
                     session.add(parent_chunk)
 
@@ -422,6 +430,7 @@ class DocumentPipeline:
                         content=child_text,
                         chunk_index=child_idx,
                         chunk_metadata=chunk_metadata_dict,
+                        tenant_id=kb_tenant_id,
                     )
                     session.add(child_chunk)
 

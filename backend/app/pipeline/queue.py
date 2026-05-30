@@ -31,6 +31,9 @@ class TaskMessage:
     retry_count: int = 0
     created_at: float = 0.0  # timestamp
     trace_id: str = ""  # UUID4
+    # tenant-auth：冗余/可观测字段。Chunk 盖章的权威来源仍是所属 KB 的 tenant_id
+    # （见 pipeline 与 design 显式兼容清单 C4），此处仅便于追踪与日志。
+    tenant_id: str | None = None
 
 
 class QueueStats(BaseModel):
@@ -403,6 +406,7 @@ class TaskQueue:
                 retry_count=int(data.get("retry_count", 0)),
                 created_at=float(data.get("created_at", 0.0)),
                 trace_id=data.get("trace_id", ""),
+                tenant_id=data.get("tenant_id"),
             )
             return (mid, task_msg)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

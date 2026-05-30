@@ -14,17 +14,58 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.api.deps import authorization_guard, get_db_session
+from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_filename, validate_folder_name
+from app.auth.constants import PermissionEnum
+from app.auth.identity import IdentityContext
+from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
-from app.schema.db import Chunk, Document, Folder, KnowledgeBase, OCRConfig
+from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
 from app.storage.database import async_session, get_db
 from app.storage.milvus import MilvusClient
 
 logger = logging.getLogger(__name__)
+
+
+async def _authorize_kb_access(
+    db: AsyncSession, identity: IdentityContext, kb_id: str, access: KbAccessEnum
+) -> KnowledgeBase:
+    """加载 KB 并经唯一授权判定（读404不泄露 / 写403）。返回已授权的 KB。"""
+    kb = await db.get(KnowledgeBase, kb_id)
+    if kb is None:
+        raise CrossTenantError()
+    grant_rows = await db.execute(
+        select(
+            KnowledgeBaseGrant.grantee_type,
+            KnowledgeBaseGrant.grantee_id,
+            KnowledgeBaseGrant.permission,
+        ).where(KnowledgeBaseGrant.kb_id == kb_id)
+    )
+    grants = [GrantView(gt, gid, perm) for gt, gid, perm in grant_rows.all()]
+    decision = kb_authorization_decision(
+        identity,
+        kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
+        kb_visibility=kb.visibility, access=access, grants=grants,
+    )
+    if not decision.allow:
+        if decision.http_status == 403:
+            raise PermissionDeniedError()
+        raise CrossTenantError()
+    return kb
+
+
+def _ensure_not_super_admin_content(identity: IdentityContext) -> None:
+    """Content_View_Boundary：Super_Admin 默认不可读业务内容正文（R34）。
+
+    可按 content_view_boundary_open 配置放宽（v1 默认关闭）。
+    """
+    if identity.is_super_admin and not get_settings().content_view_boundary_open:
+        raise PermissionDeniedError("超级管理员默认不可查看业务内容正文")
 
 router = APIRouter(tags=["Document"])
 
@@ -204,13 +245,13 @@ def _select_queue(
 
 async def _enqueue_or_fallback(
     request: Request, file_path: str, doc_id: str, kb_id: str,
-    file_size: int | None = None,
+    file_size: int | None = None, tenant_id: str | None = None,
 ) -> None:
     """尝试将任务入队 Redis Stream（按大小选择快/慢道），失败时降级为 asyncio.create_task"""
     queue = _select_queue(request, file_size)
     if queue is not None:
         try:
-            msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path)
+            msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path, tenant_id=tenant_id)
             msg_id = await queue.enqueue(msg)
             print(f"[Queue] 文档 {doc_id} 已入队 Redis Stream (msg_id={msg_id})")
             return
@@ -237,13 +278,12 @@ async def list_documents(
     folder_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """获取知识库下的文档列表（支持按文件夹过滤 + 分页/滚动加载）"""
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 先校验对该 KB 的读权限（跨租户/不可读 -> 404）
+    await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.READ)
 
     # 参数兜底
     page = max(1, page)
@@ -307,14 +347,14 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     folder_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """上传文档（multipart/form-data），支持指定文件夹"""
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    kb = kb_result.scalar_one_or_none()
-    if kb is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 先校验对该 KB 的写权限（跨租户404 / 无写权403）
+    kb = await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.WRITE)
 
     # 校验文件名
     filename = file.filename or "unknown"
@@ -366,7 +406,7 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # 创建文档记录
+    # 创建文档记录（盖章 tenant_id = 所属 KB 的 tenant_id）
     doc = Document(
         id=doc_id,
         kb_id=kb_id,
@@ -376,6 +416,7 @@ async def upload_document(
         file_size=file_size,
         file_hash=file_hash,
         status="pending",
+        tenant_id=kb.tenant_id,
     )
     db.add(doc)
 
@@ -390,7 +431,7 @@ async def upload_document(
     _generate_thumbnail(doc_id, ext)
 
     # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
-    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size)
+    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size, tenant_id=kb.tenant_id)
 
     return DocumentResponse(
         id=doc.id,
@@ -406,12 +447,16 @@ async def upload_document(
 
 
 @router.get("/api/documents/{doc_id}", response_model=DocumentResponse)
-async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
-    """获取文档详情"""
+async def get_document(
+    doc_id: str,
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """获取文档详情（元数据；contextvar 兜底确保仅本租户可见 -> 跨租户 404）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise CrossTenantError()
     return DocumentResponse(
         id=doc.id,
         kb_id=doc.kb_id,
@@ -428,12 +473,21 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
-async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def retry_document(
+    doc_id: str,
+    request: Request,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
     """重新识别文档（清除旧数据后重新处理）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise CrossTenantError()
+    # 校验对所属 KB 的写权限
+    await _authorize_kb_access(db, identity, doc.kb_id, KbAccessEnum.WRITE)
     if doc.status == "processing":
         raise HTTPException(status_code=400, detail="文档正在处理中")
 
@@ -470,7 +524,7 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
     queue = _select_queue(request, doc.file_size)
     if queue is not None:
         try:
-            msg = TaskMessage(doc_id=doc_id, kb_id=doc.kb_id, file_path=str(file_path))
+            msg = TaskMessage(doc_id=doc_id, kb_id=doc.kb_id, file_path=str(file_path), tenant_id=doc.tenant_id)
             await queue.enqueue(msg)
         except Exception as e:
             logger.warning("Redis 入队失败，降级为 create_task: %s", e)
@@ -478,6 +532,7 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
     else:
         asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
 
+    await db.commit()
     return DocumentResponse(
         id=doc.id,
         kb_id=doc.kb_id,
@@ -492,12 +547,20 @@ async def retry_document(doc_id: str, request: Request, db: AsyncSession = Depen
 
 
 @router.delete("/api/documents/{doc_id}", status_code=204)
-async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_document(
+    doc_id: str,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
     """删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise CrossTenantError()
+    # 校验对所属 KB 的写权限
+    await _authorize_kb_access(db, identity, doc.kb_id, KbAccessEnum.WRITE)
 
     # 收集清理所需信息（在删除 DB 记录前）
     kb_id = doc.kb_id
@@ -516,7 +579,7 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
     # 删除文档（ORM cascade 会自动删除关联 chunks）
     await db.delete(doc)
-    await db.flush()
+    await db.commit()
 
     # 后台异步清理 Milvus 向量 + 本地文件 + 缓存（不阻塞 API 响应）
     asyncio.create_task(_doc_cleanup_background(doc_id, kb_id, file_type))
@@ -561,8 +624,15 @@ class BatchRetryRequest(BaseModel):
 
 
 @router.post("/api/documents/batch-retry", status_code=200)
-async def batch_retry_documents(body: BatchRetryRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """批量重试失败的文档"""
+async def batch_retry_documents(
+    body: BatchRetryRequest,
+    request: Request,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """批量重试失败的文档（contextvar 兜底确保仅命中本租户文档）"""
     if not body.doc_ids:
         return {"retried_count": 0, "total_requested": 0}
 
@@ -617,7 +687,7 @@ async def batch_retry_documents(body: BatchRetryRequest, request: Request, db: A
         queue = _select_queue(request, doc.file_size)
         if queue is not None:
             try:
-                msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path))
+                msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path), tenant_id=doc.tenant_id)
                 await queue.enqueue(msg)
             except Exception:
                 asyncio.create_task(_run_pipeline_safe(str(file_path), doc.id, doc.kb_id))
@@ -634,28 +704,38 @@ class BatchDeleteRequest(BaseModel):
 
 
 @router.post("/api/documents/batch-delete", status_code=200)
-async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = Depends(get_db)):
+async def batch_delete_documents(
+    body: BatchDeleteRequest,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
     """批量删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     if not body.doc_ids:
         raise HTTPException(status_code=400, detail="doc_ids 不能为空")
 
-    # ─── 第一步：批量标记 cancelled，让 pipeline 立即停止处理 ───
     from sqlalchemy import update as sql_update, delete as sql_delete
+
+    # ─── 先用受兜底过滤的 SELECT 收敛到"本租户内确实存在"的 doc_ids ───
+    # bulk update/delete 不被方案B兜底覆盖，故必须先据此把范围限定在本租户，
+    # 杜绝跨租户 doc_id 混入批量操作。
+    scoped = await db.execute(
+        select(Document).where(Document.id.in_(body.doc_ids))
+    )
+    docs = scoped.scalars().all()  # 已被 contextvar 兜底限定为本租户
+    if not docs:
+        return {"deleted_count": 0, "total_requested": len(body.doc_ids)}
+    allowed_ids = [d.id for d in docs]
+
+    # ─── 标记 cancelled（仅限已确认本租户的文档） ───
     await db.execute(
         sql_update(Document)
-        .where(Document.id.in_(body.doc_ids))
+        .where(Document.id.in_(allowed_ids))
         .where(Document.status.in_(("pending", "processing")))
         .values(status="cancelled")
     )
     await db.flush()
-
-    # ─── 第二步：批量查询所有待删除文档（收集清理所需信息） ───
-    result = await db.execute(
-        select(Document).where(Document.id.in_(body.doc_ids))
-    )
-    docs = result.scalars().all()
-    if not docs:
-        return {"deleted_count": 0, "total_requested": len(body.doc_ids)}
 
     # 收集清理信息
     kb_ids_affected: set[str] = set()
@@ -667,7 +747,7 @@ async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = De
         doc_ids_found.append(doc.id)
         cleanup_info.append({"id": doc.id, "kb_id": doc.kb_id, "file_type": doc.file_type})
 
-    # ─── 第三步：批量查询所有 chunk_ids（在删除前收集） ───
+    # ─── 批量查询所有 chunk_ids（在删除前收集） ───
     kb_chunk_map: dict[str, list[str]] = {}
     if doc_ids_found:
         chunk_result = await db.execute(
@@ -678,7 +758,7 @@ async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = De
             if doc_obj:
                 kb_chunk_map.setdefault(doc_obj.kb_id, []).append(chunk_id)
 
-    # ─── 第四步：批量更新知识库文档计数 ───
+    # ─── 批量更新知识库文档计数 ───
     for kb_id in kb_ids_affected:
         doc_count_in_batch = sum(1 for d in docs if d.kb_id == kb_id)
         kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
@@ -686,12 +766,12 @@ async def batch_delete_documents(body: BatchDeleteRequest, db: AsyncSession = De
         if kb:
             kb.doc_count = max(0, (kb.doc_count or 0) - doc_count_in_batch)
 
-    # ─── 第五步：批量删除 DB 记录（立即生效，前端刷新后看不到这些文档） ───
+    # ─── 批量删除 DB 记录（仅本租户已确认的文档） ───
     await db.execute(sql_delete(Chunk).where(Chunk.doc_id.in_(doc_ids_found)))
     await db.execute(sql_delete(Document).where(Document.id.in_(doc_ids_found)))
     await db.commit()
 
-    # ─── 第六步：后台异步清理 Milvus 向量 + 本地文件 + 缓存 ───
+    # ─── 后台异步清理 Milvus 向量 + 本地文件 + 缓存 ───
     asyncio.create_task(_batch_cleanup_background(kb_chunk_map, cleanup_info, kb_ids_affected))
 
     return {"deleted_count": len(doc_ids_found), "total_requested": len(body.doc_ids)}
@@ -785,13 +865,14 @@ class FolderUploadResponse(BaseModel):
 async def validate_folder_upload(
     kb_id: str,
     body: FolderUploadValidateRequest,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """校验文件夹上传：解析目录结构，区分支持和不支持的文件"""
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 校验对该 KB 的写权限（跨租户404 / 无写权403）
+    await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.WRITE)
 
     supported_files: list[FolderUploadFileInfo] = []
     unsupported_files: list[FolderUploadFileInfo] = []
@@ -855,7 +936,10 @@ async def upload_folder(
     files: list[UploadFile] = File(...),
     paths: Annotated[str, Form(...)] = "",
     parent_folder_id: Annotated[str | None, Form()] = None,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """批量上传文件夹
 
@@ -865,11 +949,8 @@ async def upload_folder(
     """
     import json
 
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    kb = kb_result.scalar_one_or_none()
-    if kb is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 校验对该 KB 的写权限
+    kb = await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.WRITE)
 
     # 解析路径列表
     try:
@@ -931,6 +1012,7 @@ async def upload_folder(
                 kb_id=kb_id,
                 parent_id=parent_id,
                 name=folder_name,
+                tenant_id=kb.tenant_id,
             )
             db.add(new_folder)
             folder_id_map[folder_path] = folder_id
@@ -992,7 +1074,7 @@ async def upload_folder(
             with open(file_path, "wb") as f:
                 f.write(content)
 
-            # 创建文档记录
+            # 创建文档记录（盖章 tenant_id = 所属 KB 的 tenant_id）
             doc = Document(
                 id=doc_id,
                 kb_id=kb_id,
@@ -1001,6 +1083,7 @@ async def upload_folder(
                 file_type=ext,
                 file_size=file_size,
                 status="pending",
+                tenant_id=kb.tenant_id,
             )
             db.add(doc)
 
@@ -1013,7 +1096,7 @@ async def upload_folder(
             _generate_thumbnail(doc_id, ext)
 
             # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
-            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size)
+            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size, tenant_id=kb.tenant_id)
 
             uploaded_count += 1
             results.append(FolderUploadResultItem(
@@ -1044,12 +1127,17 @@ async def upload_folder(
 
 
 @router.get("/api/documents/{doc_id}/preview")
-async def preview_document_file(doc_id: str, db: AsyncSession = Depends(get_db)):
+async def preview_document_file(
+    doc_id: str,
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
+):
     """预览文档文件缩略图（支持图片和 PDF 首页）"""
+    _ensure_not_super_admin_content(identity)  # 内容边界：超管默认不可查看正文/预览
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise CrossTenantError()
 
     # 图片类型：直接返回原文件
     if doc.file_type in ("jpg", "jpeg", "png"):
@@ -1088,13 +1176,15 @@ async def list_document_chunks(
     doc_id: str,
     page: int = 1,
     page_size: int = 20,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """查看文档的切片列表（父块分页 + 当前页父块对应的子块内容用于高亮）"""
-    # 验证文档存在
+    _ensure_not_super_admin_content(identity)  # 内容边界：超管默认不可查看 Chunk 正文
+    # 验证文档存在（contextvar 兜底确保仅本租户文档可见 -> 跨租户 404）
     doc_result = await db.execute(select(Document).where(Document.id == doc_id))
     if doc_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise CrossTenantError()
 
     # 参数兜底
     page = max(1, page)
