@@ -23,7 +23,7 @@ const navItems = [
   { to: '/knowledge-bases', label: '知识库', icon: Database },
   { to: '/retrieval', label: '检索测试', icon: Search },
   { to: '/models', label: '模型管理', icon: Cpu },
-  { to: '/agent-config', label: 'Agent 配置', icon: Bot },
+  { to: '/agent-config', label: '智能体', icon: Bot },
   { to: '/embed-config', label: 'Embedding', icon: Layers },
   { to: '/ocr-services', label: 'OCR 服务', icon: ScanText },
   { to: '/api-keys', label: 'API Key', icon: Key },

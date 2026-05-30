@@ -201,8 +201,8 @@ function AgentConfig() {
       {/* 页面头部 */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Agent 配置</h1>
-          <p className="text-muted-foreground text-sm mt-1">管理 Agent 运行预设，控制迭代次数、温度等参数</p>
+          <h1 className="text-2xl font-bold tracking-tight">智能体</h1>
+          <p className="text-muted-foreground text-sm mt-1">管理智能体运行预设，控制迭代次数、温度等参数</p>
         </div>
         <Button onClick={openCreate} className="gap-2 cursor-pointer">
           <Plus className="h-4 w-4" />
@@ -218,7 +218,7 @@ function AgentConfig() {
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
             <Bot className="h-8 w-8 text-muted-foreground/60" />
           </div>
-          <p className="text-muted-foreground mb-4">暂无 Agent 预设</p>
+          <p className="text-muted-foreground mb-4">暂无智能体预设</p>
           <Button onClick={openCreate} variant="outline" className="gap-2 cursor-pointer">
             <Plus className="h-4 w-4" />
             新建预设
