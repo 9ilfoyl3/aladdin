@@ -50,12 +50,8 @@ class Settings(BaseSettings):
 
     # OCR 配置
     ocr_enabled: bool = True
-    ocr_provider: str = "paddleocr"
+    ocr_provider: str = "external_api"
     ocr_fallback_provider: str = ""
-
-    # PaddleOCR 配置
-    ocr_paddleocr_lang: str = "ch"
-    ocr_paddleocr_use_gpu: bool = False
 
     # 外部 OCR API 配置
     ocr_external_api_url: str = ""

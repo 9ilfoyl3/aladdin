@@ -318,13 +318,12 @@ Loader 提取文本 + 提取嵌入图片（写入临时目录）
 
 ## OCR 服务管理
 
-系统支持可配置的 OCR 服务，用于处理扫描件 PDF 等无文本层的文档。
+系统支持可配置的 OCR 服务，用于处理扫描件 PDF 等无文本层的文档。OCR 统一通过远程 API 调用，不在业务进程内运行本地 OCR 引擎。
 
 ### 支持的 OCR Provider
 
 | Provider 类型 | 说明 | 配置要点 |
 |--------------|------|----------|
-| `paddleocr` | PaddleOCR 本地服务 | 需安装 PaddleOCR 依赖，通过 `extra_config` 配置 `lang` 和 `use_gpu` |
 | `textin` | 合合信息 TextIn OCR | 响应格式 `{code, message, data: [{page, content}]}`，填写 API 地址和密钥 |
 | `external_api` | 通用外部 API（兼容模式） | 自动识别常见响应格式，适合快速接入未专门适配的服务 |
 
@@ -332,11 +331,10 @@ Loader 提取文本 + 提取嵌入图片（写入临时目录）
 
 ```
 OCRProvider (抽象基类)
-├── PaddleOCRProvider          # 本地 PaddleOCR
-├── BaseExternalAPIProvider    # 外部 HTTP API 抽象基类（通用上传逻辑）
-│   ├── TextInProvider         # TextIn OCR 适配
-│   └── ExternalAPIProvider    # 通用兼容（自动识别响应格式）
-└── 新增 Provider...           # 继承 BaseExternalAPIProvider 即可
+└── BaseExternalAPIProvider    # 外部 HTTP API 抽象基类（通用上传逻辑）
+    ├── TextInProvider         # TextIn OCR 适配
+    └── ExternalAPIProvider    # 通用兼容（自动识别响应格式）
+    └── 新增 Provider...       # 继承 BaseExternalAPIProvider 即可
 ```
 
 ### 接入新的 OCR 服务
@@ -430,7 +428,7 @@ OCRProvider (抽象基类)
 | `CHILD_CHUNK_SIZE` | 450 | 子块大小（字符） |
 | `CHUNK_OVERLAP` | 70 | 子块重叠（字符） |
 | `OCR_ENABLED` | true | 是否启用 OCR |
-| `OCR_PROVIDER` | paddleocr | 默认 OCR Provider |
+| `OCR_PROVIDER` | external_api | 默认 OCR Provider（远程 API） |
 | `PIPELINE_MAX_CONCURRENT` | 2 | Worker 最大并发文档处理数 |
 | `PIPELINE_MAX_RETRIES` | 3 | 文档处理最大重试次数 |
 | `PIPELINE_TASK_TIMEOUT_MINUTES` | 60 | 单文档处理超时（分钟） |

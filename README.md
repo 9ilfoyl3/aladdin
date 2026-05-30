@@ -107,7 +107,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 |------|------|
 | LLM | 任意 OpenAI 兼容 API（vLLM / DeepSeek / Qwen / …）/ Ollama |
 | Embedding / Rerank | 任意 OpenAI 兼容远程服务（TEI / Infinity / vLLM），前端可视化热切换 |
-| OCR 服务 | PaddleOCR 本地 / TextIn / 通用外部 API，多 Provider + 默认 + Fallback 自动切换 |
+| OCR 服务 | TextIn / 通用外部 API（远程），多 Provider + 默认 + Fallback 自动切换 |
 | 向量数据库 | Milvus 2.4+（稠密 + 稀疏向量） |
 | MCP | 对外暴露知识库能力（MCP Server），对内接入远程 MCP 工具（服务发现 + 自动注册） |
 | 技能 Skills | Progressive Disclosure 渐进式加载，按需读取 SKILL.md 完整指令 |

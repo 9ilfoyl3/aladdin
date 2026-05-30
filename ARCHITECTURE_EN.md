@@ -318,13 +318,12 @@ Loader extracts text + embedded images (temp dir)
 
 ## OCR Service Management
 
-The system supports configurable OCR services for scanned PDFs and other documents without text layers.
+The system supports configurable OCR services for scanned PDFs and other documents without text layers. OCR is invoked exclusively through remote APIs; no local OCR engine runs inside the business process.
 
 ### Supported OCR Providers
 
 | Provider Type | Description | Configuration Notes |
 |--------------|-------------|-------------------|
-| `paddleocr` | PaddleOCR local service | Requires PaddleOCR deps; configure `lang` and `use_gpu` via `extra_config` |
 | `textin` | TextIn OCR (Hehe Information) | Response format `{code, message, data: [{page, content}]}`; provide API URL and key |
 | `external_api` | Generic external API (compatibility) | Auto-detects common response formats; for quick integration |
 
@@ -332,11 +331,10 @@ The system supports configurable OCR services for scanned PDFs and other documen
 
 ```
 OCRProvider (Abstract Base Class)
-├── PaddleOCRProvider          # Local PaddleOCR
-├── BaseExternalAPIProvider    # External HTTP API abstract base (common upload logic)
-│   ├── TextInProvider         # TextIn OCR adapter
-│   └── ExternalAPIProvider    # Generic compatibility (auto-detect response format)
-└── New Provider...            # Just inherit BaseExternalAPIProvider
+└── BaseExternalAPIProvider    # External HTTP API abstract base (common upload logic)
+    ├── TextInProvider         # TextIn OCR adapter
+    └── ExternalAPIProvider    # Generic compatibility (auto-detect response format)
+    └── New Provider...        # Just inherit BaseExternalAPIProvider
 ```
 
 ### Adding a New OCR Service
@@ -430,7 +428,7 @@ The response `metadata.degraded` flags whether degradation occurred; `metadata.l
 | `CHILD_CHUNK_SIZE` | 450 | Child chunk size (characters) |
 | `CHUNK_OVERLAP` | 70 | Child chunk overlap (characters) |
 | `OCR_ENABLED` | true | Enable OCR |
-| `OCR_PROVIDER` | paddleocr | Default OCR provider |
+| `OCR_PROVIDER` | external_api | Default OCR provider (remote API) |
 | `PIPELINE_MAX_CONCURRENT` | 2 | Worker max concurrent document processing |
 | `PIPELINE_MAX_RETRIES` | 3 | Document processing max retries |
 | `PIPELINE_TASK_TIMEOUT_MINUTES` | 60 | Single-document processing timeout (minutes) |

@@ -47,8 +47,6 @@ class SystemConfigResponse(BaseModel):
     ocr_enabled: bool
     ocr_provider: str
     ocr_fallback_provider: str
-    ocr_paddleocr_lang: str
-    ocr_paddleocr_use_gpu: bool
     ocr_external_api_url: str
     ocr_external_api_key: str  # 脱敏显示
     ocr_external_api_timeout: float
@@ -67,8 +65,6 @@ class SystemConfigUpdate(BaseModel):
     ocr_enabled: bool | None = None
     ocr_provider: str | None = None
     ocr_fallback_provider: str | None = None
-    ocr_paddleocr_lang: str | None = None
-    ocr_paddleocr_use_gpu: bool | None = None
     ocr_external_api_url: str | None = None
     ocr_external_api_key: str | None = None
     ocr_external_api_timeout: float | None = None
@@ -172,8 +168,6 @@ async def get_config():
         ocr_enabled=settings.ocr_enabled,
         ocr_provider=settings.ocr_provider,
         ocr_fallback_provider=settings.ocr_fallback_provider,
-        ocr_paddleocr_lang=settings.ocr_paddleocr_lang,
-        ocr_paddleocr_use_gpu=settings.ocr_paddleocr_use_gpu,
         ocr_external_api_url=settings.ocr_external_api_url,
         ocr_external_api_key=_mask_ocr_api_key(settings.ocr_external_api_key),
         ocr_external_api_timeout=settings.ocr_external_api_timeout,
@@ -223,8 +217,6 @@ async def update_config(body: SystemConfigUpdate):
         ocr_enabled=settings.ocr_enabled,
         ocr_provider=settings.ocr_provider,
         ocr_fallback_provider=settings.ocr_fallback_provider,
-        ocr_paddleocr_lang=settings.ocr_paddleocr_lang,
-        ocr_paddleocr_use_gpu=settings.ocr_paddleocr_use_gpu,
         ocr_external_api_url=settings.ocr_external_api_url,
         ocr_external_api_key=_mask_ocr_api_key(settings.ocr_external_api_key),
         ocr_external_api_timeout=settings.ocr_external_api_timeout,

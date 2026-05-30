@@ -107,7 +107,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 |------------|---------|
 | LLM | Any OpenAI-compatible API (vLLM / DeepSeek / Qwen / …) / Ollama |
 | Embedding / Rerank | Any OpenAI-compatible remote service (TEI / Infinity / vLLM), hot-swappable via frontend |
-| OCR | PaddleOCR (local) / TextIn / generic external API; multi-provider with default + fallback auto-switching |
+| OCR | TextIn / generic external API (remote); multi-provider with default + fallback auto-switching |
 | Vector DB | Milvus 2.4+ (dense + sparse vectors) |
 | MCP | Exposes KB capabilities (MCP Server) and integrates remote MCP tools (discovery + auto-registration) |
 | Skills | Progressive Disclosure loading — read full SKILL.md instructions on demand |

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Server, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
 import { ocrConfigApi } from '@/lib/api'
 import type { OCRConfigItem, OCRTestResult } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -18,20 +18,16 @@ interface OCRFormData {
   timeout: string
   is_default: boolean
   is_fallback: boolean
-  lang: string
-  use_gpu: boolean
 }
 
 const emptyForm: OCRFormData = {
   name: '',
-  provider_type: 'paddleocr',
+  provider_type: 'external_api',
   api_url: '',
   api_key: '',
   timeout: '30',
   is_default: false,
   is_fallback: false,
-  lang: 'ch',
-  use_gpu: false,
 }
 
 function OcrServices() {
@@ -53,9 +49,6 @@ function OcrServices() {
 
   const createMutation = useMutation({
     mutationFn: (data: OCRFormData) => {
-      const extra_config = data.provider_type === 'paddleocr'
-        ? { lang: data.lang, use_gpu: data.use_gpu }
-        : undefined
       return ocrConfigApi.create({
         name: data.name,
         provider_type: data.provider_type,
@@ -64,7 +57,6 @@ function OcrServices() {
         timeout: parseFloat(data.timeout) || 30,
         is_default: data.is_default,
         is_fallback: data.is_fallback,
-        extra_config,
       })
     },
     onSuccess: () => {
@@ -78,9 +70,6 @@ function OcrServices() {
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: OCRFormData }) => {
-      const extra_config = data.provider_type === 'paddleocr'
-        ? { lang: data.lang, use_gpu: data.use_gpu }
-        : undefined
       const payload: Record<string, unknown> = {
         name: data.name,
         provider_type: data.provider_type,
@@ -88,7 +77,6 @@ function OcrServices() {
         timeout: parseFloat(data.timeout) || 30,
         is_default: data.is_default,
         is_fallback: data.is_fallback,
-        extra_config,
       }
       // api_key 留空表示不修改
       if (data.api_key) {
@@ -126,7 +114,6 @@ function OcrServices() {
 
   function openEdit(item: OCRConfigItem) {
     setEditingItem(item)
-    const extra = item.extra_config || {}
     setForm({
       name: item.name,
       provider_type: item.provider_type,
@@ -135,8 +122,6 @@ function OcrServices() {
       timeout: String(item.timeout),
       is_default: item.is_default,
       is_fallback: item.is_fallback,
-      lang: (extra.lang as string) || 'ch',
-      use_gpu: (extra.use_gpu as boolean) || false,
     })
     setFormError(null)
     setDialogTestResult(null)
@@ -210,7 +195,7 @@ function OcrServices() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">OCR 服务管理</h1>
-          <p className="text-muted-foreground text-sm mt-1">配置多个 OCR 服务，支持本地 PaddleOCR 和外部 API</p>
+          <p className="text-muted-foreground text-sm mt-1">配置远程 OCR 服务（TextIn / 通用外部 API），支持默认 + 备用自动切换</p>
         </div>
         <Button onClick={openCreate} className="gap-2 cursor-pointer">
           <Plus className="h-4 w-4" />
@@ -258,18 +243,14 @@ function OcrServices() {
 
               {/* 类型图标 */}
               <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
-                {config.provider_type === 'paddleocr' ? (
-                  <Server className="h-5 w-5 text-primary" />
-                ) : (
-                  <Globe className="h-5 w-5 text-primary" />
-                )}
+                <Globe className="h-5 w-5 text-primary" />
               </div>
 
               {/* 名称 + Provider Type */}
               <div className="flex items-center gap-2 mb-3">
                 <h3 className="font-semibold text-base truncate">{config.name}</h3>
                 <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                  {config.provider_type === 'paddleocr' ? 'PaddleOCR' : config.provider_type === 'textin' ? 'TextIn' : '外部 API'}
+                  {config.provider_type === 'textin' ? 'TextIn' : '外部 API'}
                 </Badge>
               </div>
 
@@ -351,7 +332,7 @@ function OcrServices() {
               <Input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="如：本地 PaddleOCR"
+                placeholder="如：TextIn OCR"
                 className="mt-1.5"
                 required
               />
@@ -363,7 +344,6 @@ function OcrServices() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="paddleocr">PaddleOCR 本地</SelectItem>
                   <SelectItem value="textin">TextIn</SelectItem>
                   <SelectItem value="external_api">外部 API（通用）</SelectItem>
                 </SelectContent>
@@ -374,7 +354,7 @@ function OcrServices() {
               <Input
                 value={form.api_url}
                 onChange={(e) => setForm({ ...form, api_url: e.target.value })}
-                placeholder="如：http://localhost:8866"
+                placeholder="如：http://10.30.1.2:8909/parse"
                 className="mt-1.5"
                 required
               />
@@ -421,32 +401,6 @@ function OcrServices() {
               />
               <Label htmlFor="ocr_is_fallback" className="text-sm font-normal cursor-pointer">设为备用服务</Label>
             </div>
-
-            {/* PaddleOCR 额外字段 */}
-            {form.provider_type === 'paddleocr' && (
-              <>
-                <div>
-                  <Label>识别语言</Label>
-                  <Input
-                    value={form.lang}
-                    onChange={(e) => setForm({ ...form, lang: e.target.value })}
-                    placeholder="ch"
-                    className="mt-1.5"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">如：ch（中文）、en（英文）、japan（日文）</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="ocr_use_gpu"
-                    checked={form.use_gpu}
-                    onChange={(e) => setForm({ ...form, use_gpu: e.target.checked })}
-                    className="rounded border-border"
-                  />
-                  <Label htmlFor="ocr_use_gpu" className="text-sm font-normal cursor-pointer">启用 GPU 加速</Label>
-                </div>
-              </>
-            )}
 
             {/* 对话框内测试结果 */}
             {dialogTestResult && (

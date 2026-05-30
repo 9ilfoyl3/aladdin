@@ -64,10 +64,10 @@ class TestListOCRConfigs:
     async def test_list_ordered_by_created_at_desc(self, client):
         """列表按 created_at 倒序"""
         resp1 = await client.post("/api/ocr-configs", json={
-            "name": "First", "provider_type": "paddleocr", "api_url": "http://a"
+            "name": "First", "provider_type": "external_api", "api_url": "http://a"
         })
         resp2 = await client.post("/api/ocr-configs", json={
-            "name": "Second", "provider_type": "paddleocr", "api_url": "http://b"
+            "name": "Second", "provider_type": "external_api", "api_url": "http://b"
         })
         resp = await client.get("/api/ocr-configs")
         data = resp.json()
@@ -91,7 +91,7 @@ class TestListOCRConfigs:
     async def test_api_key_set_false_when_no_key(self, client):
         """未设置 api_key 时 api_key_set 为 False"""
         await client.post("/api/ocr-configs", json={
-            "name": "NoKey", "provider_type": "paddleocr", "api_url": "http://local"
+            "name": "NoKey", "provider_type": "external_api", "api_url": "http://local"
         })
         resp = await client.get("/api/ocr-configs")
         assert resp.json()[0]["api_key_set"] is False
@@ -104,15 +104,15 @@ class TestCreateOCRConfig:
     async def test_create_success(self, client):
         """成功创建返回 201"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "PaddleOCR 本地",
-            "provider_type": "paddleocr",
+            "name": "TextIn OCR",
+            "provider_type": "external_api",
             "api_url": "http://localhost:8866",
             "timeout": 30.0,
         })
         assert resp.status_code == 201
         data = resp.json()
-        assert data["name"] == "PaddleOCR 本地"
-        assert data["provider_type"] == "paddleocr"
+        assert data["name"] == "TextIn OCR"
+        assert data["provider_type"] == "external_api"
         assert data["api_url"] == "http://localhost:8866"
         assert data["timeout"] == 30.0
         assert data["is_default"] is False
@@ -126,7 +126,7 @@ class TestCreateOCRConfig:
     async def test_create_empty_name(self, client):
         """name 为空返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "", "provider_type": "paddleocr", "api_url": "http://a"
+            "name": "", "provider_type": "external_api", "api_url": "http://a"
         })
         assert resp.status_code == 422
         assert "名称不能为空" in resp.json()["detail"]
@@ -135,7 +135,7 @@ class TestCreateOCRConfig:
     async def test_create_whitespace_name(self, client):
         """name 仅空白返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "   ", "provider_type": "paddleocr", "api_url": "http://a"
+            "name": "   ", "provider_type": "external_api", "api_url": "http://a"
         })
         assert resp.status_code == 422
         assert "名称不能为空" in resp.json()["detail"]
@@ -144,7 +144,7 @@ class TestCreateOCRConfig:
     async def test_create_name_too_long(self, client):
         """name 超过 100 字符返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "x" * 101, "provider_type": "paddleocr", "api_url": "http://a"
+            "name": "x" * 101, "provider_type": "external_api", "api_url": "http://a"
         })
         assert resp.status_code == 422
         assert "名称过长" in resp.json()["detail"]
@@ -162,7 +162,7 @@ class TestCreateOCRConfig:
     async def test_create_empty_api_url(self, client):
         """api_url 为空返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": ""
+            "name": "Test", "provider_type": "external_api", "api_url": ""
         })
         assert resp.status_code == 422
         assert "API 地址不能为空" in resp.json()["detail"]
@@ -171,7 +171,7 @@ class TestCreateOCRConfig:
     async def test_create_timeout_too_low(self, client):
         """timeout < 1 返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a", "timeout": 0.5
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a", "timeout": 0.5
         })
         assert resp.status_code == 422
         assert "超时时间" in resp.json()["detail"]
@@ -180,7 +180,7 @@ class TestCreateOCRConfig:
     async def test_create_timeout_too_high(self, client):
         """timeout > 300 返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a", "timeout": 301
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a", "timeout": 301
         })
         assert resp.status_code == 422
         assert "超时时间" in resp.json()["detail"]
@@ -189,7 +189,7 @@ class TestCreateOCRConfig:
     async def test_create_default_and_fallback_rejected(self, client):
         """同时设 is_default 和 is_fallback 返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
             "is_default": True, "is_fallback": True,
         })
         assert resp.status_code == 422
@@ -199,11 +199,11 @@ class TestCreateOCRConfig:
     async def test_create_default_clears_previous(self, client):
         """设置新默认时旧默认被取消"""
         await client.post("/api/ocr-configs", json={
-            "name": "Old Default", "provider_type": "paddleocr",
+            "name": "Old Default", "provider_type": "external_api",
             "api_url": "http://a", "is_default": True,
         })
         await client.post("/api/ocr-configs", json={
-            "name": "New Default", "provider_type": "paddleocr",
+            "name": "New Default", "provider_type": "external_api",
             "api_url": "http://b", "is_default": True,
         })
         resp = await client.get("/api/ocr-configs")
@@ -216,11 +216,11 @@ class TestCreateOCRConfig:
     async def test_create_fallback_clears_previous(self, client):
         """设置新 fallback 时旧 fallback 被取消"""
         await client.post("/api/ocr-configs", json={
-            "name": "Old Fallback", "provider_type": "paddleocr",
+            "name": "Old Fallback", "provider_type": "external_api",
             "api_url": "http://a", "is_fallback": True,
         })
         await client.post("/api/ocr-configs", json={
-            "name": "New Fallback", "provider_type": "paddleocr",
+            "name": "New Fallback", "provider_type": "external_api",
             "api_url": "http://b", "is_fallback": True,
         })
         resp = await client.get("/api/ocr-configs")
@@ -233,7 +233,7 @@ class TestCreateOCRConfig:
     async def test_create_with_extra_config(self, client):
         """创建时可传入 extra_config"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "PaddleOCR", "provider_type": "paddleocr",
+            "name": "ExternalAPI", "provider_type": "external_api",
             "api_url": "http://localhost:8866",
             "extra_config": {"lang": "en", "use_gpu": True},
         })
@@ -244,7 +244,7 @@ class TestCreateOCRConfig:
     async def test_create_name_stripped(self, client):
         """name 前后空白被去除"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "  Trimmed  ", "provider_type": "paddleocr", "api_url": "http://a"
+            "name": "  Trimmed  ", "provider_type": "external_api", "api_url": "http://a"
         })
         assert resp.status_code == 201
         assert resp.json()["name"] == "Trimmed"
@@ -257,7 +257,7 @@ class TestUpdateOCRConfig:
     async def test_update_partial_fields(self, client):
         """部分更新仅修改提供的字段"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Original", "provider_type": "paddleocr",
+            "name": "Original", "provider_type": "external_api",
             "api_url": "http://original", "timeout": 30.0,
         })
         config_id = resp.json()["id"]
@@ -268,7 +268,7 @@ class TestUpdateOCRConfig:
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "Updated"
-        assert data["provider_type"] == "paddleocr"
+        assert data["provider_type"] == "external_api"
         assert data["api_url"] == "http://original"
         assert data["timeout"] == 30.0
 
@@ -300,7 +300,7 @@ class TestUpdateOCRConfig:
     async def test_update_empty_name_rejected(self, client):
         """更新时 name 为空返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -314,7 +314,7 @@ class TestUpdateOCRConfig:
     async def test_update_invalid_provider_type(self, client):
         """更新时 provider_type 非法返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -328,11 +328,11 @@ class TestUpdateOCRConfig:
     async def test_update_default_clears_previous(self, client):
         """更新设置新默认时旧默认被取消"""
         resp1 = await client.post("/api/ocr-configs", json={
-            "name": "First", "provider_type": "paddleocr",
+            "name": "First", "provider_type": "external_api",
             "api_url": "http://a", "is_default": True,
         })
         resp2 = await client.post("/api/ocr-configs", json={
-            "name": "Second", "provider_type": "paddleocr",
+            "name": "Second", "provider_type": "external_api",
             "api_url": "http://b",
         })
         second_id = resp2.json()["id"]
@@ -350,11 +350,11 @@ class TestUpdateOCRConfig:
     async def test_update_fallback_clears_previous(self, client):
         """更新设置新 fallback 时旧 fallback 被取消"""
         resp1 = await client.post("/api/ocr-configs", json={
-            "name": "First", "provider_type": "paddleocr",
+            "name": "First", "provider_type": "external_api",
             "api_url": "http://a", "is_fallback": True,
         })
         resp2 = await client.post("/api/ocr-configs", json={
-            "name": "Second", "provider_type": "paddleocr",
+            "name": "Second", "provider_type": "external_api",
             "api_url": "http://b",
         })
         second_id = resp2.json()["id"]
@@ -372,7 +372,7 @@ class TestUpdateOCRConfig:
     async def test_update_default_and_fallback_rejected(self, client):
         """更新时同时设 is_default 和 is_fallback 返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -386,7 +386,7 @@ class TestUpdateOCRConfig:
     async def test_update_existing_default_add_fallback_rejected(self, client):
         """已是默认的配置更新为 fallback 时返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Default", "provider_type": "paddleocr",
+            "name": "Default", "provider_type": "external_api",
             "api_url": "http://a", "is_default": True,
         })
         config_id = resp.json()["id"]
@@ -401,7 +401,7 @@ class TestUpdateOCRConfig:
     async def test_update_name_stripped(self, client):
         """更新时 name 前后空白被去除"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -415,7 +415,7 @@ class TestUpdateOCRConfig:
     async def test_update_timeout_out_of_range(self, client):
         """更新时 timeout 超出范围返回 422"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "Test", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -433,7 +433,7 @@ class TestDeleteOCRConfig:
     async def test_delete_success(self, client):
         """删除返回 204"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "ToDelete", "provider_type": "paddleocr", "api_url": "http://a",
+            "name": "ToDelete", "provider_type": "external_api", "api_url": "http://a",
         })
         config_id = resp.json()["id"]
 
@@ -455,7 +455,7 @@ class TestDeleteOCRConfig:
     async def test_delete_default_allowed(self, client):
         """允许删除默认服务"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Default", "provider_type": "paddleocr",
+            "name": "Default", "provider_type": "external_api",
             "api_url": "http://a", "is_default": True,
         })
         config_id = resp.json()["id"]
@@ -467,7 +467,7 @@ class TestDeleteOCRConfig:
     async def test_delete_fallback_allowed(self, client):
         """允许删除备用服务"""
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Fallback", "provider_type": "paddleocr",
+            "name": "Fallback", "provider_type": "external_api",
             "api_url": "http://a", "is_fallback": True,
         })
         config_id = resp.json()["id"]
@@ -479,35 +479,22 @@ class TestOCRConnectionTest:
     """连通性测试端点测试"""
 
     @pytest.mark.asyncio
-    async def test_temp_test_paddleocr_available(self, client):
-        """PaddleOCR 临时测试 - 检查 is_available 返回结果"""
-        from unittest.mock import patch
+    async def test_temp_test_external_api_get_success(self, client):
+        """External API 临时测试 - GET 健康检查成功"""
+        from unittest.mock import AsyncMock, patch
 
-        with patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available", return_value=True):
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("httpx.AsyncClient.get", return_value=mock_response):
             resp = await client.post("/api/ocr-configs/test", json={
-                "provider_type": "paddleocr",
-                "api_url": "http://localhost:8000",
+                "provider_type": "textin",
+                "api_url": "http://textin.test/api",
             })
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert "可用" in data["message"]
-        assert data["elapsed_ms"] is not None
-
-    @pytest.mark.asyncio
-    async def test_temp_test_paddleocr_unavailable(self, client):
-        """PaddleOCR 临时测试 - 未安装时返回 success=false"""
-        from unittest.mock import patch
-
-        with patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available", return_value=False):
-            resp = await client.post("/api/ocr-configs/test", json={
-                "provider_type": "paddleocr",
-                "api_url": "http://localhost:8000",
-            })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is False
-        assert "未安装" in data["message"]
+        assert "200" in data["message"]
 
     @pytest.mark.asyncio
     async def test_temp_test_external_api_success(self, client):
@@ -517,7 +504,7 @@ class TestOCRConnectionTest:
         mock_response = AsyncMock()
         mock_response.status_code = 200
 
-        with patch("httpx.AsyncClient.head", return_value=mock_response):
+        with patch("httpx.AsyncClient.get", return_value=mock_response):
             resp = await client.post("/api/ocr-configs/test", json={
                 "provider_type": "external_api",
                 "api_url": "http://example.com/ocr",
@@ -535,7 +522,9 @@ class TestOCRConnectionTest:
         """External API 临时测试 - 超时返回 success=false"""
         from unittest.mock import patch
 
-        with patch("httpx.AsyncClient.head", side_effect=httpx.TimeoutException("timeout")):
+        # GET 与 HEAD（fallback）均超时，确保不触发真实网络请求
+        with patch("httpx.AsyncClient.get", side_effect=httpx.TimeoutException("timeout")), \
+             patch("httpx.AsyncClient.head", side_effect=httpx.TimeoutException("timeout")):
             resp = await client.post("/api/ocr-configs/test", json={
                 "provider_type": "external_api",
                 "api_url": "http://example.com/ocr",
@@ -551,7 +540,9 @@ class TestOCRConnectionTest:
         """External API 临时测试 - 连接异常返回 success=false"""
         from unittest.mock import patch
 
-        with patch("httpx.AsyncClient.head", side_effect=httpx.ConnectError("connection refused")):
+        # GET 与 HEAD（fallback）均连接失败，确保不触发真实网络请求
+        with patch("httpx.AsyncClient.get", side_effect=httpx.ConnectError("connection refused")), \
+             patch("httpx.AsyncClient.head", side_effect=httpx.ConnectError("connection refused")):
             resp = await client.post("/api/ocr-configs/test", json={
                 "provider_type": "external_api",
                 "api_url": "http://example.com/ocr",
@@ -564,17 +555,19 @@ class TestOCRConnectionTest:
     @pytest.mark.asyncio
     async def test_saved_config_test_success(self, client):
         """已保存配置测试 - 正常执行"""
-        from unittest.mock import patch
+        from unittest.mock import AsyncMock, patch
 
         # 先创建一个配置
         resp = await client.post("/api/ocr-configs", json={
-            "name": "Test PaddleOCR",
-            "provider_type": "paddleocr",
-            "api_url": "http://localhost:8000",
+            "name": "Test External",
+            "provider_type": "external_api",
+            "api_url": "http://example.com/ocr",
         })
         config_id = resp.json()["id"]
 
-        with patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available", return_value=True):
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        with patch("httpx.AsyncClient.get", return_value=mock_response):
             resp = await client.post(f"/api/ocr-configs/{config_id}/test")
         assert resp.status_code == 200
         data = resp.json()

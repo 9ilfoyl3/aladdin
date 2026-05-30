@@ -75,16 +75,9 @@ class OCRManager:
             OCRProvider 实例，或 None（类型不支持时）
         """
         from .external_api_provider import ExternalAPIProvider
-        from .paddleocr_provider import PaddleOCRProvider
         from .textin_provider import TextInProvider
 
-        if config.provider_type == "paddleocr":
-            extra = config.extra_config or {}
-            return PaddleOCRProvider(
-                lang=extra.get("lang", "ch"),
-                use_gpu=extra.get("use_gpu", False),
-            )
-        elif config.provider_type == "textin":
+        if config.provider_type == "textin":
             return TextInProvider(
                 api_url=config.api_url,
                 api_key=config.api_key or "",

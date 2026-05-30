@@ -128,7 +128,7 @@ class OCRConfig(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    provider_type: Mapped[str] = mapped_column(String, nullable=False)  # paddleocr | external_api
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)  # external_api | textin
     api_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timeout: Mapped[float] = mapped_column(Float, default=30.0)

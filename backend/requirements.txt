@@ -28,9 +28,8 @@ python-pptx>=1.0.2
 
 # ML 模型依赖已移除，Embedding/Rerank 统一使用远程服务
 
-# OCR (optional)
-# paddleocr>=2.7.0  # 本地 OCR 引擎，不安装则 PaddleOCRProvider 不注册
-# httpx 已在上方 HTTP & API 部分引入，ExternalAPIProvider 直接使用
+# OCR：统一使用远程 API（external_api / textin）
+# httpx 已在上方 HTTP & API 部分引入，OCR Provider 直接复用
 
 # 测试
 pytest>=8.3.3

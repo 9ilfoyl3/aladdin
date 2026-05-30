@@ -1,7 +1,7 @@
 """OCRManager 单元测试"""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.ocr.provider import OCRProvider, OCRResult, PageOCRResult
@@ -15,7 +15,7 @@ class FakeOCRConfig:
     """测试用 OCRConfig 替代品，模拟 ORM 模型的属性"""
     id: str = "config-1"
     name: str = "测试服务"
-    provider_type: str = "paddleocr"
+    provider_type: str = "external_api"
     api_url: str = "http://localhost:8000"
     api_key: str | None = None
     timeout: float = 30.0
@@ -61,63 +61,25 @@ class FakeProvider(OCRProvider):
 class TestOCRManagerInit:
     """OCRManager 从数据库配置初始化测试"""
 
-    @patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available")
-    def test_registers_available_paddleocr_provider(self, mock_paddle_avail):
-        """注册 is_available() 返回 True 的 PaddleOCR Provider"""
-        mock_paddle_avail.return_value = True
-
+    def test_registers_available_external_provider(self):
+        """注册 is_available() 返回 True 的远程 Provider"""
         config = make_ocr_config(
-            id="paddle-1",
-            provider_type="paddleocr",
+            id="ext-1",
+            provider_type="external_api",
+            api_url="http://ocr.test/api",
             is_default=True,
-            extra_config={"lang": "ch", "use_gpu": False},
         )
         manager = OCRManager([config])
 
-        assert "paddle-1" in manager._providers
-        assert manager._default_name == "paddle-1"
+        assert "ext-1" in manager._providers
+        assert manager._default_name == "ext-1"
 
-    @patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available")
-    def test_skips_unavailable_providers(self, mock_paddle_avail):
-        """不注册 is_available() 返回 False 的 Provider"""
-        mock_paddle_avail.return_value = False
-
-        config = make_ocr_config(id="paddle-1", provider_type="paddleocr")
+    def test_skips_unavailable_providers(self):
+        """不注册 is_available() 返回 False 的 Provider（api_url 为空）"""
+        config = make_ocr_config(id="ext-1", provider_type="external_api", api_url="")
         manager = OCRManager([config])
 
         assert len(manager._providers) == 0
-
-    @patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available")
-    def test_passes_extra_config_to_paddle_provider(self, mock_paddle_avail):
-        """将 extra_config 中的参数传递给 PaddleOCR Provider"""
-        mock_paddle_avail.return_value = True
-
-        config = make_ocr_config(
-            id="paddle-1",
-            provider_type="paddleocr",
-            extra_config={"lang": "en", "use_gpu": True},
-        )
-        manager = OCRManager([config])
-
-        provider = manager._providers["paddle-1"]
-        assert provider._lang == "en"
-        assert provider._use_gpu is True
-
-    @patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available")
-    def test_paddle_default_extra_config(self, mock_paddle_avail):
-        """extra_config 为 None 时使用默认值"""
-        mock_paddle_avail.return_value = True
-
-        config = make_ocr_config(
-            id="paddle-1",
-            provider_type="paddleocr",
-            extra_config=None,
-        )
-        manager = OCRManager([config])
-
-        provider = manager._providers["paddle-1"]
-        assert provider._lang == "ch"
-        assert provider._use_gpu is False
 
     def test_passes_config_to_external_provider(self):
         """将配置参数传递给 ExternalAPI Provider"""
@@ -135,19 +97,30 @@ class TestOCRManagerInit:
         assert provider._api_key == "secret"
         assert provider._timeout == 60.0
 
-    @patch("app.pipeline.ocr.paddleocr_provider.PaddleOCRProvider.is_available")
-    def test_sets_default_and_fallback(self, mock_paddle_avail):
-        """正确设置 default 和 fallback Provider"""
-        mock_paddle_avail.return_value = True
+    def test_registers_textin_provider(self):
+        """注册 TextIn Provider"""
+        config = make_ocr_config(
+            id="textin-1",
+            provider_type="textin",
+            api_url="http://textin.test/api",
+            api_key="key",
+        )
+        manager = OCRManager([config])
 
+        provider = manager._providers["textin-1"]
+        assert provider.name == "textin"
+        assert provider._api_url == "http://textin.test/api"
+
+    def test_sets_default_and_fallback(self):
+        """正确设置 default 和 fallback Provider"""
         configs = [
-            make_ocr_config(id="paddle-1", provider_type="paddleocr", is_default=True),
-            make_ocr_config(id="ext-1", provider_type="external_api", api_url="http://ocr.test/api", is_fallback=True),
+            make_ocr_config(id="ext-1", provider_type="external_api", api_url="http://a", is_default=True),
+            make_ocr_config(id="textin-1", provider_type="textin", api_url="http://b", is_fallback=True),
         ]
         manager = OCRManager(configs)
 
-        assert manager._default_name == "paddle-1"
-        assert manager._fallback_name == "ext-1"
+        assert manager._default_name == "ext-1"
+        assert manager._fallback_name == "textin-1"
         assert len(manager._providers) == 2
 
     def test_empty_configs(self):
@@ -175,7 +148,7 @@ class TestOCRManagerGetProvider:
         manager._default_name = "config-1"
         manager._fallback_name = "config-2"
         manager._providers = {
-            "config-1": FakeProvider("paddleocr"),
+            "config-1": FakeProvider("textin"),
             "config-2": FakeProvider("external_api"),
         }
         return manager
@@ -190,13 +163,13 @@ class TestOCRManagerGetProvider:
         """不传名称返回默认 Provider"""
         manager = self._make_manager_with_fake_providers()
         provider = manager.get_provider()
-        assert provider.name == "paddleocr"
+        assert provider.name == "textin"
 
     def test_get_provider_none_returns_default(self):
         """显式传 None 返回默认 Provider"""
         manager = self._make_manager_with_fake_providers()
         provider = manager.get_provider(None)
-        assert provider.name == "paddleocr"
+        assert provider.name == "textin"
 
     def test_get_provider_not_found_raises(self):
         """请求不存在的 Provider 抛出 ValueError"""
@@ -230,7 +203,7 @@ class TestOCRManagerRecognize:
         manager._default_name = "config-1"
         manager._fallback_name = "config-2"
 
-        primary = FakeProvider("paddleocr")
+        primary = FakeProvider("textin")
         fallback = FakeProvider("external_api")
 
         if primary_side_effect:
@@ -250,7 +223,7 @@ class TestOCRManagerRecognize:
         manager, primary, _ = self._make_manager_with_mocked_providers()
         result = await manager.recognize("/test/file.pdf")
 
-        assert result.provider_name == "paddleocr"
+        assert result.provider_name == "textin"
         primary.recognize.assert_called_once_with("/test/file.pdf")
 
     @pytest.mark.asyncio
@@ -266,7 +239,7 @@ class TestOCRManagerRecognize:
     async def test_recognize_fallback_on_primary_failure(self):
         """主 Provider 失败时自动切换到 fallback"""
         manager, primary, fallback = self._make_manager_with_mocked_providers(
-            primary_side_effect=RuntimeError("PaddleOCR 引擎故障"),
+            primary_side_effect=RuntimeError("TextIn 服务故障"),
         )
 
         result = await manager.recognize("/test/file.pdf")
@@ -294,7 +267,7 @@ class TestOCRManagerRecognize:
         manager._default_name = "config-1"
         manager._fallback_name = ""
 
-        primary = FakeProvider("paddleocr")
+        primary = FakeProvider("textin")
         primary.recognize = AsyncMock(side_effect=RuntimeError("识别失败"))
         manager._providers = {"config-1": primary}
 
@@ -308,7 +281,7 @@ class TestOCRManagerRecognize:
         manager._default_name = "config-1"
         manager._fallback_name = "config-1"
 
-        primary = FakeProvider("paddleocr")
+        primary = FakeProvider("textin")
         primary.recognize = AsyncMock(side_effect=RuntimeError("识别失败"))
         manager._providers = {"config-1": primary}
 

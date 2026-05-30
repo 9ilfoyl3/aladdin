@@ -204,7 +204,7 @@ async def test_pipeline_ocr_triggered_on_empty_content(
     mock_ocr_manager = AsyncMock()
     mock_ocr_result = MagicMock()
     mock_ocr_result.full_text = "OCR识别出来的文档内容，这是一段足够长的文本用于验证。" * 20
-    mock_ocr_result.provider_name = "paddleocr"
+    mock_ocr_result.provider_name = "external_api"
     mock_ocr_manager.recognize = AsyncMock(return_value=mock_ocr_result)
 
     # Mock embed 返回
@@ -331,7 +331,7 @@ async def test_pipeline_ocr_provider_recorded_in_metadata(
     mock_ocr_manager = AsyncMock()
     mock_ocr_result = MagicMock()
     mock_ocr_result.full_text = "OCR识别出来的文档内容，这是一段足够长的文本用于验证。" * 20
-    mock_ocr_result.provider_name = "paddleocr"
+    mock_ocr_result.provider_name = "external_api"
     mock_ocr_manager.recognize = AsyncMock(return_value=mock_ocr_result)
 
     # Mock embed 返回
@@ -360,7 +360,7 @@ async def test_pipeline_ocr_provider_recorded_in_metadata(
             call_args = mock_chunk.call_args
             metadata = call_args[0][1]  # positional arg: (content, metadata)
             assert "ocr_provider" in metadata
-            assert metadata["ocr_provider"] == "paddleocr"
+            assert metadata["ocr_provider"] == "external_api"
 
 
 @pytest.mark.asyncio
