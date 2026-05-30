@@ -75,9 +75,13 @@ async def list_sessions() -> list[SessionItem]:
             .subquery()
         )
 
+        # 使用 inner join 仅返回至少有一条消息的会话：
+        # 消息总是「先存用户消息再存助手回复」，因此 message_count >= 1 即保证存在用户消息。
+        # 这样可过滤掉「已创建但因请求失败/中断未产生任何消息」的空会话，
+        # 避免点进空会话时渲染成新建对话页面。
         result = await session.execute(
             select(ChatSession, msg_count_subq.c.msg_count)
-            .outerjoin(msg_count_subq, ChatSession.id == msg_count_subq.c.session_id)
+            .join(msg_count_subq, ChatSession.id == msg_count_subq.c.session_id)
             .order_by(ChatSession.updated_at.desc())
         )
 
