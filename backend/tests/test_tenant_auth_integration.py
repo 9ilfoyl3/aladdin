@@ -42,7 +42,11 @@ def client():
             await c.run_sync(Base.metadata.create_all)
         await run_bootstrap(dbmod.async_session)
 
-    asyncio.get_event_loop().run_until_complete(_seed())
+    _loop = asyncio.new_event_loop()
+    try:
+        _loop.run_until_complete(_seed())
+    finally:
+        _loop.close()
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -60,7 +64,11 @@ def client():
     try:
         yield c
     finally:
-        asyncio.get_event_loop().run_until_complete(engine.dispose())
+        _disp = asyncio.new_event_loop()
+        try:
+            _disp.run_until_complete(engine.dispose())
+        finally:
+            _disp.close()
         try:
             os.remove(tmp.name)
         except OSError:
