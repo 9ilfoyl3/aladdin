@@ -5,9 +5,9 @@
 
 import uuid
 import logging
-import json
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -262,56 +262,84 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
         if saved and saved.api_key:
             body.api_key = saved.api_key
 
+    if not body.base_url:
+        return EmbedTestResponse(success=False, message="远程服务地址不能为空")
+
+    # 探活策略（与 Worker 启动健康检查共用 app.models.probe）：
+    # 1. 优先探 /health —— 自建服务（TEI/Infinity）即使推理队列打满也能秒回，不占队列。
+    # 2. /health 不存在（404/405）—— 云端网关（百炼）只有推理端点，降级为最小推理请求验证。
+    from app.models.probe import check_health
+
     try:
-        if not body.base_url:
-            return EmbedTestResponse(success=False, message="远程服务地址不能为空")
+        health = await check_health(body.base_url, timeout=5.0)
+    except httpx.ConnectError:
+        return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
+    except httpx.TimeoutException:
+        return EmbedTestResponse(success=False, message="连接超时，请检查地址和网络")
+    except Exception as e:
+        logger.warning("health 探测异常，降级为推理探活: %s", e)
+        health = None
 
-        # 先调 /health 快速验证服务在线（不进推理队列）
-        import httpx
-        health_url = body.base_url.rstrip("/").rsplit("/v1", 1)[0] + "/health"
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(health_url)
-                if resp.status_code != 200:
-                    return EmbedTestResponse(success=False, message=f"服务不可达 (HTTP {resp.status_code})")
-                # 兼容多种 health 响应格式：
-                # - embedding-rerank-server: {"status": "ready", ...}
-                # - Infinity: {"unix": 1748490407.766}（200 即健康）
-                # - TEI: {"status": "ok"} 或直接 200（响应体可能为空或纯文本）
-                try:
-                    data = resp.json()
-                except (json.JSONDecodeError, ValueError):
-                    data = {}
-                status = data.get("status") if isinstance(data, dict) else None
-                if status and status not in ("ready", "ok"):
-                    return EmbedTestResponse(success=False, message=f"服务未就绪: {status}")
-        except httpx.ConnectError:
-            return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
-        except httpx.TimeoutException:
-            return EmbedTestResponse(success=False, message="连接超时，请检查地址和网络")
+    if health is False:
+        return EmbedTestResponse(success=False, message="服务未就绪，请检查服务状态")
 
+    # 自建服务 /health 已通过：不发推理请求，避免占用推理队列
+    if health is True:
+        if body.config_type == "embedding" and body.sparse_enabled:
+            from app.models.embedding.remote import RemoteEmbedder
+            embedder = RemoteEmbedder(
+                base_url=body.base_url,
+                model=body.model_name,
+                api_key=body.api_key or "",
+                timeout=min(body.timeout, 15.0),
+                sparse_enabled=body.sparse_enabled,
+            )
+            sparse_ok = await embedder.check_sparse_support()
+            suffix = "；Sparse 端点可用 ✓" if sparse_ok else "；Sparse 端点不可用（将降级为 BM25 兜底）"
+            return EmbedTestResponse(success=True, message="连接成功，服务在线" + suffix)
+        return EmbedTestResponse(success=True, message="连接成功，服务在线")
+
+    # health is None：无 /health 路由（云端网关），发最小推理请求验证
+    try:
         if body.config_type == "embedding":
             from app.models.embedding.remote import RemoteEmbedder
             embedder = RemoteEmbedder(
                 base_url=body.base_url,
                 model=body.model_name,
                 api_key=body.api_key or "",
-                timeout=body.timeout,
+                timeout=min(body.timeout, 15.0),
                 sparse_enabled=body.sparse_enabled,
             )
-            # 只验证 health 通过即可，不发实际推理请求（避免阻塞推理队列）
-            msg = "连接成功，服务在线"
+            vectors = await embedder.embed(["连接测试"])
+            dim = len(vectors[0]) if vectors and vectors[0] else 0
+            msg = f"连接成功，向量维度 {dim}" if dim else "连接成功，服务在线"
             if body.sparse_enabled:
                 sparse_ok = await embedder.check_sparse_support()
-                if sparse_ok:
-                    msg += "；Sparse 端点可用 ✓"
-                else:
-                    msg += "；Sparse 端点不可用（将降级为 BM25 兜底）"
+                msg += "；Sparse 端点可用 ✓" if sparse_ok else "；Sparse 端点不可用（将降级为 BM25 兜底）"
             return EmbedTestResponse(success=True, message=msg)
         else:
-            # Rerank 同样只依赖 health 检查，不发实际推理请求
+            from app.models.rerank.remote import RemoteReranker
+            reranker = RemoteReranker(
+                base_url=body.base_url,
+                model=body.model_name,
+                api_key=body.api_key or "",
+                timeout=min(body.timeout, 15.0),
+            )
+            await reranker.rerank("连接测试", ["这是一段用于连通性测试的候选文本"], top_k=1)
             return EmbedTestResponse(success=True, message="连接成功，服务在线")
 
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        detail = e.response.text[:200] if e.response.text else ""
+        if code in (401, 403):
+            return EmbedTestResponse(success=False, message=f"鉴权失败 (HTTP {code})，请检查 API Key")
+        if code == 404:
+            return EmbedTestResponse(success=False, message=f"端点不存在 (HTTP 404)，请检查服务地址和接口格式。{detail}")
+        return EmbedTestResponse(success=False, message=f"服务返回错误 (HTTP {code})。{detail}")
+    except httpx.ConnectError:
+        return EmbedTestResponse(success=False, message="无法连接到服务，请检查地址")
+    except httpx.TimeoutException:
+        return EmbedTestResponse(success=False, message="连接超时，请检查地址和网络")
     except Exception as e:
         logger.exception("Embed/Rerank 测试失败")
         return EmbedTestResponse(success=False, message=f"测试失败: {str(e)}")
