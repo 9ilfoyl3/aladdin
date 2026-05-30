@@ -99,7 +99,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
 | Three-Way Hybrid Retrieval | Dense + Sparse + BM25, RRF fusion + Rerank + MMR + parent-chunk expansion |
 | Async Pipeline | Redis Stream task queue + independent Worker, API decoupled from processing, resumable |
-| Retrieval Testing | Dedicated page to compare direct / hybrid / agent modes |
+| Retrieval Testing | Dedicated retrieval-only page (no LLM generation) that visualizes the three-way recall / RRF / Rerank / MMR pipeline and multi-dimensional scores, built for tuning |
 
 **Integrations & Extensions**
 

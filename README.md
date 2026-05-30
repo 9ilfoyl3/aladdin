@@ -99,7 +99,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 | 结构感知切片 | 按文档逻辑结构切分，表格整块保护，父块（上下文）/ 子块（精检）映射 |
 | 三路混合检索 | Dense 语义 + Sparse 稀疏 + BM25 全文，RRF 融合 + Rerank + MMR + 父块扩展 |
 | 异步 Pipeline | Redis Stream 任务队列 + 独立 Worker，API 与处理解耦，断点续处理 |
-| 检索测试 | 独立检索测试页，对比 direct / hybrid / agent 三档模式效果 |
+| 检索测试 | 独立检索测试页（纯检索，不经过大模型），可视化三路召回 / RRF / Rerank / MMR 链路与多维分数，专为调参设计 |
 
 **集成与扩展**
 

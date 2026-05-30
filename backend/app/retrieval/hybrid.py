@@ -119,6 +119,126 @@ class HybridRetriever(BaseRetriever):
         logger.debug("HybridRetriever 在 kb=%s 中检索到 %d 条结果", kb_id, len(expanded))
         return expanded
 
+    async def search_with_trace(
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
+    ) -> tuple[list[RetrievalResult], dict]:
+        """带链路追踪的混合检索，供检索测试页展示各阶段中间信号
+
+        复用与生产 search() 相同的阶段方法（_rrf_fusion / _rerank /
+        _apply_composite_scoring / _apply_mmr / _expand_parent），仅在阶段之间
+        捕获中间结果，因此调参看到的链路与线上实际行为一致。
+
+        Returns:
+            (最终结果列表, trace dict)
+            trace dict 结构：
+            {
+              "routes": [{"name": "dense", "recalled": N}, ...],
+              "funnel": [{"stage": "RRF 融合", "count": N}, ...],
+              "per_result": {chunk_id: {"routes": [...], "route_ranks": {...},
+                                        "rrf_score": f, "rerank_score": f}},
+            }
+        """
+        recall_k = 128
+
+        # 1. 并行三路召回
+        tasks = [
+            self.vector_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs),
+            self.sparse_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs),
+        ]
+        has_bm25 = self.bm25_retriever is not None
+        if has_bm25:
+            tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
+
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+        def _safe(idx: int) -> list[RetrievalResult]:
+            if idx >= len(results_list):
+                return []
+            r = results_list[idx]
+            if isinstance(r, Exception):
+                logger.warning("[Trace] 第 %d 路检索异常: %s", idx, r)
+                return []
+            return r
+
+        dense_results = _safe(0)
+        sparse_results = _safe(1)
+        bm25_results = _safe(2) if has_bm25 else []
+
+        # 路由归属：chunk_id -> {route: rank}
+        per_result: dict[str, dict] = {}
+
+        def _record_route(items: list[RetrievalResult], route: str) -> None:
+            for rank, item in enumerate(items):
+                entry = per_result.setdefault(
+                    item.chunk_id, {"routes": [], "route_ranks": {}, "rrf_score": None, "rerank_score": None}
+                )
+                if route not in entry["routes"]:
+                    entry["routes"].append(route)
+                entry["route_ranks"][route] = rank
+
+        _record_route(dense_results, "dense")
+        _record_route(sparse_results, "sparse")
+        _record_route(bm25_results, "bm25")
+
+        # 2. RRF 融合
+        all_results = [dense_results, sparse_results]
+        if bm25_results:
+            all_results.append(bm25_results)
+        fused = self._rrf_fusion(all_results)
+
+        for item in fused:
+            entry = per_result.get(item.chunk_id)
+            if entry is not None:
+                entry["rrf_score"] = round(item.metadata.get("_rrf_score", 0.0), 6)
+
+        routes = [
+            {"name": "dense", "recalled": len(dense_results)},
+            {"name": "sparse", "recalled": len(sparse_results)},
+            {"name": "bm25", "recalled": len(bm25_results), "enabled": has_bm25},
+        ]
+        funnel: list[dict] = [
+            {"stage": "三路召回去重", "count": len(per_result)},
+            {"stage": "RRF 融合", "count": len(fused)},
+        ]
+
+        if not fused:
+            return [], {"routes": routes, "funnel": funnel, "per_result": per_result}
+
+        # 3. Rerank 精排
+        rerank_candidates = fused[:50]
+        funnel.append({"stage": "Rerank 候选", "count": len(rerank_candidates)})
+        try:
+            reranked = await self._rerank(query, rerank_candidates, top_k)
+        except Exception as e:
+            logger.warning("[Trace] Reranker 异常，跳过重排序: %s", e)
+            reranked = fused[:top_k]
+        funnel.append({"stage": "Rerank 输出", "count": len(reranked)})
+
+        # 捕获 rerank 分数（composite 之前）
+        for item in reranked:
+            entry = per_result.get(item.chunk_id)
+            if entry is not None:
+                entry["rerank_score"] = round(item.score, 6)
+
+        # 4. Composite 评分
+        composited = self._apply_composite_scoring(reranked)
+
+        # 5. MMR 去冗余
+        after_mmr = self._apply_mmr(composited)
+        removed = [c.chunk_id for c in composited if c.chunk_id not in {m.chunk_id for m in after_mmr}]
+        funnel.append({"stage": "MMR 去冗余", "count": len(after_mmr)})
+
+        # 6. 父块扩展
+        expanded = await self._expand_parent(after_mmr)
+
+        trace = {
+            "routes": routes,
+            "funnel": funnel,
+            "per_result": per_result,
+            "mmr_removed": removed,
+        }
+        return expanded, trace
+
     async def rerank_and_expand(
         self, query: str, results: list[RetrievalResult], top_k: int = 10
     ) -> list[RetrievalResult]:

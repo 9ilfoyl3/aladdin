@@ -573,3 +573,77 @@ async def test_mmr_integrated_in_search():
     assert "c3" in chunk_ids
     # c2 应该被过滤掉
     assert "c2" not in chunk_ids
+
+
+@pytest.mark.asyncio
+async def test_search_with_trace_route_attribution():
+    """测试 search_with_trace：路由归属、漏斗阶段、每条结果的多维分数"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="内容一", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+        RetrievalResult(chunk_id="c2", content="内容二", score=0.8, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="内容二", score=0.85, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+    ]
+    bm25_results = [
+        RetrievalResult(chunk_id="c3", content="内容三", score=0.7, doc_id="d2", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    bm25_retriever = FakeRetriever(bm25_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(
+        vector_retriever, sparse_retriever, reranker, db_factory, bm25_retriever=bm25_retriever
+    )
+
+    results, trace = await hybrid.search_with_trace("测试查询", kb_id="kb_001", top_k=5)
+
+    # 返回结果
+    assert len(results) > 0
+
+    # 三路召回统计
+    routes = {r["name"]: r for r in trace["routes"]}
+    assert routes["dense"]["recalled"] == 2
+    assert routes["sparse"]["recalled"] == 1
+    assert routes["bm25"]["recalled"] == 1
+    assert routes["bm25"]["enabled"] is True
+
+    # 漏斗阶段存在
+    funnel_stages = [f["stage"] for f in trace["funnel"]]
+    assert "RRF 融合" in funnel_stages
+
+    # 路由归属：c2 命中 dense + sparse 两路
+    per_result = trace["per_result"]
+    assert set(per_result["c2"]["routes"]) == {"dense", "sparse"}
+    assert per_result["c1"]["routes"] == ["dense"]
+    assert per_result["c3"]["routes"] == ["bm25"]
+
+    # RRF 分数已记录
+    assert per_result["c2"]["rrf_score"] is not None
+    # rerank 分数已记录（c2/c1/c3 都进入了 rerank 候选）
+    assert per_result["c1"]["rerank_score"] is not None
+
+
+@pytest.mark.asyncio
+async def test_search_with_trace_bm25_disabled():
+    """测试 search_with_trace：未配置 BM25 时标记 enabled=False"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="内容一", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+    sparse_results = []
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+
+    results, trace = await hybrid.search_with_trace("测试查询", kb_id="kb_001", top_k=5)
+
+    routes = {r["name"]: r for r in trace["routes"]}
+    assert routes["bm25"]["enabled"] is False
+    assert routes["bm25"]["recalled"] == 0

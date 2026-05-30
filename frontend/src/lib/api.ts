@@ -171,10 +171,37 @@ export const folderApi = {
     }),
 }
 
-// 检索测试接口
+// 检索测试接口（纯检索，不经过 LLM 生成）
+export interface RetrievalResultItem {
+  chunk_id: string
+  doc_id: string
+  filename: string
+  content: string
+  child_content: string
+  score: number
+  rrf_score: number | null
+  rerank_score: number | null
+  routes: string[]
+  metadata?: Record<string, unknown>
+}
+
+export interface RetrievalTrace {
+  routes: { name: string; recalled: number; enabled: boolean }[]
+  funnel: { stage: string; count: number }[]
+}
+
+export interface RetrievalTestResponse {
+  query: string
+  mode: string
+  total: number
+  elapsed_ms: number
+  results: RetrievalResultItem[]
+  trace: RetrievalTrace | null
+}
+
 export const retrievalApi = {
   test: (data: { query: string; knowledge_base_id: string; mode?: string; top_k?: number }) =>
-    request<unknown>('/retrieval/test', {
+    request<RetrievalTestResponse>('/retrieval/test', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
