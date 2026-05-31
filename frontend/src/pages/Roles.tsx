@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Pencil } from 'lucide-react'
 import { adminApi, type RoleItem, type PermissionDictItem } from '@/lib/api'
 import { validateRoleName } from '@/lib/validation'
+import { roleLabel } from '@/lib/labels'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,7 +14,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { toast } from 'sonner'
 
-const TYPE_LABEL: Record<string, string> = { api: '功能权限 (api)', menu: '菜单 (menu)', btn: '按钮 (btn)' }
+const TYPE_LABEL: Record<string, string> = { api: '功能权限', menu: '菜单可见', btn: '按钮可见' }
+const TYPE_HINT: Record<string, string> = {
+  api: '允许执行的后端能力',
+  menu: '左侧导航中可见的页面',
+  btn: '页面内可见的操作按钮',
+}
 const TYPE_ORDER = ['api', 'menu', 'btn']
 
 // 角色管理页面（租户级，role:manage）：自定义角色 CRUD + 三类权限点分配。
@@ -79,6 +85,20 @@ function Roles() {
     setDraft((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]))
   }
 
+  // 权限集合未变化则不触发更新（避免无意义写操作与审计噪声）
+  function savePermissions() {
+    if (!editRole) return
+    const before = [...editRole.permission_codes].sort()
+    const after = [...draft].sort()
+    const unchanged = before.length === after.length && before.every((v, i) => v === after[i])
+    if (unchanged) {
+      toast.info('权限未变化')
+      closeEditor()
+      return
+    }
+    updateMutation.mutate()
+  }
+
   async function handleDelete(role: RoleItem) {
     const ok = await confirm({
       title: '删除角色',
@@ -123,7 +143,7 @@ function Roles() {
               {roles.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell className="font-medium">
-                    {r.name}
+                    {roleLabel(r.name)}
                     {r.is_builtin && <Badge variant="outline" className="ml-2 text-xs">内置</Badge>}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{r.permission_codes.length}</TableCell>
@@ -155,11 +175,12 @@ function Roles() {
         <DialogContent className="max-w-2xl max-h-[85vh] overflow-auto">
           <DialogHeader>
             <DialogTitle>
-              {isCreate ? '创建角色' : `编辑角色 · ${editRole?.name}`}
+              {isCreate ? '创建角色' : `编辑角色 · ${roleLabel(editRole?.name || '')}`}
               {!isCreate && editRole?.is_builtin && <Badge variant="outline" className="ml-2 text-xs">内置</Badge>}
             </DialogTitle>
             <DialogDescription>
-              {isCreate ? '设置角色名并勾选权限点。' : '勾选/取消权限点。内置角色亦可调整其权限点集合。'}
+              {isCreate ? '设置角色名并勾选该角色拥有的权限。' : '勾选/取消权限。内置角色亦可调整其权限集合。'}
+              权限分三类：功能（可执行的操作）、菜单（可见页面）、按钮（页面内可见动作）。
             </DialogDescription>
           </DialogHeader>
 
@@ -172,16 +193,18 @@ function Roles() {
             )}
             {TYPE_ORDER.filter((t) => grouped[t]?.length).map((type) => (
               <div key={type}>
-                <p className="text-sm font-medium mb-2">{TYPE_LABEL[type] || type}</p>
+                <p className="text-sm font-medium mb-0.5">{TYPE_LABEL[type] || type}</p>
+                <p className="text-xs text-muted-foreground mb-2">{TYPE_HINT[type] || ''}</p>
                 <div className="flex flex-wrap gap-2">
                   {grouped[type].map((p) => (
                     <button
                       type="button"
                       key={p.code}
                       onClick={() => togglePerm(p.code)}
-                      className={`px-2.5 py-1 rounded-md text-xs border font-mono transition-colors ${draft.includes(p.code) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
+                      title={p.code}
+                      className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${draft.includes(p.code) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
                     >
-                      {p.code}
+                      {p.label || p.code}
                     </button>
                   ))}
                 </div>
@@ -194,7 +217,7 @@ function Roles() {
             {isCreate ? (
               <Button onClick={() => { const e = validateRoleName(name); if (e) return toast.error(e); createMutation.mutate() }} disabled={createMutation.isPending || !name.trim()}>创建</Button>
             ) : (
-              <Button onClick={() => updateMutation.mutate()} disabled={updateMutation.isPending}>保存</Button>
+              <Button onClick={savePermissions} disabled={updateMutation.isPending}>保存</Button>
             )}
           </DialogFooter>
         </DialogContent>

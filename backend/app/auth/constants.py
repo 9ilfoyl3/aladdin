@@ -185,6 +185,66 @@ TENANT_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
 )
 
 
+# ============================================================
+# 中文展示标签（前端权限/角色界面用，单一真值来源）
+# 后端权限点 code 是稳定的英文契约；这里集中提供给前端展示的中文名，避免前端散落硬编码。
+# ============================================================
+
+# 权限点 code -> 中文名（对标具体页面/动作/能力）
+PERMISSION_LABELS: dict[str, str] = {
+    # —— 功能（api）：后端能做什么 ——
+    PermissionEnum.KB_CREATE.value: "创建知识库",
+    PermissionEnum.KB_READ.value: "查看知识库",
+    PermissionEnum.KB_WRITE.value: "编辑知识库（文档增删改）",
+    PermissionEnum.KB_WRITE_PUBLIC.value: "写入组织公共库",
+    PermissionEnum.KB_MANAGE_VISIBILITY.value: "管理知识库可见性",
+    PermissionEnum.KB_SHARE.value: "共享知识库给他人",
+    PermissionEnum.QA_INVOKE.value: "使用智能问答",
+    PermissionEnum.RECALL_INVOKE.value: "使用检索召回",
+    PermissionEnum.APIKEY_MANAGE.value: "管理租户 API Key",
+    PermissionEnum.APIKEY_SELF.value: "管理本人 API Key",
+    PermissionEnum.USER_MANAGE.value: "用户管理",
+    PermissionEnum.ROLE_MANAGE.value: "角色管理",
+    PermissionEnum.CONFIG_MANAGE.value: "系统与模型配置",
+    PermissionEnum.TENANT_MANAGE.value: "租户管理（平台级）",
+    # —— 菜单（menu）：左侧能看到哪些页面 ——
+    PermissionEnum.MENU_KNOWLEDGE.value: "菜单：知识库",
+    PermissionEnum.MENU_CHAT.value: "菜单：智能问答",
+    PermissionEnum.MENU_RETRIEVAL.value: "菜单：检索测试",
+    PermissionEnum.MENU_SETTINGS.value: "菜单：系统配置",
+    PermissionEnum.MENU_ADMIN.value: "菜单：管理后台",
+    PermissionEnum.MENU_AUDIT.value: "菜单：审计日志",
+    # —— 按钮（btn）：页面内能看到哪些操作按钮 ——
+    PermissionEnum.BTN_KB_DELETE.value: "按钮：删除知识库",
+    PermissionEnum.BTN_KB_SHARE.value: "按钮：共享知识库",
+    PermissionEnum.BTN_DOC_UPLOAD.value: "按钮：上传文档",
+    PermissionEnum.BTN_APIKEY_CREATE.value: "按钮：创建 API Key",
+}
+
+# 权限点类型 -> 中文名 + 释义
+PERMISSION_TYPE_LABELS: dict[str, str] = {
+    PermissionTypeEnum.API.value: "功能权限",
+    PermissionTypeEnum.MENU.value: "菜单可见",
+    PermissionTypeEnum.BTN.value: "按钮可见",
+}
+
+# 内置角色名 -> 中文名（自定义角色无映射时前端原样展示其名）
+ROLE_LABELS: dict[str, str] = {
+    BuiltinRoleEnum.ADMIN.value: "管理员",
+    BuiltinRoleEnum.USER.value: "普通用户",
+}
+
+
+def permission_label(code: str) -> str:
+    """权限点中文名；未登记的回退为 code 本身。"""
+    return PERMISSION_LABELS.get(code, code)
+
+
+def role_label(name: str) -> str:
+    """角色中文名；自定义角色回退为原名。"""
+    return ROLE_LABELS.get(name, name)
+
+
 class AuditActionEnum(str, Enum):
     """审计动作（仅元数据，绝不记录业务内容正文）。"""
 

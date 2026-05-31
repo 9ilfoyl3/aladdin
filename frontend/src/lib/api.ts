@@ -608,6 +608,8 @@ export interface RoleItem {
 export interface PermissionDictItem {
   code: string
   type: string // api | menu | btn
+  label: string // 中文展示名
+  type_label: string // 类型中文名
 }
 
 export const adminApi = {

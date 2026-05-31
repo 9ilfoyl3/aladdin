@@ -29,8 +29,10 @@ from app.auth.constants import (
     AuditActionEnum,
     BuiltinRoleEnum,
     PermissionEnum,
+    PERMISSION_TYPE_LABELS,
     PLATFORM_PERMISSIONS,
     TenantTypeEnum,
+    permission_label,
 )
 from app.auth.identity import IdentityContext, OperationLevelEnum
 from app.auth.password import hash_password
@@ -553,6 +555,9 @@ async def transfer_knowledge_bases(
         raise CrossTenantError()
     _require_same_tenant(identity, source.tenant_id)
     await _assert_tenant_active(db, source.tenant_id)
+    # 转移=资产交接，要求源用户先停用：避免在用账号被悄悄搬空，且明确交接语义
+    if source.is_active:
+        raise PermissionDeniedError("请先停用该用户，再转移其名下知识库")
 
     target = await db.get(User, body.target_user_id)
     if target is None:
@@ -613,6 +618,9 @@ class RoleResponse(BaseModel):
 class PermissionDictItem(BaseModel):
     code: str
     type: str
+    # 中文展示名（对标具体页面/动作/能力）+ 类型中文名，供前端直观呈现
+    label: str
+    type_label: str
 
 
 @router.get("/permissions", response_model=list[PermissionDictItem])
@@ -622,11 +630,18 @@ async def list_permission_dict(
     ),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """权限点字典（全部 code + type），供角色编辑界面挑选。租户无关、全局一致。"""
+    """权限点字典（全部 code + type + 中文名），供角色编辑界面挑选。租户无关、全局一致。"""
     rows = (await db.execute(
         select(Permission.code, Permission.type).order_by(Permission.type, Permission.code)
     )).all()
-    return [PermissionDictItem(code=c, type=t) for c, t in rows]
+    return [
+        PermissionDictItem(
+            code=c, type=t,
+            label=permission_label(c),
+            type_label=PERMISSION_TYPE_LABELS.get(t, t),
+        )
+        for c, t in rows
+    ]
 
 
 @router.post("/roles", response_model=RoleResponse, status_code=201)

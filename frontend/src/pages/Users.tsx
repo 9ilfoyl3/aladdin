@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, Shield, ArrowRightLeft, Search, Eye } from 'lucide-react'
 import { adminApi, type AdminUserItem, type AdminUserCreateResult } from '@/lib/api'
 import { validateUsername } from '@/lib/validation'
+import { roleLabel } from '@/lib/labels'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
 import { Button } from '@/components/ui/button'
@@ -29,6 +30,7 @@ function Users() {
   const [copied, setCopied] = useState(false)
   const [rolesUser, setRolesUser] = useState<AdminUserItem | null>(null)
   const [rolesDraft, setRolesDraft] = useState<string[]>([])
+  const [rolesInitial, setRolesInitial] = useState<string[]>([])
   const [transferUser, setTransferUser] = useState<AdminUserItem | null>(null)
   const [transferTarget, setTransferTarget] = useState<string>('')
   const [search, setSearch] = useState('')
@@ -89,6 +91,20 @@ function Users() {
     onError: (e: Error) => toast.error(e.message || '更新失败'),
   })
 
+  // 角色未变化则不触发请求（避免无意义写操作与审计噪声）
+  function saveRoles() {
+    if (!rolesUser) return
+    const before = [...rolesInitial].sort()
+    const after = [...rolesDraft].sort()
+    const unchanged = before.length === after.length && before.every((v, i) => v === after[i])
+    if (unchanged) {
+      toast.info('角色未变化')
+      setRolesUser(null)
+      return
+    }
+    setRolesMutation.mutate()
+  }
+
   const transferMutation = useMutation({
     mutationFn: () => adminApi.transferKnowledgeBases(transferUser!.id, transferTarget),
     onSuccess: (data) => {
@@ -122,6 +138,7 @@ function Users() {
   async function openRoles(u: AdminUserItem) {
     const res = await adminApi.getUserRoles(u.id)
     setRolesDraft(res.role_ids)
+    setRolesInitial(res.role_ids)
     setRolesUser(u)
   }
 
@@ -196,7 +213,7 @@ function Users() {
                     <div className="flex flex-wrap gap-1">
                       {(u.role_names && u.role_names.length > 0)
                         ? u.role_names.map((rn) => (
-                            <Badge key={rn} variant="outline" className="text-xs">{rn}</Badge>
+                            <Badge key={rn} variant="outline" className="text-xs">{roleLabel(rn)}</Badge>
                           ))
                         : <span className="text-muted-foreground text-xs">—</span>}
                     </div>
@@ -222,7 +239,14 @@ function Users() {
                         </Button>
                       )}
                       {!isSelf && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => { setTransferUser(u); setTransferTarget('') }} title="转移知识库">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => { setTransferUser(u); setTransferTarget('') }}
+                          disabled={u.is_active}
+                          title={u.is_active ? '请先停用该用户再转移知识库' : '转移知识库'}
+                        >
                           <ArrowRightLeft className="h-4 w-4" />
                         </Button>
                       )}
@@ -279,7 +303,7 @@ function Users() {
                       onClick={() => toggleCreateRole(r.name)}
                       className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${selectedRoles.includes(r.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
                     >
-                      {r.name}
+                      {roleLabel(r.name)}
                     </button>
                   ))}
                 </div>
@@ -331,13 +355,13 @@ function Users() {
                 onClick={() => toggleRole(r.id)}
                 className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${rolesDraft.includes(r.id) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
               >
-                {r.name}{r.is_builtin ? ' (内置)' : ''}
+                {roleLabel(r.name)}{r.is_builtin ? ' (内置)' : ''}
               </button>
             ))}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRolesUser(null)}>取消</Button>
-            <Button onClick={() => setRolesMutation.mutate()} disabled={setRolesMutation.isPending}>保存</Button>
+            <Button onClick={saveRoles} disabled={setRolesMutation.isPending}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -348,7 +372,7 @@ function Users() {
           <DialogHeader>
             <DialogTitle>转移知识库 · {transferUser?.username}</DialogTitle>
             <DialogDescription>
-              把该用户名下的全部知识库归属转移给同租户内另一启用用户（仅改归属，不搬数据，即时生效）。常用于停用用户前的资产交接。
+              把该用户名下的全部知识库归属转移给同租户内另一启用用户（仅改归属，不搬数据，即时生效）。用户须先停用，转移即资产交接的最后一步。
             </DialogDescription>
           </DialogHeader>
           <div className="mt-2">

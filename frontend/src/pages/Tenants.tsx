@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound } from 'lucide-react'
 import { adminApi, type TenantItem, type TenantCreateResult, type AdminUserItem } from '@/lib/api'
 import { validateTenantName, validateUsername } from '@/lib/validation'
+import { roleLabel } from '@/lib/labels'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -293,6 +294,7 @@ function Tenants() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>用户名</TableHead>
+                    <TableHead>角色</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>改密标记</TableHead>
                     <TableHead className="text-right">兜底操作</TableHead>
@@ -302,6 +304,15 @@ function Tenants() {
                   {drillUsers.map((u) => (
                     <TableRow key={u.id}>
                       <TableCell className="font-medium">{u.username}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {(u.role_names && u.role_names.length > 0)
+                            ? u.role_names.map((rn) => (
+                                <Badge key={rn} variant="outline" className="text-xs">{roleLabel(rn)}</Badge>
+                              ))
+                            : <span className="text-muted-foreground text-xs">—</span>}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <Badge variant="outline" className={u.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
                           {u.is_active ? '启用' : '停用'}
