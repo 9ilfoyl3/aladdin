@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
+import { roleLabel } from '@/lib/labels'
 
 // 导航项配置。menuPerm 为驱动可见性的菜单权限点（超管恒可见）；
 // 配置/管理类页面归 config:manage。null 表示任意登录用户可见。
@@ -51,7 +52,7 @@ function Layout() {
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const confirm = useConfirm()
-  const { hasPermission, isSuperAdmin, logout } = useAuth()
+  const { hasPermission, isSuperAdmin, logout, profile } = useAuth()
 
   // 菜单可见性：
   // - Super_Admin（平台级）：A方案——仅保留"租户管理 + 审计日志"，
@@ -74,7 +75,7 @@ function Layout() {
   // （租户管理 / 审计日志）与账号自助页（改密）。直接命中知识库/对话等页面时，
   // 重定向回"租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
   // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
-  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password'])
+  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password', '/profile'])
   if (isSuperAdmin && !SUPER_ADMIN_ALLOWED_PATHS.has(location.pathname)) {
     return <Navigate to="/tenants" replace />
   }
@@ -209,8 +210,30 @@ function Layout() {
             <div className="flex-1" />
           )}
 
-          {/* 底部：账号操作（改密 / 登出） */}
+          {/* 底部：当前登录者 + 账号操作（改密 / 登出） */}
           <div className="border-t border-sidebar-border px-3 py-2 space-y-1">
+            {profile && (
+              <button
+                onClick={() => navigate('/profile')}
+                className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-sidebar-accent transition-colors cursor-pointer text-left"
+                title="个人资料"
+              >
+                {profile.avatar ? (
+                  <img src={profile.avatar} alt="" className="h-8 w-8 rounded-full object-cover shrink-0" />
+                ) : (
+                  <div className="h-8 w-8 rounded-full bg-sidebar-primary/15 flex items-center justify-center shrink-0 text-sm font-medium text-sidebar-foreground">
+                    {profile.username.slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-sidebar-foreground">{profile.username}</div>
+                  <div className="truncate text-xs text-sidebar-foreground/60">
+                    {(profile.role_names && profile.role_names.length > 0 ? profile.role_names.map(roleLabel).join('、') : '用户')}
+                    {profile.tenant_name ? ` · ${profile.tenant_name}` : ''}
+                  </div>
+                </div>
+              </button>
+            )}
             <button
               onClick={() => navigate('/change-password')}
               className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"

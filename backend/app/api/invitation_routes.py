@@ -269,6 +269,44 @@ async def revoke_invitation(
     await db.commit()
 
 
+class InvitationCreatedUser(BaseModel):
+    id: str
+    username: str
+    tenant_id: str | None
+    is_active: bool
+    created_at: str
+
+
+@router.get("/admin/invitations/{invitation_id}/users", response_model=list[InvitationCreatedUser])
+async def list_invitation_created_users(
+    invitation_id: str,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """列出"通过该邀请链接创建"的用户（按创建时间倒序）。
+
+    租管仅能查本租户邀请；超管可查任意邀请。越权 -> 404（存在性非泄露）。
+    """
+    inv = await db.get(Invitation, invitation_id)
+    if inv is None:
+        raise CrossTenantError()
+    if not identity.is_super_admin and inv.tenant_id != identity.tenant_id:
+        raise CrossTenantError()
+    rows = (await db.execute(
+        select(User).where(User.created_via_invitation_id == invitation_id)
+        .order_by(User.created_at.desc())
+    )).scalars().all()
+    return [
+        InvitationCreatedUser(
+            id=u.id, username=u.username, tenant_id=u.tenant_id, is_active=u.is_active,
+            created_at=u.created_at.isoformat() if u.created_at else "",
+        )
+        for u in rows
+    ]
+
+
 # ============================================================
 # 接受（免登录）
 # ============================================================
@@ -356,6 +394,7 @@ async def _accept_create_tenant(
         id=user_id, tenant_id=tenant_id, username=username,
         password_hash=await hash_password(body.password),
         is_active=True, must_change_password=False,  # 自助设置的口令，无需再强制改
+        created_via_invitation_id=inv.id,
     ))
     db.add(UserRole(user_id=user_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
     return {"detail": "租户与管理员已创建", "tenant_id": tenant_id, "user_id": user_id}
@@ -380,6 +419,7 @@ async def _accept_create_user(
         id=user_id, tenant_id=inv.tenant_id, username=username,
         password_hash=await hash_password(body.password),
         is_active=True, must_change_password=False,
+        created_via_invitation_id=inv.id,
     ))
     # 预设角色（限本租户内存在的角色名）
     for name in (inv.role_names or [BuiltinRoleEnum.USER.value]):

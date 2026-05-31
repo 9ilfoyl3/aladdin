@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { authApi, type PermissionItem } from './api'
+import { authApi, type PermissionItem, type MeProfile } from './api'
 import {
   clearToken,
   loadToken,
@@ -27,6 +27,7 @@ interface AuthState {
   mustChangePassword: boolean
   permissions: Set<string>
   userId: string | null
+  profile: MeProfile | null
   ready: boolean // 是否已完成初始权限加载
 }
 
@@ -34,6 +35,7 @@ interface AuthContextValue extends AuthState {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
   refreshPermissions: () => Promise<void>
+  refreshProfile: () => Promise<void>
   clearMustChangePassword: () => void
   hasPermission: (code: string) => boolean
 }
@@ -46,6 +48,7 @@ const initialState: AuthState = {
   mustChangePassword: false,
   permissions: new Set(),
   userId: null,
+  profile: null,
   ready: false,
 }
 
@@ -68,17 +71,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     try {
       const me = await authApi.myPermissions()
+      // 资料拉取失败不致命（如刚登录权限受限）；尽力而为
+      let profile: MeProfile | null = null
+      try {
+        profile = await authApi.myProfile()
+      } catch {
+        profile = null
+      }
       setState((prev) => ({
         ...prev,
         isAuthenticated: true,
         isSuperAdmin: me.is_super_admin,
         permissions: new Set(me.permissions.map((p: PermissionItem) => p.code)),
         userId: me.user_id || null,
+        profile,
         ready: true,
       }))
     } catch {
       // 拉取失败（如 token 失效）：交由 401 处理；这里兜底为未登录
       setState({ ...initialState, ready: true })
+    }
+  }, [])
+
+  const refreshProfile = useCallback(async () => {
+    if (!loadToken()) return
+    try {
+      const profile = await authApi.myProfile()
+      setState((prev) => ({ ...prev, profile }))
+    } catch {
+      /* 忽略：资料拉取失败不影响主流程 */
     }
   }, [])
 
@@ -127,10 +148,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       logout,
       refreshPermissions,
+      refreshProfile,
       clearMustChangePassword,
       hasPermission,
     }),
-    [state, login, logout, refreshPermissions, clearMustChangePassword, hasPermission],
+    [state, login, logout, refreshPermissions, refreshProfile, clearMustChangePassword, hasPermission],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

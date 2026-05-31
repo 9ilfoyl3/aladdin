@@ -38,6 +38,8 @@ from app.auth.identity import IdentityContext, OperationLevelEnum
 from app.auth.password import hash_password
 from app.auth.permission_resolver import resolve_role_ids
 from app.auth.validators import (
+    validate_avatar,
+    validate_description,
     validate_password,
     validate_role_name,
     validate_tenant_name,
@@ -73,6 +75,8 @@ class TenantCreate(BaseModel):
     name: str = Field(..., min_length=1)
     admin_username: str = Field(..., min_length=1, description="初始租户管理员用户名")
     admin_password: str | None = Field(default=None, description="不填则生成临时口令")
+    description: str | None = Field(default=None, description="租户简介（企业组织介绍）")
+    avatar: str | None = Field(default=None, description="租户头像 data URL（≤200KB）")
 
 
 class TenantResponse(BaseModel):
@@ -80,6 +84,8 @@ class TenantResponse(BaseModel):
     name: str
     tenant_type: str
     is_active: bool
+    description: str | None = None
+    avatar: str | None = None
 
 
 class TenantCreateResponse(TenantResponse):
@@ -101,6 +107,8 @@ async def create_tenant(
     admin_username = validate_username(body.admin_username)
     if body.admin_password is not None:
         validate_password(body.admin_password)
+    description = validate_description(body.description)
+    avatar = validate_avatar(body.avatar)
     # 用户名全局唯一：建租户前先校验初始管理员用户名未被占用（避免落库触发 500）
     dup = await db.scalar(
         select(func.count(User.id)).where(User.username == admin_username)
@@ -108,7 +116,8 @@ async def create_tenant(
     if dup:
         raise PermissionDeniedError("用户名已存在")
     tenant_id = str(uuid.uuid4())
-    db.add(Tenant(id=tenant_id, name=name, tenant_type=TenantTypeEnum.BUSINESS.value, is_active=True))
+    db.add(Tenant(id=tenant_id, name=name, tenant_type=TenantTypeEnum.BUSINESS.value,
+                  is_active=True, description=description, avatar=avatar))
     await db.flush()
 
     # 预置该租户内置角色
@@ -143,6 +152,7 @@ async def create_tenant(
         id=tenant_id, name=name, tenant_type=TenantTypeEnum.BUSINESS.value,
         is_active=True, admin_username=admin_username,
         admin_temp_password=None if body.admin_password else temp_pwd,
+        description=description, avatar=avatar,
     )
 
 
@@ -154,11 +164,52 @@ async def list_tenants(
     db: AsyncSession = Depends(get_db_session),
 ):
     rows = (await db.execute(select(Tenant).order_by(Tenant.name))).scalars().all()
-    return [TenantResponse(id=t.id, name=t.name, tenant_type=t.tenant_type, is_active=t.is_active) for t in rows]
+    return [
+        TenantResponse(id=t.id, name=t.name, tenant_type=t.tenant_type, is_active=t.is_active,
+                       description=t.description, avatar=t.avatar)
+        for t in rows
+    ]
 
 
 class TenantToggle(BaseModel):
     is_active: bool
+
+
+class TenantProfileUpdate(BaseModel):
+    """超管维护租户（企业组织）的展示资料：名称/简介/头像。均可单独提交（None=不改，""=清除简介/头像）。"""
+    name: str | None = Field(default=None)
+    description: str | None = Field(default=None)
+    avatar: str | None = Field(default=None)
+
+
+@router.put("/tenants/{tenant_id}/profile", response_model=TenantResponse)
+async def update_tenant_profile(
+    tenant_id: str,
+    body: TenantProfileUpdate,
+    request: Request,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """平台级：超管维护租户（企业组织）的名称/简介/头像。租户内成员不可改这些。"""
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise CrossTenantError()
+    if body.name is not None:
+        tenant.name = validate_tenant_name(body.name)
+    if body.description is not None:
+        tenant.description = validate_description(body.description)
+    if body.avatar is not None:
+        tenant.avatar = validate_avatar(body.avatar)
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.TENANT_UPDATE_PROFILE,
+        target_type="tenant", target_id=tenant.id, target_name=tenant.name,
+        request=request,
+    )
+    await db.commit()
+    return TenantResponse(id=tenant.id, name=tenant.name, tenant_type=tenant.tenant_type,
+                          is_active=tenant.is_active, description=tenant.description, avatar=tenant.avatar)
 
 
 @router.put("/tenants/{tenant_id}/status", response_model=TenantResponse)
@@ -182,7 +233,8 @@ async def set_tenant_status(
         detail={"is_active": body.is_active}, request=request,
     )
     await db.commit()
-    return TenantResponse(id=tenant.id, name=tenant.name, tenant_type=tenant.tenant_type, is_active=tenant.is_active)
+    return TenantResponse(id=tenant.id, name=tenant.name, tenant_type=tenant.tenant_type,
+                          is_active=tenant.is_active, description=tenant.description, avatar=tenant.avatar)
 
 
 # ============================================================

@@ -75,3 +75,39 @@ def validate_role_name(name: str) -> str:
     if len(n) < 1 or len(n) > 32:
         raise ValidationInputError("角色名长度需为 1–32 个字符")
     return n
+
+
+# 简介：可空，最长 500 字符
+DESCRIPTION_MAX = 500
+# 头像：data URL 字符串，限制大小与类型（避免大图撑爆库与响应体）
+_AVATAR_MAX_CHARS = 300_000  # ~200KB 二进制 base64 后约 270KB，留余量
+_AVATAR_DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$")
+
+
+def validate_description(description: str | None) -> str | None:
+    """校验简介（可空，去首尾空白，≤500）。非法 -> 400。空串归一化为 None。"""
+    if description is None:
+        return None
+    d = description.strip()
+    if d == "":
+        return None
+    if len(d) > DESCRIPTION_MAX:
+        raise ValidationInputError(f"简介长度不得超过 {DESCRIPTION_MAX} 个字符")
+    return d
+
+
+def validate_avatar(avatar: str | None) -> str | None:
+    """校验头像 data URL（可空）。仅接受 png/jpeg/webp 的 base64 data URL 且体积受限。
+
+    空串归一化为 None（表示清除头像）。非法 -> 400。
+    """
+    if avatar is None:
+        return None
+    a = avatar.strip()
+    if a == "":
+        return None
+    if len(a) > _AVATAR_MAX_CHARS:
+        raise ValidationInputError("头像图片过大，请控制在 200KB 以内")
+    if not _AVATAR_DATA_URL_RE.match(a):
+        raise ValidationInputError("头像格式不合法，仅支持 png/jpeg/webp 图片")
+    return a

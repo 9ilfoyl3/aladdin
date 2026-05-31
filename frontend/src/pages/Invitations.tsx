@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Mail, Trash2, Copy, Check } from 'lucide-react'
+import { Plus, Mail, Trash2, Copy, Check, Users as UsersIcon } from 'lucide-react'
 import { adminApi, type InvitationItem, type InvitationCreateResult } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
@@ -33,12 +33,20 @@ function Invitations() {
   const [copied, setCopied] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [page, setPage] = useState(1)
+  // 查看"通过该邀请创建的用户"
+  const [usersInv, setUsersInv] = useState<InvitationItem | null>(null)
 
   const { data: invPage, isLoading } = useQuery({
     queryKey: ['invitations', page],
     queryFn: () => adminApi.listInvitations({ page, page_size: 20 }),
   })
   const invitations = invPage?.items ?? []
+
+  const { data: createdUsers = [] } = useQuery({
+    queryKey: ['invitation-users', usersInv?.id],
+    queryFn: () => adminApi.invitationUsers(usersInv!.id),
+    enabled: !!usersInv,
+  })
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -85,9 +93,9 @@ function Invitations() {
 
   async function handleRevoke(inv: InvitationItem) {
     const ok = await confirm({
-      title: '吊销邀请',
-      description: <>吊销后该链接立即失效，已通过它注册的账号不受影响。</>,
-      confirmText: '吊销',
+      title: '停用邀请',
+      description: <>停用后该链接立即失效且不可重新启用（需要时请重新生成一条新链接）。已通过它注册的账号不受影响。</>,
+      confirmText: '停用',
     })
     if (ok) revokeMutation.mutate(inv.id)
   }
@@ -152,10 +160,13 @@ function Invitations() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setUsersInv(inv)} title="查看通过此链接创建的用户">
+                        <UsersIcon className="h-4 w-4" />
+                      </Button>
                       <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => copyRowLink(inv)} disabled={!inv.is_active || !inv.token} title="复制链接">
                         {copiedId === inv.id ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                       </Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleRevoke(inv)} disabled={!inv.is_active} title="吊销">
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleRevoke(inv)} disabled={!inv.is_active} title="停用（停用后请重新生成新链接）">
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </div>
@@ -236,6 +247,47 @@ function Invitations() {
               </form>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 查看通过此邀请创建的用户 */}
+      <Dialog open={!!usersInv} onOpenChange={(o) => { if (!o) setUsersInv(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>通过此链接创建的用户</DialogTitle>
+            <DialogDescription>按创建时间倒序。仅统计经该邀请链接自助注册的账号。</DialogDescription>
+          </DialogHeader>
+          {createdUsers.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center">暂无用户通过此链接创建</p>
+          ) : (
+            <div className="border rounded-lg max-h-[50vh] overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>用户名</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>创建时间</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {createdUsers.map((u) => (
+                    <TableRow key={u.id}>
+                      <TableCell className="font-medium">{u.username}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={u.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
+                          {u.is_active ? '启用' : '停用'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{fmt(u.created_at)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUsersInv(null)}>关闭</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

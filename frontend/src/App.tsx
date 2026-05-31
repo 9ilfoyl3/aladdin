@@ -14,6 +14,7 @@ import AgentConfig from './pages/AgentConfig'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import ChangePassword from './pages/ChangePassword'
+import Profile from './pages/Profile'
 import Tenants from './pages/Tenants'
 import Users from './pages/Users'
 import Roles from './pages/Roles'
@@ -63,6 +64,7 @@ function App() {
         }
       >
         <Route index element={<DefaultLanding />} />
+        <Route path="profile" element={<Profile />} />
         <Route path="knowledge-bases" element={<KnowledgeBase />} />
         <Route path="knowledge-bases/:id" element={<Documents />} />
         <Route path="chat" element={<Chat />} />

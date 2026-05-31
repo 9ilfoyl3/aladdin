@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound } from 'lucide-react'
+import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound, Pencil, Upload } from 'lucide-react'
 import { adminApi, type TenantItem, type TenantCreateResult, type AdminUserItem } from '@/lib/api'
 import { validateTenantName, validateUsername } from '@/lib/validation'
 import { roleLabel } from '@/lib/labels'
@@ -31,6 +31,11 @@ function Tenants() {
   // 下钻内：超管为该租户新增一名租户管理员（admin 角色）
   const [showAddAdmin, setShowAddAdmin] = useState(false)
   const [newAdminName, setNewAdminName] = useState('')
+  // 编辑租户资料（名称/简介/头像，仅超管）
+  const [editTenant, setEditTenant] = useState<TenantItem | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const [editAvatar, setEditAvatar] = useState<string | null>(null)
 
   const { data: tenants = [], isLoading } = useQuery({
     queryKey: ['admin-tenants'],
@@ -85,6 +90,43 @@ function Tenants() {
     },
     onError: (e: Error) => toast.error(e.message || '新增管理员失败'),
   })
+
+  const profileMutation = useMutation({
+    mutationFn: () => adminApi.updateTenantProfile(editTenant!.id, {
+      name: editName.trim(),
+      description: editDesc,
+      avatar: editAvatar,
+    }),
+    onSuccess: () => {
+      toast.success('租户资料已更新')
+      setEditTenant(null)
+      queryClient.invalidateQueries({ queryKey: ['admin-tenants'] })
+    },
+    onError: (e: Error) => toast.error(e.message || '更新失败'),
+  })
+
+  function openEditProfile(t: TenantItem) {
+    setEditTenant(t)
+    setEditName(t.name)
+    setEditDesc(t.description ?? '')
+    setEditAvatar(t.avatar ?? null)
+  }
+
+  function onPickTenantAvatar(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      toast.error('仅支持 png / jpeg / webp 图片')
+      return
+    }
+    if (file.size > 200 * 1024) {
+      toast.error('图片过大，请控制在 200KB 以内')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => setEditAvatar(typeof reader.result === 'string' ? reader.result : null)
+    reader.readAsDataURL(file)
+  }
 
   async function toggleStatus(t: TenantItem) {
     const ok = await confirm({
@@ -175,7 +217,21 @@ function Tenants() {
             <TableBody>
               {tenants.map((t) => (
                 <TableRow key={t.id}>
-                  <TableCell className="font-medium">{t.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <div className="flex items-center gap-2">
+                      {t.avatar ? (
+                        <img src={t.avatar} alt="" className="h-8 w-8 rounded-md object-cover border shrink-0" />
+                      ) : (
+                        <div className="h-8 w-8 rounded-md bg-muted flex items-center justify-center shrink-0">
+                          <Building2 className="h-4 w-4 text-muted-foreground/60" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="truncate">{t.name}</div>
+                        {t.description && <div className="truncate text-xs text-muted-foreground font-normal max-w-[280px]">{t.description}</div>}
+                      </div>
+                    </div>
+                  </TableCell>
                   <TableCell className="text-muted-foreground text-sm">{t.tenant_type}</TableCell>
                   <TableCell>
                     <Badge variant="outline" className={t.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
@@ -184,6 +240,16 @@ function Tenants() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => openEditProfile(t)}
+                        disabled={t.tenant_type === 'external'}
+                        title="编辑资料（名称/简介/头像）"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -343,6 +409,57 @@ function Tenants() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDrillTenant(null)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 编辑租户资料（名称/简介/头像，仅超管） */}
+      <Dialog open={!!editTenant} onOpenChange={(o) => { if (!o) setEditTenant(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑租户资料</DialogTitle>
+            <DialogDescription>租户是企业组织，其名称、简介与头像由平台超级管理员维护。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            <div className="flex items-center gap-4">
+              {editAvatar ? (
+                <img src={editAvatar} alt="" className="h-16 w-16 rounded-md object-cover border" />
+              ) : (
+                <div className="h-16 w-16 rounded-md bg-muted flex items-center justify-center">
+                  <Building2 className="h-8 w-8 text-muted-foreground/50" />
+                </div>
+              )}
+              <div>
+                <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-sm cursor-pointer hover:bg-muted">
+                  <Upload className="h-4 w-4" />
+                  上传头像
+                  <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={onPickTenantAvatar} />
+                </label>
+                {editAvatar && (
+                  <Button type="button" variant="ghost" size="sm" className="ml-2 text-destructive" onClick={() => setEditAvatar(null)}>移除</Button>
+                )}
+                <p className="text-xs text-muted-foreground mt-1">png / jpeg / webp，≤200KB</p>
+              </div>
+            </div>
+            <div>
+              <Label>租户名称</Label>
+              <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="mt-1" />
+            </div>
+            <div>
+              <Label>简介</Label>
+              <textarea
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+                rows={3}
+                maxLength={500}
+                placeholder="企业/组织简介（≤500 字）"
+                className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTenant(null)}>取消</Button>
+            <Button onClick={() => { const e = validateTenantName(editName); if (e) return toast.error(e); profileMutation.mutate() }} disabled={profileMutation.isPending || !editName.trim()}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

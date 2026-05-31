@@ -35,7 +35,13 @@ from app.auth.identity import IdentityContext, OperationLevelEnum
 from app.auth.jwt_auth import issue_token
 from app.auth.password import hash_password, verify_password
 from app.auth.permission_resolver import resolve_permissions_with_types
-from app.auth.validators import validate_password, validate_tenant_name, validate_username
+from app.auth.validators import (
+    validate_avatar,
+    validate_description,
+    validate_password,
+    validate_tenant_name,
+    validate_username,
+)
 from app.config import get_settings
 from app.schema.db import Permission, Role, RolePermission, Tenant, User, UserRole
 
@@ -74,6 +80,25 @@ class MePermissionsResponse(BaseModel):
     tenant_id: str | None
     is_super_admin: bool
     permissions: list[PermissionItem]
+
+
+class MeProfileResponse(BaseModel):
+    """当前登录者的个人资料 + 身份展示信息（供左下角与个人页）。"""
+    user_id: str
+    username: str
+    tenant_id: str | None
+    tenant_name: str | None
+    is_super_admin: bool
+    # 身份展示名：超管=超级管理员；否则取其在本租户的角色（admin=管理员/user=普通用户/自定义名）
+    role_names: list[str]
+    description: str | None
+    avatar: str | None
+
+
+class UpdateProfileRequest(BaseModel):
+    """本人自助维护：简介与头像。两者均可单独提交（None=不改，""=清除）。"""
+    description: str | None = Field(default=None)
+    avatar: str | None = Field(default=None)
 
 
 class RegisterRequest(BaseModel):
@@ -185,6 +210,76 @@ async def me_permissions(
         tenant_id=identity.tenant_id,
         is_super_admin=identity.is_super_admin,
         permissions=[PermissionItem(code=i["code"], type=i["type"]) for i in items],
+    )
+
+
+@router.get("/me/profile", response_model=MeProfileResponse)
+async def get_my_profile(
+    identity: IdentityContext = Depends(authorization_guard(allow_must_change_password=True)),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """当前登录者的资料与身份（供左下角展示与个人资料页）。"""
+    return await _build_my_profile(db, identity)
+
+
+@router.put("/me/profile", response_model=MeProfileResponse)
+async def update_my_profile(
+    body: UpdateProfileRequest,
+    request: Request,
+    identity: IdentityContext = Depends(authorization_guard()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """本人自助维护简介与头像。description/avatar 传 None 表示不改，传空串表示清除。"""
+    if identity.user_id is None:
+        raise PermissionDeniedError("当前身份不支持维护个人资料")
+    user = await db.get(User, identity.user_id)
+    if user is None:
+        raise UnauthenticatedError()
+    if body.description is not None:
+        user.description = validate_description(body.description)
+    if body.avatar is not None:
+        user.avatar = validate_avatar(body.avatar)
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.USER_UPDATE_PROFILE,
+        target_type="user", target_id=user.id, target_name=user.username,
+        request=request,
+    )
+    await db.commit()
+    return await _build_my_profile(db, identity)
+
+
+async def _build_my_profile(db: AsyncSession, identity: IdentityContext) -> MeProfileResponse:
+    """组装当前登录者资料：超管无业务租户、身份展示为"超级管理员"。"""
+    if identity.is_super_admin:
+        uname = identity.username or "superadmin"
+        desc = None
+        avatar = None
+        if identity.user_id:
+            u = await db.get(User, identity.user_id)
+            if u is not None:
+                uname = u.username
+                desc = u.description
+                avatar = u.avatar
+        return MeProfileResponse(
+            user_id=identity.user_id or "", username=uname, tenant_id=None,
+            tenant_name=None, is_super_admin=True, role_names=["超级管理员"],
+            description=desc, avatar=avatar,
+        )
+
+    user = await db.get(User, identity.user_id) if identity.user_id else None
+    if user is None:
+        raise UnauthenticatedError()
+    tenant_name = None
+    if user.tenant_id:
+        tenant = await db.get(Tenant, user.tenant_id)
+        tenant_name = tenant.name if tenant else None
+    role_names = (await db.execute(
+        select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id)
+    )).scalars().all()
+    return MeProfileResponse(
+        user_id=user.id, username=user.username, tenant_id=user.tenant_id,
+        tenant_name=tenant_name, is_super_admin=False, role_names=list(role_names),
+        description=user.description, avatar=user.avatar,
     )
 
 

@@ -247,6 +247,10 @@ class Tenant(Base):
     # default(保留) | external(外部用户内置租户) | business(普通业务租户)
     tenant_type: Mapped[str] = mapped_column(String, default="business", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # 租户=企业组织：简介与头像（logo）由超管维护（创建/编辑）。
+    # 头像以 data URL 字符串存库（≤200KB，png/jpg/webp），不依赖文件系统。
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    avatar: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -266,6 +270,13 @@ class User(Base):
     # 初始/重置临时口令明文：仅在用户首次改密前保留，供管理员再次查看/复制；
     # 用户改密后由 change_password 置空。安全权衡：明文窗口仅限"首登改密前"。
     temp_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # 个人简介与头像：本人自助维护（介绍可改、头像各自维护自己的）。
+    # 头像以 data URL 字符串存库（≤200KB，png/jpg/webp）。
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    avatar: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 经哪条邀请链接创建（自助接受邀请建号时写入）；管理员手动建号为 NULL。
+    # 供"查询某邀请链接创建了哪些用户"。
+    created_via_invitation_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
     # 停用/重置口令时自增，使旧 JWT 失效（token 内 token_version 不匹配即拒绝）
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -259,6 +259,8 @@ class AuditActionEnum(str, Enum):
     USER_RESET_PASSWORD = "user.reset_password"
     USER_SET_ROLES = "user.set_roles"
     USER_TRANSFER_KB = "user.transfer_kb"
+    USER_UPDATE_PROFILE = "user.update_profile"
+    TENANT_UPDATE_PROFILE = "tenant.update_profile"
     ROLE_CREATE = "role.create"
     ROLE_SET_PERMISSIONS = "role.set_permissions"
     ROLE_DELETE = "role.delete"

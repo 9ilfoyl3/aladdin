@@ -507,6 +507,17 @@ export interface MePermissionsResponse {
   permissions: PermissionItem[]
 }
 
+export interface MeProfile {
+  user_id: string
+  username: string
+  tenant_id: string | null
+  tenant_name: string | null
+  is_super_admin: boolean
+  role_names: string[]
+  description: string | null
+  avatar: string | null
+}
+
 export const authApi = {
   login: (username: string, password: string) =>
     request<LoginResponse>('/auth/login', {
@@ -519,6 +530,13 @@ export const authApi = {
       body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
     }),
   myPermissions: () => request<MePermissionsResponse>('/auth/me/permissions'),
+  // 当前登录者资料（左下角展示 + 个人资料页）
+  myProfile: () => request<MeProfile>('/auth/me/profile'),
+  updateMyProfile: (data: { description?: string | null; avatar?: string | null }) =>
+    request<MeProfile>('/auth/me/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
   // 是否开放租户自助注册（公开端点，决定登录页是否显示"注册"入口）
   registrationMode: () => request<{ self_serve: boolean }>('/auth/registration-mode'),
   // 租户自助注册：开一个独立租户，注册人即该租户管理员
@@ -539,6 +557,8 @@ export interface TenantItem {
   name: string
   tenant_type: string
   is_active: boolean
+  description: string | null
+  avatar: string | null
 }
 
 export interface TenantCreateResult extends TenantItem {
@@ -615,15 +635,20 @@ export interface PermissionDictItem {
 export const adminApi = {
   // —— 租户（Super_Admin / tenant:manage）——
   listTenants: () => request<TenantItem[]>('/admin/tenants'),
-  createTenant: (name: string, adminUsername: string, adminPassword?: string) =>
+  createTenant: (name: string, adminUsername: string, adminPassword?: string, description?: string | null, avatar?: string | null) =>
     request<TenantCreateResult>('/admin/tenants', {
       method: 'POST',
-      body: JSON.stringify({ name, admin_username: adminUsername, admin_password: adminPassword ?? null }),
+      body: JSON.stringify({ name, admin_username: adminUsername, admin_password: adminPassword ?? null, description: description ?? null, avatar: avatar ?? null }),
     }),
   setTenantStatus: (tenantId: string, isActive: boolean) =>
     request<TenantItem>(`/admin/tenants/${tenantId}/status`, {
       method: 'PUT',
       body: JSON.stringify({ is_active: isActive }),
+    }),
+  updateTenantProfile: (tenantId: string, data: { name?: string; description?: string | null; avatar?: string | null }) =>
+    request<TenantItem>(`/admin/tenants/${tenantId}/profile`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
     }),
   listTenantUsers: (tenantId: string) =>
     request<AdminUserItem[]>(`/admin/tenants/${tenantId}/users`),
@@ -706,6 +731,11 @@ export const adminApi = {
     }),
   revokeInvitation: (id: string) =>
     request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
+  // 通过某邀请链接创建的用户（按时间倒序）
+  invitationUsers: (id: string) =>
+    request<{ id: string; username: string; tenant_id: string | null; is_active: boolean; created_at: string }[]>(
+      `/admin/invitations/${id}/users`
+    ),
 }
 
 // 免登录邀请接受（无 token 注入；接受页用）
