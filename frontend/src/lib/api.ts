@@ -744,7 +744,7 @@ export const adminApi = {
 export const inviteApi = {
   info: (token: string) =>
     request<{ scope: string; tenant_name: string | null; valid: boolean }>(`/invitations/${token}`),
-  accept: (token: string, data: { username: string; password: string; tenant_name?: string }) =>
+  accept: (token: string, data: { username: string; password: string; tenant_name?: string; description?: string | null; avatar?: string | null }) =>
     request<{ detail: string; tenant_id?: string; user_id?: string }>(`/invitations/${token}/accept`, {
       method: 'POST',
       body: JSON.stringify(data),

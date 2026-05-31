@@ -8,6 +8,7 @@ import { validatePassword, validateUsername, validateTenantName } from '@/lib/va
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
+import { AvatarPicker } from '@/components/AvatarPicker'
 import { Label } from '@/components/ui/label'
 import { Card } from '@/components/ui/card'
 
@@ -20,6 +21,8 @@ export default function InviteAccept() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [tenantName, setTenantName] = useState('')
+  const [description, setDescription] = useState('')
+  const [avatar, setAvatar] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   const { data: info, isLoading, isError } = useQuery({
@@ -47,6 +50,8 @@ export default function InviteAccept() {
         username,
         password,
         tenant_name: isCreateTenant ? tenantName : undefined,
+        description,
+        avatar,
       })
       toast.success('账号已创建，请登录')
       navigate('/login', { replace: true })
@@ -105,6 +110,22 @@ export default function InviteAccept() {
           <div className="space-y-1.5">
             <Label htmlFor="confirm">确认密码</Label>
             <PasswordInput id="confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>头像（可选）</Label>
+            <AvatarPicker value={avatar} onChange={setAvatar} shape="circle" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="intro">简介（可选）</Label>
+            <textarea
+              id="intro"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              maxLength={500}
+              placeholder="介绍一下自己（≤500 字）"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
           </div>
           <Button type="submit" className="w-full" disabled={submitting}>
             {submitting ? '提交中…' : '创建并完成'}

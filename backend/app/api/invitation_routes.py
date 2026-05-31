@@ -38,7 +38,13 @@ from app.auth.constants import (
 from app.auth.identity import IdentityContext, IdentitySourceEnum, OperationLevelEnum
 from app.auth.jwt_auth import issue_token
 from app.auth.password import hash_password
-from app.auth.validators import validate_password, validate_tenant_name, validate_username
+from app.auth.validators import (
+    validate_avatar,
+    validate_description,
+    validate_password,
+    validate_tenant_name,
+    validate_username,
+)
 from app.schema.api import PageResult
 from app.schema.db import Invitation, Permission, Role, Tenant, User, UserRole
 
@@ -111,6 +117,9 @@ class AcceptInvitationRequest(BaseModel):
     password: str = Field(..., min_length=1)
     # create_tenant 时必填：新租户名
     tenant_name: str | None = Field(default=None)
+    # 可选：注册人个人头像与简介（建租户邀请时归属新管理员，建用户邀请时归属新用户）
+    description: str | None = Field(default=None)
+    avatar: str | None = Field(default=None)
 
 
 # ============================================================
@@ -344,11 +353,13 @@ async def accept_invitation(
     inv = await _load_valid_invitation(db, token)
     username = validate_username(body.username)
     validate_password(body.password)
+    description = validate_description(body.description)
+    avatar = validate_avatar(body.avatar)
 
     if inv.scope == InvitationScopeEnum.CREATE_TENANT.value:
-        result = await _accept_create_tenant(db, inv, username, body)
+        result = await _accept_create_tenant(db, inv, username, body, description, avatar)
     else:
-        result = await _accept_create_user(db, inv, username, body)
+        result = await _accept_create_user(db, inv, username, body, description, avatar)
 
     # 计数并在用满时失效
     inv.used_count = inv.used_count + 1
@@ -367,7 +378,8 @@ async def accept_invitation(
 
 
 async def _accept_create_tenant(
-    db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest
+    db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest,
+    description: str | None, avatar: str | None,
 ) -> dict:
     """建租户 + 预置角色 + 该用户成为租户管理员（admin 角色）。"""
     if not body.tenant_name:
@@ -395,13 +407,15 @@ async def _accept_create_tenant(
         password_hash=await hash_password(body.password),
         is_active=True, must_change_password=False,  # 自助设置的口令，无需再强制改
         created_via_invitation_id=inv.id,
+        description=description, avatar=avatar,
     ))
     db.add(UserRole(user_id=user_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
     return {"detail": "租户与管理员已创建", "tenant_id": tenant_id, "user_id": user_id}
 
 
 async def _accept_create_user(
-    db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest
+    db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest,
+    description: str | None, avatar: str | None,
 ) -> dict:
     """在邀请绑定的租户内建普通用户（按预设角色）。"""
     tenant = await db.get(Tenant, inv.tenant_id)
@@ -420,6 +434,7 @@ async def _accept_create_user(
         password_hash=await hash_password(body.password),
         is_active=True, must_change_password=False,
         created_via_invitation_id=inv.id,
+        description=description, avatar=avatar,
     ))
     # 预设角色（限本租户内存在的角色名）
     for name in (inv.role_names or [BuiltinRoleEnum.USER.value]):
