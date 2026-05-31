@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import generate_api_key, get_key_prefix, hash_key
 from app.api.deps import authorization_guard, get_db_session
 from app.api.errors import CrossTenantError, PermissionDeniedError
+from app.auth.audit import add_audit
 from app.auth.constants import (
+    AuditActionEnum,
     EXTERNAL_USER_TENANT_ID,
     ApiKeyTypeEnum,
     KbVisibilityEnum,
@@ -112,7 +114,8 @@ async def _validate_scope_same_tenant(
 
 @router.post("", response_model=CreateApiKeyResponse)
 async def create_tenant_key(
-    request: CreateTenantKeyRequest = CreateTenantKeyRequest(),
+    request: Request,
+    body: CreateTenantKeyRequest = CreateTenantKeyRequest(),
     identity: IdentityContext = Depends(
         authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
     ),
@@ -121,7 +124,7 @@ async def create_tenant_key(
     """创建租户级 API Key（机器凭据），盖 tenant_id + 记录 scope，仅返回一次明文。"""
     if identity.tenant_id is None:
         raise PermissionDeniedError("请在具体租户上下文内创建 API Key")
-    await _validate_scope_same_tenant(db, request.scope, identity.tenant_id)
+    await _validate_scope_same_tenant(db, body.scope, identity.tenant_id)
 
     raw_key = generate_api_key()
     key_id = str(uuid.uuid4())
@@ -129,19 +132,24 @@ async def create_tenant_key(
         id=key_id,
         key_hash=hash_key(raw_key),
         prefix=get_key_prefix(raw_key),
-        name=request.name,
+        name=body.name,
         is_active=True,
         call_count=0,
         tenant_id=identity.tenant_id,
         key_type=ApiKeyTypeEnum.TENANT_LEVEL.value,
         authorized_scope={
-            "all_public_kbs": request.scope.all_public_kbs,
-            "explicit_kb_ids": request.scope.explicit_kb_ids,
+            "all_public_kbs": body.scope.all_public_kbs,
+            "explicit_kb_ids": body.scope.explicit_kb_ids,
         },
     )
     db.add(api_key)
     await db.flush()
     await db.refresh(api_key)
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.APIKEY_CREATE,
+        target_type="api_key", target_id=key_id, target_name=body.name,
+        detail={"key_type": "tenant_level", "prefix": api_key.prefix}, request=request,
+    )
     await db.commit()
     return CreateApiKeyResponse(
         id=key_id, key=raw_key, prefix=api_key.prefix, name=api_key.name,
@@ -153,6 +161,7 @@ async def create_tenant_key(
 async def update_key_scope(
     key_id: str,
     body: UpdateScopeRequest,
+    request: Request,
     identity: IdentityContext = Depends(
         authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
     ),
@@ -169,6 +178,12 @@ async def update_key_scope(
         "all_public_kbs": body.scope.all_public_kbs,
         "explicit_kb_ids": body.scope.explicit_kb_ids,
     }
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.APIKEY_UPDATE_SCOPE,
+        target_type="api_key", target_id=key_id, target_name=api_key.name,
+        detail={"all_public_kbs": body.scope.all_public_kbs,
+                "explicit_kb_ids": body.scope.explicit_kb_ids}, request=request,
+    )
     await db.commit()
     return {"detail": "授权范围已更新", "id": key_id}
 
@@ -219,7 +234,8 @@ async def create_user_key(
 
 @router.post("/external-agent", response_model=CreateApiKeyResponse)
 async def create_proxy_key(
-    request: CreateProxyKeyRequest = CreateProxyKeyRequest(),
+    request: Request,
+    body: CreateProxyKeyRequest = CreateProxyKeyRequest(),
     identity: IdentityContext = Depends(
         authorization_guard(op_level=OperationLevelEnum.PLATFORM, allow_api_key=False)
     ),
@@ -232,7 +248,7 @@ async def create_proxy_key(
         id=key_id,
         key_hash=hash_key(raw_key),
         prefix=get_key_prefix(raw_key),
-        name=request.name,
+        name=body.name,
         is_active=True,
         call_count=0,
         tenant_id=EXTERNAL_USER_TENANT_ID,
@@ -242,6 +258,11 @@ async def create_proxy_key(
     db.add(api_key)
     await db.flush()
     await db.refresh(api_key)
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.PROXY_KEY_CREATE,
+        target_type="api_key", target_id=key_id, target_name=body.name,
+        detail={"key_type": "external_agent", "prefix": api_key.prefix}, request=request,
+    )
     await db.commit()
     return CreateApiKeyResponse(
         id=key_id, key=raw_key, prefix=api_key.prefix, name=api_key.name,
@@ -306,6 +327,7 @@ async def list_my_keys(
 @router.delete("/{key_id}")
 async def revoke_api_key(
     key_id: str,
+    request: Request,
     identity: IdentityContext = Depends(
         authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
     ),
@@ -318,11 +340,17 @@ async def revoke_api_key(
     api_key = await db.get(ApiKey, key_id)
     if api_key is None:
         raise CrossTenantError()
-    if api_key.key_type == ApiKeyTypeEnum.EXTERNAL_AGENT.value:
+    is_proxy = api_key.key_type == ApiKeyTypeEnum.EXTERNAL_AGENT.value
+    if is_proxy:
         if not identity.is_super_admin:
             raise PermissionDeniedError("仅平台超级管理员可撤销代理 Key")
     elif not identity.is_super_admin and api_key.tenant_id != identity.tenant_id:
         raise CrossTenantError()
     api_key.is_active = False
+    add_audit(
+        db, actor=identity,
+        action=AuditActionEnum.PROXY_KEY_REVOKE if is_proxy else AuditActionEnum.APIKEY_REVOKE,
+        target_type="api_key", target_id=key_id, target_name=api_key.name, request=request,
+    )
     await db.commit()
     return {"message": "API Key 已撤销", "id": key_id}

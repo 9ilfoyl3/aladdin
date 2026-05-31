@@ -4,14 +4,16 @@ import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import authorization_guard, get_db_session
 from app.api.errors import CrossTenantError, InvalidGranteeTypeError, PermissionDeniedError
+from app.auth.audit import add_audit
 from app.auth.constants import (
+    AuditActionEnum,
     GRANTEE_TYPES_ENABLED,
     GrantPermissionEnum,
     KbVisibilityEnum,
@@ -267,6 +269,7 @@ async def delete_knowledge_base(
 async def share_knowledge_base(
     kb_id: str,
     body: ShareRequest,
+    request: Request,
     identity: IdentityContext = Depends(
         authorization_guard(required_permissions={PermissionEnum.KB_SHARE.value})
     ),
@@ -306,6 +309,12 @@ async def share_knowledge_base(
             grantee_type=body.grantee_type, grantee_id=body.grantee_id,
             permission=body.permission, granted_by=identity.acting_subject_id or "",
         ))
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.KB_SHARE,
+        target_type="kb", target_id=kb_id, target_name=kb.name,
+        detail={"grantee_type": body.grantee_type, "grantee_id": body.grantee_id,
+                "permission": body.permission}, request=request,
+    )
     await db.commit()
     return {"detail": "已共享", "kb_id": kb_id, "grantee_type": body.grantee_type,
             "grantee_id": body.grantee_id, "permission": body.permission}
@@ -314,6 +323,7 @@ async def share_knowledge_base(
 @router.delete("/{kb_id}/share/{grantee_type}/{grantee_id}", status_code=204)
 async def revoke_share(
     kb_id: str, grantee_type: str, grantee_id: str,
+    request: Request,
     identity: IdentityContext = Depends(
         authorization_guard(required_permissions={PermissionEnum.KB_SHARE.value})
     ),
@@ -336,6 +346,11 @@ async def revoke_share(
             KnowledgeBaseGrant.grantee_id == grantee_id,
         )
     )
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.KB_REVOKE_SHARE,
+        target_type="kb", target_id=kb_id, target_name=kb.name,
+        detail={"grantee_type": grantee_type, "grantee_id": grantee_id}, request=request,
+    )
     await db.commit()
 
 
@@ -343,6 +358,7 @@ async def revoke_share(
 async def set_visibility(
     kb_id: str,
     body: VisibilityRequest,
+    request: Request,
     identity: IdentityContext = Depends(authorization_guard()),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -366,6 +382,11 @@ async def set_visibility(
 
     kb.visibility = body.visibility  # 仅改可见性，owner/tenant 不变
     kb.updated_at = datetime.utcnow()
+    add_audit(
+        db, actor=identity, action=AuditActionEnum.KB_SET_VISIBILITY,
+        target_type="kb", target_id=kb.id, target_name=kb.name,
+        detail={"visibility": body.visibility}, request=request,
+    )
     await db.commit()
     await db.refresh(kb)
     return _to_resp(kb)

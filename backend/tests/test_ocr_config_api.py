@@ -2,6 +2,11 @@
 
 测试 GET /api/ocr-configs 和 POST /api/ocr-configs 端点。
 使用 httpx AsyncClient + 内存 SQLite 数据库。
+
+注：tenant-auth 后 /api/ 端点经 Authorization_Guard 默认鉴权。本测试聚焦 OCR 配置
+**功能正确性**，与鉴权无关，故在 client fixture 内**进程隔离地**把 Guard 旁路
+（design C1 灰度），用 dependency_overrides 注入匿名 platform 身份，测试结束即还原，
+不污染其它测试模块。鉴权本身正确性由 tenant-auth 测试套件覆盖。
 """
 
 import sys
@@ -39,12 +44,25 @@ async def client():
 
     from app.main import app
     from app.storage.database import get_db
+    import app.api.deps as deps
+    from app.config import Settings
+
+    # 进程隔离地旁路鉴权：仅在本 fixture 生命周期内，让 Guard 读到 auth_enabled=False
+    # 的 settings（design C1）。结束即还原，不影响其它测试模块（避免全局 env 污染）。
+    _orig_get_settings = deps.get_settings
+
+    def _bypass_settings() -> Settings:
+        s = _orig_get_settings()
+        return s.model_copy(update={"auth_enabled": False})
+
+    deps.get_settings = _bypass_settings
     app.dependency_overrides[get_db] = _override_get_db
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
+    deps.get_settings = _orig_get_settings
     app.dependency_overrides.clear()
     async with _test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)

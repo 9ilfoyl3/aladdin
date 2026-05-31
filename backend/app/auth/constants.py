@@ -49,6 +49,7 @@ class PermissionEnum(str, Enum):
     MENU_RETRIEVAL = "menu:retrieval"
     MENU_SETTINGS = "menu:settings"
     MENU_ADMIN = "menu:admin"
+    MENU_AUDIT = "menu:audit"          # 审计日志菜单（租管/超管）
 
     # —— 前端按钮（btn） ——
     BTN_KB_DELETE = "btn:kb_delete"
@@ -173,3 +174,58 @@ EXTERNAL_USER_TENANT_NAME = "外部用户租户"
 HEADER_EXTERNAL_USER_ID = "X-External-User-Id"
 # 请求头：目标租户入口（归属校验）
 HEADER_TENANT_ID = "X-Tenant-ID"
+
+
+# Tenant_Admin（内置 admin 角色）权限点 = 全部权限点 − 平台级权限点。
+# 租户管理员"除超管职权外都有"：能管本租户用户/角色/Key/可见性/审计，
+# 但绝不持有 tenant:manage（平台级）——故前端"租户管理"菜单对其自动隐藏，
+# 后端平台端点也因 op_level=platform 将其拒绝。
+TENANT_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
+    {p.value for p in PermissionEnum} - PLATFORM_PERMISSIONS
+)
+
+
+class AuditActionEnum(str, Enum):
+    """审计动作（仅元数据，绝不记录业务内容正文）。"""
+
+    # —— 平台级（Super_Admin） ——
+    TENANT_CREATE = "tenant.create"
+    TENANT_SET_STATUS = "tenant.set_status"
+    PROXY_KEY_CREATE = "apikey.proxy_create"
+    PROXY_KEY_REVOKE = "apikey.proxy_revoke"
+    # —— 租户级（Tenant_Admin） ——
+    USER_CREATE = "user.create"
+    USER_SET_STATUS = "user.set_status"
+    USER_RESET_PASSWORD = "user.reset_password"
+    USER_SET_ROLES = "user.set_roles"
+    USER_TRANSFER_KB = "user.transfer_kb"
+    ROLE_CREATE = "role.create"
+    ROLE_SET_PERMISSIONS = "role.set_permissions"
+    ROLE_DELETE = "role.delete"
+    APIKEY_CREATE = "apikey.create"
+    APIKEY_REVOKE = "apikey.revoke"
+    APIKEY_UPDATE_SCOPE = "apikey.update_scope"
+    KB_SET_VISIBILITY = "kb.set_visibility"
+    KB_SHARE = "kb.share"
+    KB_REVOKE_SHARE = "kb.revoke_share"
+    INVITATION_CREATE = "invitation.create"
+    INVITATION_REVOKE = "invitation.revoke"
+    INVITATION_ACCEPT = "invitation.accept"
+    # —— 认证 ——
+    LOGIN_SUCCESS = "auth.login_success"
+    LOGIN_FAIL = "auth.login_fail"
+    CHANGE_PASSWORD = "auth.change_password"
+
+
+class AuditResultEnum(str, Enum):
+    """审计结果。"""
+
+    SUCCESS = "success"
+    FAIL = "fail"
+
+
+class InvitationScopeEnum(str, Enum):
+    """邀请链接用途。"""
+
+    CREATE_TENANT = "create_tenant"  # 仅 Super_Admin 可发：被邀请人建租户 + 自身为租管
+    CREATE_USER = "create_user"      # user:manage 可发：在签发者租户内建普通用户

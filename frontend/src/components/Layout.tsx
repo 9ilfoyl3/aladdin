@@ -15,6 +15,11 @@ import {
   PanelLeft,
   LogOut,
   KeyRound,
+  Building2,
+  Users as UsersIcon,
+  ShieldCheck,
+  Mail,
+  ScrollText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
@@ -31,6 +36,11 @@ const navItems = [
   { to: '/embed-config', label: 'Embedding', icon: Layers, menuPerm: 'config:manage' },
   { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, menuPerm: 'config:manage' },
   { to: '/api-keys', label: 'API Key', icon: Key, menuPerm: 'apikey:manage' },
+  { to: '/tenants', label: '租户管理', icon: Building2, menuPerm: 'tenant:manage' },
+  { to: '/users', label: '用户管理', icon: UsersIcon, menuPerm: 'user:manage' },
+  { to: '/roles', label: '角色管理', icon: ShieldCheck, menuPerm: 'role:manage' },
+  { to: '/invitations', label: '邀请链接', icon: Mail, menuPerm: 'user:manage' },
+  { to: '/audit-logs', label: '审计日志', icon: ScrollText, menuPerm: 'menu:audit' },
   { to: '/settings', label: '系统配置', icon: Settings, menuPerm: 'config:manage' },
 ] as const
 

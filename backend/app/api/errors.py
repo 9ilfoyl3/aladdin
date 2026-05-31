@@ -30,6 +30,7 @@ class ErrorCodeEnum(str, Enum):
     MUST_CHANGE_PASSWORD = "must_change_password"
     INVALID_GRANTEE_TYPE = "invalid_grantee_type"
     MISSING_EXTERNAL_USER_ID = "missing_external_user_id"
+    VALIDATION_ERROR = "validation_error"
     BAD_REQUEST = "bad_request"
 
 
@@ -102,6 +103,14 @@ class MissingExternalUserIdError(AppError):
     code = ErrorCodeEnum.MISSING_EXTERNAL_USER_ID
     http_status = 400
     default_detail = "缺少 X-External-User-Id 请求头"
+
+
+class ValidationInputError(AppError):
+    """输入校验失败（用户名/口令/名称不合规）-> 400。"""
+
+    code = ErrorCodeEnum.VALIDATION_ERROR
+    http_status = 400
+    default_detail = "输入不合法"
 
 
 def register_exception_handlers(app: FastAPI) -> None:

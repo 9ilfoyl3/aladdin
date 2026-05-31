@@ -13,6 +13,12 @@ import OcrServices from './pages/OcrServices'
 import AgentConfig from './pages/AgentConfig'
 import Login from './pages/Login'
 import ChangePassword from './pages/ChangePassword'
+import Tenants from './pages/Tenants'
+import Users from './pages/Users'
+import Roles from './pages/Roles'
+import AuditLogs from './pages/AuditLogs'
+import Invitations from './pages/Invitations'
+import InviteAccept from './pages/InviteAccept'
 import { useAuth } from './lib/auth-context'
 
 // 路由守卫：未登录跳登录页；强制改密时跳改密页（仅放行改密页本身）。
@@ -38,6 +44,7 @@ function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/change-password" element={<ChangePassword />} />
+      <Route path="/invite/:token" element={<InviteAccept />} />
       <Route
         path="/"
         element={
@@ -56,6 +63,11 @@ function App() {
         <Route path="embed-config" element={<EmbedConfig />} />
         <Route path="ocr-services" element={<OcrServices />} />
         <Route path="api-keys" element={<ApiKeys />} />
+        <Route path="tenants" element={<Tenants />} />
+        <Route path="users" element={<Users />} />
+        <Route path="roles" element={<Roles />} />
+        <Route path="invitations" element={<Invitations />} />
+        <Route path="audit-logs" element={<AuditLogs />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

@@ -113,12 +113,15 @@ async def _ensure_role(
 
 
 async def _admin_permission_codes() -> set[str]:
-    """admin 角色权限点 = 全部权限点（含管理/平台/内容/菜单/按钮）。
+    """admin（Tenant_Admin）角色权限点 = 全部权限点 − 平台级权限点。
 
-    注意：admin 持有管理权限点用于 JWT 管理面；API Key 通道由 Guard 另行剥离，
-    不影响此处角色定义（角色是数据，通道边界是 Guard 逻辑）。
+    租户管理员"除超管职权外都有"：不持有 tenant:manage（平台级），
+    故前端"租户管理"菜单对其自动隐藏，后端平台端点也以 op_level=platform 拒绝。
+    Super_Admin 的平台职权由 is_super_admin 承载，不依赖 admin 角色。
+    API Key 通道的管理权限点由 Guard 另行剥离（角色是数据，通道边界是 Guard 逻辑）。
     """
-    return {p.value for p in PermissionEnum}
+    from app.auth.constants import TENANT_ADMIN_PERMISSIONS
+    return set(TENANT_ADMIN_PERMISSIONS)
 
 
 async def ensure_tenant_builtin_roles(

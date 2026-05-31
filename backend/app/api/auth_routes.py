@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,11 +22,13 @@ from app.api.errors import (
     UnauthenticatedError,
     UserDisabledError,
 )
-from app.auth.constants import BuiltinRoleEnum, PermissionTypeEnum
+from app.auth.audit import add_audit
+from app.auth.constants import AuditActionEnum, AuditResultEnum, BuiltinRoleEnum, PermissionTypeEnum
 from app.auth.identity import IdentityContext, OperationLevelEnum
 from app.auth.jwt_auth import issue_token
 from app.auth.password import hash_password, verify_password
 from app.auth.permission_resolver import resolve_permissions_with_types
+from app.auth.validators import validate_password, validate_username
 from app.config import get_settings
 from app.schema.db import Permission, Role, RolePermission, Tenant, User, UserRole
 
@@ -53,7 +55,7 @@ class LoginResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     old_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=8, description="新口令至少 8 位")
+    new_password: str = Field(..., min_length=1, description="新口令规则见 validators.validate_password")
 
 
 class PermissionItem(BaseModel):
@@ -70,7 +72,7 @@ class MePermissionsResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=1)
-    password: str = Field(..., min_length=8)
+    password: str = Field(..., min_length=1)
     tenant_id: str = Field(..., description="自助注册归属的租户")
 
 
@@ -80,7 +82,7 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db_session)):
+async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db_session)):
     """登录：校验凭据，签发 JWT。凭据无效一律 401（不区分用户不存在/口令错，避免枚举）。"""
     stmt = select(User).where(User.username == body.username)
     if body.tenant_id is not None:
@@ -94,6 +96,12 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db_session)):
             matched = u
             break
     if matched is None:
+        add_audit(
+            db, actor=None, actor_username=body.username,
+            action=AuditActionEnum.LOGIN_FAIL, result=AuditResultEnum.FAIL,
+            detail={"reason": "bad_credentials"}, request=request,
+        )
+        await db.commit()
         raise UnauthenticatedError("用户名或口令错误")
     if not matched.is_active:
         raise UserDisabledError()
@@ -104,6 +112,14 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db_session)):
             raise UserDisabledError("所属租户已停用")
 
     token = issue_token(matched.id, matched.tenant_id, matched.token_version)
+    add_audit(
+        db, actor=None, actor_username=matched.username,
+        action=AuditActionEnum.LOGIN_SUCCESS,
+        target_type="user", target_id=matched.id, target_name=matched.username,
+        request=request,
+    )
+    # 直接写 actor_tenant_id（actor=None 时不会带），手动补租户归属用于审计过滤
+    await db.commit()
     return LoginResponse(
         access_token=token,
         must_change_password=matched.must_change_password,
@@ -114,6 +130,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db_session)):
 @router.post("/change-password")
 async def change_password(
     body: ChangePasswordRequest,
+    request: Request,
     identity: IdentityContext = Depends(
         authorization_guard(allow_must_change_password=True)
     ),
@@ -129,9 +146,16 @@ async def change_password(
         raise UnauthenticatedError()
     if not await verify_password(body.old_password, user.password_hash):
         raise UnauthenticatedError("旧口令不正确")
+    validate_password(body.new_password)
     user.password_hash = await hash_password(body.new_password)
     user.must_change_password = False
     user.token_version = user.token_version + 1  # 旧 token 失效
+    add_audit(
+        db, actor=identity, actor_username=user.username,
+        action=AuditActionEnum.CHANGE_PASSWORD,
+        target_type="user", target_id=user.id, target_name=user.username,
+        request=request,
+    )
     await db.commit()
     return {"detail": "口令已修改，请用新口令重新登录"}
 
@@ -168,10 +192,13 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db_sess
     if tenant is None or not tenant.is_active:
         raise PermissionDeniedError("目标租户不可用")
 
+    username = validate_username(body.username)
+    validate_password(body.password)
+
     # 同租户用户名唯一
     exists = await db.scalar(
         select(func.count(User.id)).where(
-            User.tenant_id == body.tenant_id, User.username == body.username
+            User.tenant_id == body.tenant_id, User.username == username
         )
     )
     if exists:
@@ -181,7 +208,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db_sess
     user = User(
         id=user_id,
         tenant_id=body.tenant_id,
-        username=body.username,
+        username=username,
         password_hash=await hash_password(body.password),
         is_active=True,
         must_change_password=False,

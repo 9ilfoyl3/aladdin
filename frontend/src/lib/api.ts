@@ -520,3 +520,183 @@ export const authApi = {
     }),
   myPermissions: () => request<MePermissionsResponse>('/auth/me/permissions'),
 }
+
+
+// ============================================================
+// 管理接口（tenant-auth）：平台级租户管理 + 租户级用户/角色管理
+// ============================================================
+
+export interface TenantItem {
+  id: string
+  name: string
+  tenant_type: string
+  is_active: boolean
+}
+
+export interface TenantCreateResult extends TenantItem {
+  admin_username: string
+  admin_temp_password: string | null
+}
+
+export interface AdminUserItem {
+  id: string
+  tenant_id: string | null
+  username: string
+  is_active: boolean
+  must_change_password: boolean
+}
+
+export interface AdminUserCreateResult extends AdminUserItem {
+  temp_password: string | null
+}
+
+export interface AuditLogItem {
+  id: string
+  actor_user_id: string | null
+  actor_username: string | null
+  actor_tenant_id: string | null
+  actor_is_super_admin: boolean
+  action: string
+  target_type: string | null
+  target_id: string | null
+  target_name: string | null
+  detail: Record<string, unknown> | null
+  result: string
+  ip: string | null
+  created_at: string
+}
+
+export interface InvitationItem {
+  id: string
+  scope: string
+  tenant_id: string | null
+  role_names: string[] | null
+  max_uses: number | null
+  used_count: number
+  expires_at: string
+  is_active: boolean
+  created_by_username: string | null
+  created_at: string
+}
+
+export interface InvitationCreateResult {
+  id: string
+  token: string
+  scope: string
+  tenant_id: string | null
+  expires_at: string
+  max_uses: number | null
+}
+
+export interface RoleItem {
+  id: string
+  tenant_id: string
+  name: string
+  is_builtin: boolean
+  permission_codes: string[]
+}
+
+export interface PermissionDictItem {
+  code: string
+  type: string // api | menu | btn
+}
+
+export const adminApi = {
+  // —— 租户（Super_Admin / tenant:manage）——
+  listTenants: () => request<TenantItem[]>('/admin/tenants'),
+  createTenant: (name: string, adminUsername: string, adminPassword?: string) =>
+    request<TenantCreateResult>('/admin/tenants', {
+      method: 'POST',
+      body: JSON.stringify({ name, admin_username: adminUsername, admin_password: adminPassword ?? null }),
+    }),
+  setTenantStatus: (tenantId: string, isActive: boolean) =>
+    request<TenantItem>(`/admin/tenants/${tenantId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: isActive }),
+    }),
+
+  // —— 用户（user:manage）——
+  listUsers: (params?: { page?: number; page_size?: number; q?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.q) qs.set('q', params.q)
+    return request<PageResult<AdminUserItem>>(`/admin/users?${qs.toString()}`)
+  },
+  createUser: (username: string, roleNames: string[], password?: string) =>
+    request<AdminUserCreateResult>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, role_names: roleNames, password: password ?? null }),
+    }),
+  setUserStatus: (userId: string, isActive: boolean) =>
+    request<AdminUserItem>(`/admin/users/${userId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: isActive }),
+    }),
+  resetPassword: (userId: string) =>
+    request<AdminUserCreateResult>(`/admin/users/${userId}/reset-password`, { method: 'POST' }),
+  transferKnowledgeBases: (userId: string, targetUserId: string) =>
+    request<{ detail: string; transferred_count: number }>(`/admin/users/${userId}/transfer-knowledge-bases`, {
+      method: 'POST',
+      body: JSON.stringify({ target_user_id: targetUserId }),
+    }),
+  getUserRoles: (userId: string) =>
+    request<{ user_id: string; role_ids: string[] }>(`/admin/users/${userId}/roles`),
+  setUserRoles: (userId: string, roleIds: string[]) =>
+    request<{ detail: string; role_ids: string[] }>(`/admin/users/${userId}/roles`, {
+      method: 'PUT',
+      body: JSON.stringify({ role_ids: roleIds }),
+    }),
+
+  // —— 角色与权限点（role:manage）——
+  listRoles: () => request<RoleItem[]>('/admin/roles'),
+  permissionDict: () => request<PermissionDictItem[]>('/admin/permissions'),
+  createRole: (name: string, permissionCodes: string[], description?: string) =>
+    request<RoleItem>('/admin/roles', {
+      method: 'POST',
+      body: JSON.stringify({ name, permission_codes: permissionCodes, description: description ?? null }),
+    }),
+  setRolePermissions: (roleId: string, permissionCodes: string[]) =>
+    request<RoleItem>(`/admin/roles/${roleId}/permissions`, {
+      method: 'PUT',
+      body: JSON.stringify({ permission_codes: permissionCodes }),
+    }),
+  deleteRole: (roleId: string) =>
+    request<void>(`/admin/roles/${roleId}`, { method: 'DELETE' }),
+
+  // —— 审计日志（user:manage 可读；租管限本租户，超管全局）——
+  auditLogs: (params?: { page?: number; page_size?: number; action?: string; actor?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.action) qs.set('action', params.action)
+    if (params?.actor) qs.set('actor', params.actor)
+    return request<PageResult<AuditLogItem>>(`/admin/audit-logs?${qs.toString()}`)
+  },
+
+  // —— 邀请链接 ——
+  listInvitations: (params?: { page?: number; page_size?: number }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    return request<PageResult<InvitationItem>>(`/admin/invitations?${qs.toString()}`)
+  },
+  createInvitation: (data: { scope: string; expires_in_hours: number; max_uses?: number | null; role_names?: string[] }) =>
+    request<InvitationCreateResult>('/admin/invitations', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  revokeInvitation: (id: string) =>
+    request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
+}
+
+// 免登录邀请接受（无 token 注入；接受页用）
+export const inviteApi = {
+  info: (token: string) =>
+    request<{ scope: string; tenant_name: string | null; valid: boolean }>(`/invitations/${token}`),
+  accept: (token: string, data: { username: string; password: string; tenant_name?: string }) =>
+    request<{ detail: string; tenant_id?: string; user_id?: string }>(`/invitations/${token}/accept`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+}

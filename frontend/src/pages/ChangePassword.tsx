@@ -4,6 +4,7 @@ import { KeyRound } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { authApi } from '@/lib/api'
+import { validatePassword } from '@/lib/validation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -23,8 +24,9 @@ export default function ChangePassword() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (newPassword.length < 8) {
-      toast.error('新口令至少 8 位')
+    const pwdErr = validatePassword(newPassword)
+    if (pwdErr) {
+      toast.error(pwdErr)
       return
     }
     if (newPassword !== confirm) {

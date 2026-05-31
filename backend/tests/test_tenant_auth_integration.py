@@ -160,19 +160,19 @@ def test_account_lifecycle_and_perms(client):
 def test_cross_tenant_and_response_fields(client):
     # Property 1 + 25: 跨租户 404；KB 响应含既有字段 + 追加 visibility/owner
     sa = _super_admin_token(client)
-    # 两租户各一管理员
+    # 两租户各一管理员（租户名可中文；用户名须 ASCII，二者解耦）
     ids = {}
-    for name in ("法院A", "法院B"):
+    for name, uname in (("法院A", "adm_a"), ("法院B", "adm_b")):
         r = client.post("/api/admin/tenants", headers=_bearer(sa),
-                        json={"name": name, "admin_username": f"adm_{name}"})
-        ids[name] = (r.json()["id"], r.json()["admin_temp_password"])
+                        json={"name": name, "admin_username": uname})
+        ids[name] = (r.json()["id"], r.json()["admin_temp_password"], uname)
 
     def admin_token(name):
-        tid, pwd = ids[name]
-        tok0 = _login(client, f"adm_{name}", pwd, tid).json()["access_token"]
+        tid, pwd, uname = ids[name]
+        tok0 = _login(client, uname, pwd, tid).json()["access_token"]
         client.post("/api/auth/change-password", headers=_bearer(tok0),
                     json={"old_password": pwd, "new_password": "Adm#12345"})
-        return _login(client, f"adm_{name}", "Adm#12345", tid).json()["access_token"], tid
+        return _login(client, uname, "Adm#12345", tid).json()["access_token"], tid
 
     ta, tida = admin_token("法院A")
     tb, tidb = admin_token("法院B")

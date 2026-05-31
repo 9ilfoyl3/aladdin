@@ -1,0 +1,34 @@
+// 前端输入校验（与后端 app/auth/validators.py 规则保持一致）。
+// 前端是体验防御，真正校验仍由后端强制；此处提前拦截明显错误，减少无谓请求。
+
+const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$/
+
+export function validateUsername(username: string): string | null {
+  const name = username.trim()
+  if (name.length < 3 || name.length > 32) return '用户名长度需为 3–32 个字符'
+  if (!USERNAME_RE.test(name)) return '用户名只能含字母、数字、下划线、点、连字符，且以字母或数字开头'
+  return null
+}
+
+export function validatePassword(password: string): string | null {
+  if (password.length < 8 || password.length > 64) return '口令长度需为 8–64 个字符'
+  // UTF-8 字节数（bcrypt 上限 72）
+  if (new TextEncoder().encode(password).length > 72) return '口令过长（编码后不得超过 72 字节）'
+  if (/[\x00-\x1F\x7F]/.test(password)) return '口令不能包含控制字符'
+  const hasAlpha = /[A-Za-z]/.test(password)
+  const hasDigit = /\d/.test(password)
+  if (!hasAlpha || !hasDigit) return '口令需至少同时包含字母与数字'
+  return null
+}
+
+export function validateTenantName(name: string): string | null {
+  const n = name.trim()
+  if (n.length < 1 || n.length > 64) return '租户名长度需为 1–64 个字符'
+  return null
+}
+
+export function validateRoleName(name: string): string | null {
+  const n = name.trim()
+  if (n.length < 1 || n.length > 32) return '角色名长度需为 1–32 个字符'
+  return null
+}

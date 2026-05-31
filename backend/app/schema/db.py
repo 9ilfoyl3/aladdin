@@ -351,3 +351,52 @@ class KnowledgeBaseGrant(Base):
     __table_args__ = (
         UniqueConstraint("kb_id", "grantee_type", "grantee_id", name="uq_grant_target"),
     )
+
+
+class AuditLog(Base):
+    """审计日志（只追加，不可改删）。仅记录元数据，绝不含业务内容正文。
+
+    actor_tenant_id 为操作者租户（Super_Admin 为 NULL）；租管查询仅限本租户，
+    超管可查全局。detail 存动作相关的 id/名称等元数据 JSON。
+    """
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    actor_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    actor_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    actor_tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    actor_is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    action: Mapped[str] = mapped_column(String, index=True, nullable=False)  # AuditActionEnum
+    target_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # tenant|user|role|api_key|kb|invitation
+    target_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    target_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 仅元数据
+    result: Mapped[str] = mapped_column(String, default="success", nullable=False)  # success|fail
+    ip: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class Invitation(Base):
+    """邀请链接（带有效期 + 可选次数）。token 只存哈希。
+
+    scope=create_tenant（仅 Super_Admin 签发，被邀请人建租户+自身为租管）；
+    scope=create_user（user:manage 签发，锁签发者租户，建普通用户）。
+    有效期由 expires_at 强制；max_uses 可选（null=有效期内不限次）。
+    """
+    __tablename__ = "invitations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    scope: Mapped[str] = mapped_column(String, nullable=False)  # InvitationScopeEnum
+    # create_user 时为目标租户；create_tenant 时为 NULL
+    tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    # create_user 时新用户预设角色名列表；create_tenant 忽略
+    role_names: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    max_uses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # null=不限次
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_by_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
