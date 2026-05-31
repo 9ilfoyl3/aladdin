@@ -4,6 +4,7 @@ import { Save, RefreshCw, Layers } from 'lucide-react'
 import { systemApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -175,8 +176,7 @@ function Settings() {
                       className="h-9"
                     />
                   ) : field.type === 'password' ? (
-                    <Input
-                      type="password"
+                    <PasswordInput
                       value={String(form[field.key] || '')}
                       onChange={(e) => updateField(field.key, e.target.value)}
                       className="h-9"

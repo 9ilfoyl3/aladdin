@@ -6,7 +6,7 @@ import { useAuth } from '@/lib/auth-context'
 import { authApi } from '@/lib/api'
 import { validatePassword } from '@/lib/validation'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { Card } from '@/components/ui/card'
 
@@ -62,17 +62,17 @@ export default function ChangePassword() {
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="old">当前口令</Label>
-            <Input id="old" type="password" value={oldPassword}
+            <PasswordInput id="old" value={oldPassword}
               onChange={(e) => setOldPassword(e.target.value)} autoComplete="current-password" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="new">新口令（≥8 位）</Label>
-            <Input id="new" type="password" value={newPassword}
+            <PasswordInput id="new" value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="confirm">确认新口令</Label>
-            <Input id="confirm" type="password" value={confirm}
+            <PasswordInput id="confirm" value={confirm}
               onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </div>
           <div className="flex gap-2">

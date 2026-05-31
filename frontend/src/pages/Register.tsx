@@ -6,6 +6,7 @@ import { authApi } from '@/lib/api'
 import { validatePassword, validateUsername, validateTenantName } from '@/lib/validation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { Card } from '@/components/ui/card'
 
@@ -63,11 +64,11 @@ export default function Register() {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="password">口令（≥8 位，含字母与数字）</Label>
-            <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
+            <PasswordInput id="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="confirm">确认口令</Label>
-            <Input id="confirm" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+            <PasswordInput id="confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </div>
           <Button type="submit" className="w-full" disabled={submitting}>
             {submitting ? '注册中…' : '注册'}

@@ -5,6 +5,7 @@ import { llmConfigApi } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
@@ -441,8 +442,7 @@ function Models() {
             </div>
             <div>
               <Label>API Key</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
