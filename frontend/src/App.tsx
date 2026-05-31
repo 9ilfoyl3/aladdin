@@ -12,6 +12,7 @@ import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
 import AgentConfig from './pages/AgentConfig'
 import Login from './pages/Login'
+import Register from './pages/Register'
 import ChangePassword from './pages/ChangePassword'
 import Tenants from './pages/Tenants'
 import Users from './pages/Users'
@@ -43,6 +44,7 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
       <Route path="/change-password" element={<ChangePassword />} />
       <Route path="/invite/:token" element={<InviteAccept />} />
       <Route

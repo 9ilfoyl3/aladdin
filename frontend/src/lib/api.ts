@@ -519,6 +519,14 @@ export const authApi = {
       body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
     }),
   myPermissions: () => request<MePermissionsResponse>('/auth/me/permissions'),
+  // 是否开放租户自助注册（公开端点，决定登录页是否显示"注册"入口）
+  registrationMode: () => request<{ self_serve: boolean }>('/auth/registration-mode'),
+  // 租户自助注册：开一个独立租户，注册人即该租户管理员
+  register: (username: string, password: string, tenantName: string) =>
+    request<LoginResponse & { tenant_id: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, tenant_name: tenantName }),
+    }),
 }
 
 

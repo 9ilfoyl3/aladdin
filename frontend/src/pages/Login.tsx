@@ -1,8 +1,9 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { useNavigate, Link } from 'react-router-dom'
 import { LogIn } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
+import { authApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -14,6 +15,12 @@ export default function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [canRegister, setCanRegister] = useState(false)
+
+  // 仅当后端开放租户自助注册时，显示"注册"入口
+  useEffect(() => {
+    authApi.registrationMode().then((r) => setCanRegister(r.self_serve)).catch(() => setCanRegister(false))
+  }, [])
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -67,6 +74,11 @@ export default function Login() {
           <Button type="submit" className="w-full" disabled={submitting}>
             {submitting ? '登录中…' : '登录'}
           </Button>
+          {canRegister && (
+            <p className="text-center text-sm text-muted-foreground">
+              没有账号？<Link to="/register" className="text-primary hover:underline">注册一个空间</Link>
+            </p>
+          )}
         </form>
       </Card>
     </div>

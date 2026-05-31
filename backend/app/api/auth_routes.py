@@ -23,12 +23,19 @@ from app.api.errors import (
     UserDisabledError,
 )
 from app.auth.audit import add_audit
-from app.auth.constants import AuditActionEnum, AuditResultEnum, BuiltinRoleEnum, PermissionTypeEnum
+from app.auth.bootstrap import ensure_tenant_builtin_roles
+from app.auth.constants import (
+    AuditActionEnum,
+    AuditResultEnum,
+    BuiltinRoleEnum,
+    PermissionTypeEnum,
+    TenantTypeEnum,
+)
 from app.auth.identity import IdentityContext, OperationLevelEnum
 from app.auth.jwt_auth import issue_token
 from app.auth.password import hash_password, verify_password
 from app.auth.permission_resolver import resolve_permissions_with_types
-from app.auth.validators import validate_password, validate_username
+from app.auth.validators import validate_password, validate_tenant_name, validate_username
 from app.config import get_settings
 from app.schema.db import Permission, Role, RolePermission, Tenant, User, UserRole
 
@@ -70,9 +77,14 @@ class MePermissionsResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=1)
+    """租户自助注册：注册即开一个独立租户，注册人成为该租户管理员。"""
+    username: str = Field(..., min_length=1, description="注册人用户名（全局唯一），将成为新租户管理员")
     password: str = Field(..., min_length=1)
-    tenant_id: str = Field(..., description="自助注册归属的租户")
+    tenant_name: str = Field(..., min_length=1, description="新建租户的名称（如个人空间名/组织名）")
+
+
+class RegisterResponse(LoginResponse):
+    tenant_id: str
 
 
 # ============================================================
@@ -175,48 +187,61 @@ async def me_permissions(
     )
 
 
-@router.post("/register", response_model=LoginResponse, status_code=201)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db_session)):
-    """自助注册：仅 registration_mode=self_serve 开放；invite_only 一律 403。"""
+@router.get("/registration-mode")
+async def registration_mode():
+    """公开端点：前端据此决定是否显示"注册"入口。不泄露任何敏感信息。"""
+    return {"self_serve": get_settings().registration_mode == "self_serve"}
+
+
+@router.post("/register", response_model=RegisterResponse, status_code=201)
+async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db_session)):
+    """租户自助注册（registration_mode=self_serve 时开放；invite_only 一律 403）。
+
+    语义：注册不是"加入某个已有租户"，而是**自助开通一个独立租户**——注册人即成为
+    该租户的管理员(admin 角色)，拥有本租户全部功能，并可邀请他人成为本租户用户。
+    这样既满足"自由注册"，又不暴露/穿透他人租户，符合租户硬隔离模型。
+    """
     settings = get_settings()
     if settings.registration_mode != "self_serve":
-        raise PermissionDeniedError("平台未开放自助注册，请联系管理员创建账号")
-
-    tenant = await db.get(Tenant, body.tenant_id)
-    if tenant is None or not tenant.is_active:
-        raise PermissionDeniedError("目标租户不可用")
+        raise PermissionDeniedError("平台未开放自助注册，请联系管理员")
 
     username = validate_username(body.username)
     validate_password(body.password)
+    tenant_name = validate_tenant_name(body.tenant_name)
 
     # 用户名全局唯一
-    exists = await db.scalar(
-        select(func.count(User.id)).where(User.username == username)
-    )
+    exists = await db.scalar(select(func.count(User.id)).where(User.username == username))
     if exists:
         raise PermissionDeniedError("用户名已存在")
 
+    # 1) 新建独立租户
+    tenant_id = str(uuid.uuid4())
+    db.add(Tenant(id=tenant_id, name=tenant_name, tenant_type=TenantTypeEnum.BUSINESS.value, is_active=True))
+    await db.flush()
+
+    # 2) 预置该租户内置 admin/user 角色
+    code_to_id = {
+        code: pid for pid, code in (await db.execute(select(Permission.id, Permission.code))).all()
+    }
+    roles = await ensure_tenant_builtin_roles(db, tenant_id, code_to_id)
+    await db.flush()
+
+    # 3) 注册人 = 该租户管理员（自助设置口令，无需强制改密）
     user_id = str(uuid.uuid4())
-    user = User(
-        id=user_id,
-        tenant_id=body.tenant_id,
-        username=username,
+    db.add(User(
+        id=user_id, tenant_id=tenant_id, username=username,
         password_hash=await hash_password(body.password),
-        is_active=True,
-        must_change_password=False,
+        is_active=True, must_change_password=False,
+    ))
+    db.add(UserRole(user_id=user_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
+
+    add_audit(
+        db, actor=None, actor_username=username,
+        action=AuditActionEnum.TENANT_CREATE,
+        target_type="tenant", target_id=tenant_id, target_name=tenant_name,
+        detail={"self_register": True, "admin_user_id": user_id}, request=request,
     )
-    db.add(user)
-    # 默认赋予该租户的 user 角色
-    user_role = (
-        await db.execute(
-            select(Role).where(
-                Role.tenant_id == body.tenant_id, Role.name == BuiltinRoleEnum.USER.value
-            )
-        )
-    ).scalar_one_or_none()
-    if user_role is not None:
-        db.add(UserRole(user_id=user_id, role_id=user_role.id))
     await db.commit()
 
-    token = issue_token(user_id, body.tenant_id, 0)
-    return LoginResponse(access_token=token, must_change_password=False)
+    token = issue_token(user_id, tenant_id, 0)
+    return RegisterResponse(access_token=token, must_change_password=False, tenant_id=tenant_id)
