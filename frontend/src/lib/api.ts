@@ -574,6 +574,8 @@ export interface AdminUserItem {
   must_change_password: boolean
   role_names: string[]
   temp_password: string | null
+  description: string | null
+  avatar: string | null
 }
 
 export interface AdminUserCreateResult extends AdminUserItem {}
@@ -666,10 +668,10 @@ export const adminApi = {
     if (params?.q) qs.set('q', params.q)
     return request<PageResult<AdminUserItem>>(`/admin/users?${qs.toString()}`)
   },
-  createUser: (username: string, roleNames: string[], password?: string) =>
+  createUser: (username: string, roleNames: string[], password?: string, description?: string | null, avatar?: string | null) =>
     request<AdminUserCreateResult>('/admin/users', {
       method: 'POST',
-      body: JSON.stringify({ username, role_names: roleNames, password: password ?? null }),
+      body: JSON.stringify({ username, role_names: roleNames, password: password ?? null, description: description ?? null, avatar: avatar ?? null }),
     }),
   setUserStatus: (userId: string, isActive: boolean) =>
     request<AdminUserItem>(`/admin/users/${userId}/status`, {

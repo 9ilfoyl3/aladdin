@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
+import { AvatarPicker } from '@/components/AvatarPicker'
 import { toast } from 'sonner'
 
 // 租户管理页面（平台级，仅 Super_Admin / tenant:manage）：
@@ -22,6 +23,8 @@ function Tenants() {
   const [showCreate, setShowCreate] = useState(false)
   const [name, setName] = useState('')
   const [adminUsername, setAdminUsername] = useState('')
+  const [createDesc, setCreateDesc] = useState('')
+  const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [created, setCreated] = useState<TenantCreateResult | null>(null)
   const [copied, setCopied] = useState(false)
   // 下钻：查看某租户的用户（兜底重置口令 / 启停）
@@ -49,7 +52,7 @@ function Tenants() {
   })
 
   const createMutation = useMutation({
-    mutationFn: () => adminApi.createTenant(name.trim(), adminUsername.trim()),
+    mutationFn: () => adminApi.createTenant(name.trim(), adminUsername.trim(), undefined, createDesc, createAvatar),
     onSuccess: (data) => {
       setCreated(data)
       queryClient.invalidateQueries({ queryKey: ['admin-tenants'] })
@@ -163,6 +166,8 @@ function Tenants() {
     setShowCreate(false)
     setName('')
     setAdminUsername('')
+    setCreateDesc('')
+    setCreateAvatar(null)
     setCreated(null)
     setCopied(false)
   }
@@ -311,12 +316,29 @@ function Tenants() {
               </DialogHeader>
               <form onSubmit={(e) => { e.preventDefault(); const ne = validateTenantName(name); const ue = validateUsername(adminUsername); if (ne) return toast.error(ne); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-4">
                 <div>
+                  <Label>租户头像（可选）</Label>
+                  <div className="mt-1.5">
+                    <AvatarPicker value={createAvatar} onChange={setCreateAvatar} shape="square" />
+                  </div>
+                </div>
+                <div>
                   <Label>租户名称</Label>
                   <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：法院A" className="mt-1" required />
                 </div>
                 <div>
                   <Label>初始管理员用户名</Label>
                   <Input value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} placeholder="如：admin_a" className="mt-1" required />
+                </div>
+                <div>
+                  <Label>租户简介（可选）</Label>
+                  <textarea
+                    value={createDesc}
+                    onChange={(e) => setCreateDesc(e.target.value)}
+                    rows={3}
+                    maxLength={500}
+                    placeholder="企业/组织简介（≤500 字）"
+                    className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
                 </div>
                 <DialogFooter>
                   <Button type="button" variant="outline" onClick={closeCreate}>取消</Button>

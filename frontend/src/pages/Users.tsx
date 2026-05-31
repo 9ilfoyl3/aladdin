@@ -14,6 +14,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
+import { AvatarPicker } from '@/components/AvatarPicker'
 import { toast } from 'sonner'
 
 // 用户管理页面（租户级，user:manage）：建用户、启停、重置口令、分配角色、转移知识库。
@@ -26,6 +27,8 @@ function Users() {
   const [showCreate, setShowCreate] = useState(false)
   const [username, setUsername] = useState('')
   const [selectedRoles, setSelectedRoles] = useState<string[]>(['user'])
+  const [createDesc, setCreateDesc] = useState('')
+  const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [tempResult, setTempResult] = useState<{ title: string; username: string; pwd: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [rolesUser, setRolesUser] = useState<AdminUserItem | null>(null)
@@ -51,7 +54,7 @@ function Users() {
   const assignableRoles = roles.filter((r) => r.name !== 'admin')
 
   const createMutation = useMutation({
-    mutationFn: () => adminApi.createUser(username.trim(), selectedRoles),
+    mutationFn: () => adminApi.createUser(username.trim(), selectedRoles, undefined, createDesc, createAvatar),
     onSuccess: (data: AdminUserCreateResult) => {
       if (data.temp_password) {
         setTempResult({ title: '用户已创建', username: data.username, pwd: data.temp_password })
@@ -59,6 +62,8 @@ function Users() {
       setShowCreate(false)
       setUsername('')
       setSelectedRoles(['user'])
+      setCreateDesc('')
+      setCreateAvatar(null)
       queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     },
     onError: (e: Error) => toast.error(e.message || '创建失败'),
@@ -206,8 +211,17 @@ function Users() {
                 return (
                 <TableRow key={u.id}>
                   <TableCell className="font-medium">
-                    {u.username}
-                    {isSelf && <Badge variant="outline" className="ml-2 text-xs">我</Badge>}
+                    <div className="flex items-center gap-2">
+                      {u.avatar ? (
+                        <img src={u.avatar} alt="" className="h-7 w-7 rounded-full object-cover border shrink-0" />
+                      ) : (
+                        <div className="h-7 w-7 rounded-full bg-muted flex items-center justify-center shrink-0 text-xs text-muted-foreground">
+                          {u.username.slice(0, 1).toUpperCase()}
+                        </div>
+                      )}
+                      <span>{u.username}</span>
+                      {isSelf && <Badge variant="outline" className="ml-1 text-xs">我</Badge>}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
@@ -281,13 +295,19 @@ function Users() {
       )}
 
       {/* 创建用户 */}
-      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setSelectedRoles(['user']) } }}>
+      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setSelectedRoles(['user']); setCreateDesc(''); setCreateAvatar(null) } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>创建用户</DialogTitle>
-            <DialogDescription>系统将生成一次性临时口令，请创建后复制交给用户。</DialogDescription>
+            <DialogDescription>系统将生成一次性临时口令，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => { e.preventDefault(); const ue = validateUsername(username); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-2">
+            <div>
+              <Label>头像（可选）</Label>
+              <div className="mt-1.5">
+                <AvatarPicker value={createAvatar} onChange={setCreateAvatar} shape="circle" />
+              </div>
+            </div>
             <div>
               <Label>用户名</Label>
               <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="如：faguan1" className="mt-1" required />
@@ -309,8 +329,19 @@ function Users() {
                 </div>
               </div>
             )}
+            <div>
+              <Label>简介（可选）</Label>
+              <textarea
+                value={createDesc}
+                onChange={(e) => setCreateDesc(e.target.value)}
+                rows={3}
+                maxLength={500}
+                placeholder="用户简介（≤500 字）"
+                className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setUsername(''); setSelectedRoles(['user']) }}>取消</Button>
+              <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setUsername(''); setSelectedRoles(['user']); setCreateDesc(''); setCreateAvatar(null) }}>取消</Button>
               <Button type="submit" disabled={createMutation.isPending || !username.trim()}>创建</Button>
             </DialogFooter>
           </form>

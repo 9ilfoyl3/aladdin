@@ -246,6 +246,8 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1)
     password: str | None = Field(default=None, description="不填则生成临时口令并强制改密")
     role_names: list[str] = Field(default_factory=lambda: [BuiltinRoleEnum.USER.value])
+    description: str | None = Field(default=None, description="可选：用户简介")
+    avatar: str | None = Field(default=None, description="可选：用户头像 data URL（≤200KB）")
 
 
 class UserResponse(BaseModel):
@@ -258,6 +260,9 @@ class UserResponse(BaseModel):
     role_names: list[str] = Field(default_factory=list)
     # 首登改密前可见的临时口令明文（改密后为 None）
     temp_password: str | None = None
+    # 简介与头像（列表/详情展示）
+    description: str | None = None
+    avatar: str | None = None
 
 
 class UserCreateResponse(UserResponse):
@@ -474,6 +479,8 @@ async def create_user(
     username = validate_username(body.username)
     if body.password is not None:
         validate_password(body.password)
+    description = validate_description(body.description)
+    avatar = validate_avatar(body.avatar)
 
     await _assert_tenant_active(db, tenant_id)
 
@@ -497,6 +504,7 @@ async def create_user(
         must_change_password=is_generated,  # 生成临时口令则强制改密
         # 生成的临时口令保留明文供管理员在用户首登改密前再次查看；自带口令不保留
         temp_password=temp_pwd if is_generated else None,
+        description=description, avatar=avatar,
     ))
     await _assign_roles(db, tenant_id, user_id, role_names)
     add_audit(
@@ -509,6 +517,7 @@ async def create_user(
         id=user_id, tenant_id=tenant_id, username=username, is_active=True,
         must_change_password=is_generated, role_names=role_names,
         temp_password=temp_pwd if is_generated else None,
+        description=description, avatar=avatar,
     )
 
 
@@ -938,6 +947,7 @@ def _user_resp(user: User, role_names: list[str] | None = None) -> UserResponse:
         role_names=role_names or [],
         # 仅在用户尚未改密时返回临时口令明文（改密后该字段已被清空）
         temp_password=user.temp_password if user.must_change_password else None,
+        description=user.description, avatar=user.avatar,
     )
 
 
