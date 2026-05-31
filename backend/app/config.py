@@ -113,7 +113,11 @@ class Settings(BaseSettings):
     super_admin_username: str = ""
     super_admin_password: str = ""
 
-    # 注册模式：invite_only（默认，仅管理员建号）| self_serve（开放自助注册）
+    # 注册模式（env 可配置）：
+    #   invite_only（默认）—— 关闭自助注册：登录页无注册入口，/api/auth/register 返回 403；
+    #     建号仅由租户管理员在本租户内创建，或经邀请链接。
+    #   self_serve —— 开放“租户自助注册”：任何人可注册并**自动开通一个独立租户**，
+    #     注册人成为该租户管理员（不暴露/穿透他人租户，符合硬隔离）。
     registration_mode: str = "invite_only"
 
     # 超管业务内容可见边界：False（默认）= Super_Admin 不可查看业务内容正文。
