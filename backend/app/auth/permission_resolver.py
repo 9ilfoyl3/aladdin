@@ -25,10 +25,15 @@ async def resolve_role_ids(session: AsyncSession, user_id: str) -> frozenset[str
 
 
 async def resolve_effective_permissions(
-    session: AsyncSession, user_id: str
+    session: AsyncSession, user_id: str, role_ids: frozenset[str] | None = None
 ) -> frozenset[str]:
-    """解析用户的有效权限点集合（其全部角色的权限点并集）。"""
-    role_ids = await resolve_role_ids(session, user_id)
+    """解析用户的有效权限点集合（其全部角色的权限点并集）。
+
+    role_ids 可由调用方预先解析后传入，避免在同一请求内重复查询 user_roles
+    （鉴权热路径上 effective_permissions 与 role_ids 都要用，复用同一份角色集合）。
+    """
+    if role_ids is None:
+        role_ids = await resolve_role_ids(session, user_id)
     if not role_ids:
         return frozenset()
     rows = await session.execute(

@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
 
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import hash_key
@@ -34,6 +32,7 @@ from app.auth.constants import (
     HEADER_EXTERNAL_USER_ID,
     ApiKeyTypeEnum,
 )
+from app.auth.apikey_usage import record_api_key_usage
 from app.auth.identity import (
     IdentityContext,
     IdentitySourceEnum,
@@ -69,13 +68,12 @@ async def _tenant_active(session: AsyncSession, tenant_id: str | None) -> bool:
 
 
 async def _bump_usage(session: AsyncSession, api_key_id: str) -> None:
-    """递增调用计数 + 更新最后使用时间。"""
-    await session.execute(
-        update(ApiKey)
-        .where(ApiKey.id == api_key_id)
-        .values(call_count=ApiKey.call_count + 1, last_used_at=datetime.utcnow())
-    )
-    await session.commit()
+    """记录一次调用（内存合并，由后台周期批量落库；不在鉴权关键路径上写库）。
+
+    见 app/auth/apikey_usage.py：根因修复——把每请求一次写+commit 移出关键路径，
+    消除同 Key 高频调用的行锁竞争与逐请求 I/O。
+    """
+    await record_api_key_usage(api_key_id)
 
 
 class ApiKeyAuthenticator:

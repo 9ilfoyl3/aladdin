@@ -51,7 +51,14 @@ async def lifespan(app: FastAPI):
     # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
     await _init_task_queue(app)
 
+    # 启动 API Key 用量追踪器（内存合并 + 周期批量落库，使鉴权关键路径零写库）
+    from app.auth.apikey_usage import init_usage_tracker, shutdown_usage_tracker
+    init_usage_tracker(async_session)
+
     yield
+
+    # 停止用量追踪器并落库剩余增量（优雅关闭，不丢最后一个区间）
+    await shutdown_usage_tracker()
 
     # 关闭 TaskQueue 连接
     await _close_task_queue(app)

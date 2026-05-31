@@ -33,7 +33,10 @@ from app.auth.kb_authz import (  # noqa: E402
     GrantView,
     kb_authorization_decision,
 )
-from app.auth.password import hash_password, verify_password  # noqa: E402
+from app.auth.password import (  # noqa: E402
+    _hash_password_sync as hash_password,
+    _verify_password_sync as verify_password,
+)
 from app.auth import jwt_auth  # noqa: E402
 
 

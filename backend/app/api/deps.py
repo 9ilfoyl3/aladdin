@@ -70,15 +70,23 @@ def _is_api_key_token(token: str) -> bool:
     return token.startswith("sk-")
 
 
-async def _resolve_identity(request: Request, session: AsyncSession) -> IdentityContext:
-    """从请求凭据解析 IdentityContext。无有效凭据 -> 401。"""
+async def _resolve_identity(
+    request: Request, session: AsyncSession
+) -> tuple[IdentityContext, bool]:
+    """从请求凭据解析 IdentityContext。无有效凭据 -> 401。
+
+    返回 (identity, must_change_password)。must_change_password 由本函数已取到的
+    User 直接读出，避免 Guard 再单独查一次 users（同请求内消除冗余查询）。
+    API Key 通道无"当前用户改密"概念，must_change_password 恒为 False。
+    """
     token = _extract_bearer(request)
     if not token:
         raise UnauthenticatedError("缺少 Authorization 凭据")
 
     if _is_api_key_token(token):
-        # API Key 通道（含三模型）
-        return await ApiKeyAuthenticator(session).authenticate(token, request.headers)
+        # API Key 通道（含三模型）：无强制改密闸门
+        identity = await ApiKeyAuthenticator(session).authenticate(token, request.headers)
+        return identity, False
 
     # JWT 通道
     try:
@@ -100,12 +108,13 @@ async def _resolve_identity(request: Request, session: AsyncSession) -> Identity
         if tenant is None or not tenant.is_active:
             raise TenantDisabledError()
 
-    perms = await resolve_effective_permissions(session, user.id)
+    # role_ids 解析一次，复用给权限点解析（消除同请求内对 user_roles 的二次查询）
     role_ids = await resolve_role_ids(session, user.id)
+    perms = await resolve_effective_permissions(session, user.id, role_ids=role_ids)
     op_level = (
         OperationLevelEnum.PLATFORM if user.is_super_admin else OperationLevelEnum.TENANT
     )
-    return IdentityContext(
+    identity = IdentityContext(
         source=IdentitySourceEnum.JWT,
         op_level=op_level,
         tenant_id=user.tenant_id,
@@ -113,15 +122,8 @@ async def _resolve_identity(request: Request, session: AsyncSession) -> Identity
         is_super_admin=user.is_super_admin,
         effective_permissions=perms,
         role_ids=role_ids,
-        # 强制改密标记透传给 Guard（用 frozenset 之外的轻量方式：见 _must_change 查询）
     )
-
-
-async def _must_change_password(session: AsyncSession, identity: IdentityContext) -> bool:
-    if identity.user_id is None:
-        return False
-    user = await session.get(User, identity.user_id)
-    return bool(user and user.must_change_password)
+    return identity, bool(user.must_change_password)
 
 
 def authorization_guard(
@@ -162,12 +164,11 @@ def authorization_guard(
                 return
 
             async with async_session() as session:
-                identity = await _resolve_identity(request, session)
+                identity, must_change_pwd = await _resolve_identity(request, session)
 
-                # 2) must_change_password 闸门
-                if not allow_must_change_password:
-                    if await _must_change_password(session, identity):
-                        raise PermissionDeniedError("请先修改初始口令后再操作")
+                # 2) must_change_password 闸门（复用解析阶段已读出的标记，不再二次查库）
+                if not allow_must_change_password and must_change_pwd:
+                    raise PermissionDeniedError("请先修改初始口令后再操作")
 
                 # 3) 通道级别校验
                 if not allow_api_key and identity.source == IdentitySourceEnum.API_KEY:

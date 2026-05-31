@@ -117,7 +117,10 @@ class DocumentPipeline:
                 ext = Path(file_path).suffix.lstrip(".")
                 loader = get_loader(ext)
                 print(f"[Pipeline] 文档 {doc_id} 开始加载，类型: {ext}")
-                load_result = loader.load(file_path)
+                # loader.load 是同步 CPU 密集调用（PDF/docx 解析等），丢线程池执行，
+                # 避免独占事件循环——在 Worker 内防止大文件卡住同进程其它文档的
+                # async 阶段；在 Redis 降级的进程内回退路径下，防止解析阻塞 API 请求。
+                load_result = await asyncio.to_thread(loader.load, file_path)
                 images_to_cleanup = load_result.images
                 print(f"[Pipeline] 文档 {doc_id} 加载完成，内容长度: {len(load_result.content)}")
                 logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
@@ -216,7 +219,9 @@ class DocumentPipeline:
                     use_page_blocks = load_result.page_blocks if load_result.page_blocks else None
                     if final_content != load_result.content:
                         use_page_blocks = None
-                    final_content = cleaner.clean(
+                    # clean 为同步 CPU 调用（正则/去噪），丢线程池避免阻塞事件循环。
+                    final_content = await asyncio.to_thread(
+                        cleaner.clean,
                         content=final_content,
                         page_texts=load_result.page_texts if load_result.page_texts else None,
                         page_blocks=use_page_blocks,
@@ -278,7 +283,10 @@ class DocumentPipeline:
                 else:
                     # 选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
                     chunker = await self._select_chunker(session, kb_id, ext, final_content)
-                    chunk_result = chunker.chunk(final_content, load_result.metadata)
+                    # chunk 为同步 CPU 调用（切分/正则），丢线程池避免阻塞事件循环。
+                    chunk_result = await asyncio.to_thread(
+                        chunker.chunk, final_content, load_result.metadata
+                    )
                     print(f"[Pipeline] 文档 {doc_id} 分块完成，父块: {len(chunk_result.parent_chunks)}，子块: {len(chunk_result.child_chunks)}")
 
                 if len(chunk_result.child_chunks) > 50000:

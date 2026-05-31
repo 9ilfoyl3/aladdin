@@ -97,9 +97,10 @@ async def create_tenant(
     # 初始 Tenant_Admin
     temp_pwd = body.admin_password or _temp_password()
     admin_id = str(uuid.uuid4())
+    admin_pwd_hash = await hash_password(temp_pwd)
     db.add(User(
         id=admin_id, tenant_id=tenant_id, username=body.admin_username,
-        password_hash=hash_password(temp_pwd), is_active=True,
+        password_hash=admin_pwd_hash, is_active=True,
         must_change_password=True,  # 强制首次改密
     ))
     db.add(UserRole(user_id=admin_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
@@ -198,9 +199,10 @@ async def create_user(
 
     temp_pwd = body.password or _temp_password()
     user_id = str(uuid.uuid4())
+    user_pwd_hash = await hash_password(temp_pwd)
     db.add(User(
         id=user_id, tenant_id=tenant_id, username=body.username,
-        password_hash=hash_password(temp_pwd), is_active=True,
+        password_hash=user_pwd_hash, is_active=True,
         must_change_password=body.password is None,  # 生成临时口令则强制改密
     ))
     await _assign_roles(db, tenant_id, user_id, body.role_names)
@@ -251,7 +253,7 @@ async def reset_password(
         raise CrossTenantError()
     _require_same_tenant(identity, user.tenant_id)
     temp_pwd = _temp_password()
-    user.password_hash = hash_password(temp_pwd)
+    user.password_hash = await hash_password(temp_pwd)
     user.must_change_password = True
     user.token_version = user.token_version + 1
     await db.commit()

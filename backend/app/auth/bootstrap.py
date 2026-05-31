@@ -167,7 +167,7 @@ async def _tenant_bootstrap(session: AsyncSession) -> None:
                 id=_EXTERNAL_ADMIN_ID,
                 tenant_id=EXTERNAL_USER_TENANT_ID,
                 username=_EXTERNAL_ADMIN_USERNAME,
-                password_hash=hash_password(uuid.uuid4().hex),
+                password_hash=await hash_password(uuid.uuid4().hex),
                 is_active=True,
                 is_super_admin=False,
                 must_change_password=False,
@@ -227,7 +227,7 @@ async def _super_admin_bootstrap(session: AsyncSession) -> None:
             id=str(uuid.uuid4()),
             tenant_id=None,  # Super_Admin 不归属任何业务租户
             username=username,
-            password_hash=hash_password(password),
+            password_hash=await hash_password(password),
             is_active=True,
             is_super_admin=True,
             must_change_password=True,  # 强制首次登录改密

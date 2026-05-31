@@ -32,6 +32,24 @@ from app.storage.milvus import MilvusClient
 logger = logging.getLogger(__name__)
 
 
+# Redis 降级时的进程内回退并发上限：防止 Redis 不可用时，大量上传一起涌入
+# API 进程把事件循环/内存压垮。超过上限的任务会等待空闲额度（而非无限堆积）。
+# 注意：正常路径走 Redis + 独立 Worker，根本不触发此回退；这是降级路径的护栏。
+_FALLBACK_MAX_CONCURRENT = 2
+_fallback_semaphore = asyncio.Semaphore(_FALLBACK_MAX_CONCURRENT)
+
+
+async def _run_pipeline_fallback(file_path: str, doc_id: str, kb_id: str) -> None:
+    """进程内回退执行（受 _fallback_semaphore 限流）。
+
+    仅在 Redis 不可用时使用。受限流保护：同一时刻最多 _FALLBACK_MAX_CONCURRENT 个
+    文档在 API 进程内处理，其余排队，避免降级时压垮 API。pipeline 内部 load/clean/
+    chunk 已用 to_thread 卸载，embedding 为 async I/O，故不会独占事件循环。
+    """
+    async with _fallback_semaphore:
+        await _run_pipeline_safe(file_path, doc_id, kb_id)
+
+
 async def _authorize_kb_access(
     db: AsyncSession, identity: IdentityContext, kb_id: str, access: KbAccessEnum
 ) -> KnowledgeBase:
@@ -263,8 +281,8 @@ async def _enqueue_or_fallback(
     else:
         print(f"[Queue] ⚠️ Redis 不可用，降级为 create_task (doc_id={doc_id})")
         logger.warning("Redis unavailable, falling back to in-process task")
-    # 降级：使用 asyncio.create_task
-    asyncio.create_task(_run_pipeline_safe(file_path, doc_id, kb_id))
+    # 降级：进程内执行（受 _fallback_semaphore 限流，防止压垮 API）
+    asyncio.create_task(_run_pipeline_fallback(file_path, doc_id, kb_id))
 
 
 # ============================================================
@@ -520,7 +538,7 @@ async def retry_document(
         await db.flush()
         raise HTTPException(status_code=400, detail="原始文件已丢失")
 
-    # 尝试入队 Redis Stream（按大小选择快/慢道），降级为 create_task
+    # 尝试入队 Redis Stream（按大小选择快/慢道），降级为进程内回退（限流）
     queue = _select_queue(request, doc.file_size)
     if queue is not None:
         try:
@@ -528,9 +546,9 @@ async def retry_document(
             await queue.enqueue(msg)
         except Exception as e:
             logger.warning("Redis 入队失败，降级为 create_task: %s", e)
-            asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+            asyncio.create_task(_run_pipeline_fallback(str(file_path), doc_id, doc.kb_id))
     else:
-        asyncio.create_task(_run_pipeline_safe(str(file_path), doc_id, doc.kb_id))
+        asyncio.create_task(_run_pipeline_fallback(str(file_path), doc_id, doc.kb_id))
 
     await db.commit()
     return DocumentResponse(
@@ -690,9 +708,9 @@ async def batch_retry_documents(
                 msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path), tenant_id=doc.tenant_id)
                 await queue.enqueue(msg)
             except Exception:
-                asyncio.create_task(_run_pipeline_safe(str(file_path), doc.id, doc.kb_id))
+                asyncio.create_task(_run_pipeline_fallback(str(file_path), doc.id, doc.kb_id))
         else:
-            asyncio.create_task(_run_pipeline_safe(str(file_path), doc.id, doc.kb_id))
+            asyncio.create_task(_run_pipeline_fallback(str(file_path), doc.id, doc.kb_id))
 
     await db.commit()
     return {"retried_count": len(retried), "skipped_count": len(skipped), "total_requested": len(body.doc_ids)}

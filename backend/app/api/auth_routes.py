@@ -90,7 +90,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db_session)):
     # 同名用户可能跨租户存在多条；逐一校验口令
     matched: User | None = None
     for u in candidates:
-        if verify_password(body.password, u.password_hash):
+        if await verify_password(body.password, u.password_hash):
             matched = u
             break
     if matched is None:
@@ -127,9 +127,9 @@ async def change_password(
     user = await db.get(User, identity.user_id)
     if user is None:
         raise UnauthenticatedError()
-    if not verify_password(body.old_password, user.password_hash):
+    if not await verify_password(body.old_password, user.password_hash):
         raise UnauthenticatedError("旧口令不正确")
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await hash_password(body.new_password)
     user.must_change_password = False
     user.token_version = user.token_version + 1  # 旧 token 失效
     await db.commit()
@@ -182,7 +182,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db_sess
         id=user_id,
         tenant_id=body.tenant_id,
         username=body.username,
-        password_hash=hash_password(body.password),
+        password_hash=await hash_password(body.password),
         is_active=True,
         must_change_password=False,
     )
