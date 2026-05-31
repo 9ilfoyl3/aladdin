@@ -30,14 +30,14 @@ export default function ChangePassword() {
       return
     }
     if (newPassword !== confirm) {
-      toast.error('两次输入的新口令不一致')
+      toast.error('两次输入的新密码不一致')
       return
     }
     setSubmitting(true)
     try {
       await authApi.changePassword(oldPassword, newPassword)
       clearMustChangePassword()
-      toast.success('口令已修改，请用新口令重新登录')
+      toast.success('密码已修改，请用新密码重新登录')
       // 旧 token 已失效，强制重新登录
       logout()
     } catch (err) {
@@ -54,24 +54,24 @@ export default function ChangePassword() {
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
             <KeyRound className="h-6 w-6 text-primary" />
           </div>
-          <h1 className="text-lg font-semibold">修改口令</h1>
+          <h1 className="text-lg font-semibold">修改密码</h1>
           {mustChangePassword && (
-            <p className="text-sm text-amber-600">首次登录或口令已被重置，请先修改口令</p>
+            <p className="text-sm text-amber-600">首次登录或密码已被重置，请先修改密码</p>
           )}
         </div>
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="old">当前口令</Label>
+            <Label htmlFor="old">当前密码</Label>
             <PasswordInput id="old" value={oldPassword}
               onChange={(e) => setOldPassword(e.target.value)} autoComplete="current-password" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new">新口令（≥8 位）</Label>
+            <Label htmlFor="new">新密码（≥8 位）</Label>
             <PasswordInput id="new" value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="confirm">确认新口令</Label>
+            <Label htmlFor="confirm">确认新密码</Label>
             <PasswordInput id="confirm" value={confirm}
               onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </div>

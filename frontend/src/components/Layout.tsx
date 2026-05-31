@@ -20,6 +20,8 @@ import {
   ShieldCheck,
   Mail,
   ScrollText,
+  ChevronUp,
+  UserCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
@@ -51,6 +53,7 @@ function Layout() {
   const navigate = useNavigate()
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const confirm = useConfirm()
   const { hasPermission, isSuperAdmin, logout, profile } = useAuth()
 
@@ -210,43 +213,58 @@ function Layout() {
             <div className="flex-1" />
           )}
 
-          {/* 底部：当前登录者 + 账号操作（改密 / 登出） */}
-          <div className="border-t border-sidebar-border px-3 py-2 space-y-1">
-            {profile && (
-              <button
-                onClick={() => navigate('/profile')}
-                className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-sidebar-accent transition-colors cursor-pointer text-left"
-                title="个人资料"
-              >
-                {profile.avatar ? (
-                  <img src={profile.avatar} alt="" className="h-8 w-8 rounded-full object-cover shrink-0" />
-                ) : (
-                  <div className="h-8 w-8 rounded-full bg-sidebar-primary/15 flex items-center justify-center shrink-0 text-sm font-medium text-sidebar-foreground">
-                    {profile.username.slice(0, 1).toUpperCase()}
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-sidebar-foreground">{profile.username}</div>
-                  <div className="truncate text-xs text-sidebar-foreground/60">
-                    {(profile.role_names && profile.role_names.length > 0 ? profile.role_names.map(roleLabel).join('、') : '用户')}
-                    {profile.tenant_name ? ` · ${profile.tenant_name}` : ''}
-                  </div>
+          {/* 底部：当前登录者（紧凑一栏：头像+用户名+身份）。点击展开账号操作。 */}
+          <div className="border-t border-sidebar-border px-3 py-2 relative">
+            {/* 展开的操作菜单（个人资料 / 修改密码 / 退出登录） */}
+            {accountMenuOpen && (
+              <>
+                {/* 点击空白处关闭 */}
+                <div className="fixed inset-0 z-10" onClick={() => setAccountMenuOpen(false)} />
+                <div className="absolute bottom-full left-3 right-3 mb-1 z-20 rounded-lg border border-sidebar-border bg-sidebar shadow-lg p-1 space-y-0.5">
+                  <button
+                    onClick={() => { setAccountMenuOpen(false); navigate('/profile') }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
+                  >
+                    <UserCircle className="h-4 w-4" />
+                    <span>个人资料</span>
+                  </button>
+                  <button
+                    onClick={() => { setAccountMenuOpen(false); navigate('/change-password') }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
+                  >
+                    <KeyRound className="h-4 w-4" />
+                    <span>修改密码</span>
+                  </button>
+                  <button
+                    onClick={() => { setAccountMenuOpen(false); logout() }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-sidebar-foreground/80 hover:bg-destructive/10 hover:text-destructive transition-colors cursor-pointer"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    <span>退出登录</span>
+                  </button>
                 </div>
-              </button>
+              </>
             )}
+            {/* 紧凑一栏 */}
             <button
-              onClick={() => navigate('/change-password')}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
+              onClick={() => setAccountMenuOpen((v) => !v)}
+              className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-sidebar-accent transition-colors cursor-pointer text-left"
+              title="账号"
             >
-              <KeyRound className="h-4 w-4" />
-              <span>修改口令</span>
-            </button>
-            <button
-              onClick={logout}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-destructive/10 hover:text-destructive transition-colors cursor-pointer"
-            >
-              <LogOut className="h-4 w-4" />
-              <span>退出登录</span>
+              {profile?.avatar ? (
+                <img src={profile.avatar} alt="" className="h-8 w-8 rounded-full object-cover shrink-0" />
+              ) : (
+                <div className="h-8 w-8 rounded-full bg-sidebar-primary/15 flex items-center justify-center shrink-0 text-sm font-medium text-sidebar-foreground">
+                  {(profile?.username ?? '?').slice(0, 1).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-sidebar-foreground">{profile?.username ?? '—'}</div>
+                <div className="truncate text-xs text-sidebar-foreground/60">
+                  {profile && profile.role_names.length > 0 ? profile.role_names.map(roleLabel).join('、') : '用户'}
+                </div>
+              </div>
+              <ChevronUp className={cn('h-4 w-4 text-sidebar-foreground/50 shrink-0 transition-transform', accountMenuOpen ? '' : 'rotate-180')} />
             </button>
           </div>
         </div>

@@ -26,7 +26,7 @@ export default function Login() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!username || !password) {
-      toast.error('请输入用户名和口令')
+      toast.error('请输入用户名和密码')
       return
     }
     setSubmitting(true)
@@ -63,7 +63,7 @@ export default function Login() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="password">口令</Label>
+            <Label htmlFor="password">密码</Label>
             <PasswordInput
               id="password"
               value={password}

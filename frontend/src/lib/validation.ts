@@ -11,13 +11,13 @@ export function validateUsername(username: string): string | null {
 }
 
 export function validatePassword(password: string): string | null {
-  if (password.length < 8 || password.length > 64) return '口令长度需为 8–64 个字符'
+  if (password.length < 8 || password.length > 64) return '密码长度需为 8–64 个字符'
   // UTF-8 字节数（bcrypt 上限 72）
-  if (new TextEncoder().encode(password).length > 72) return '口令过长（编码后不得超过 72 字节）'
-  if (/[\x00-\x1F\x7F]/.test(password)) return '口令不能包含控制字符'
+  if (new TextEncoder().encode(password).length > 72) return '密码过长（编码后不得超过 72 字节）'
+  if (/[\x00-\x1F\x7F]/.test(password)) return '密码不能包含控制字符'
   const hasAlpha = /[A-Za-z]/.test(password)
   const hasDigit = /\d/.test(password)
-  if (!hasAlpha || !hasDigit) return '口令需至少同时包含字母与数字'
+  if (!hasAlpha || !hasDigit) return '密码需至少同时包含字母与数字'
   return null
 }
 

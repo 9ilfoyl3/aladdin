@@ -17,7 +17,7 @@ import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { AvatarPicker } from '@/components/AvatarPicker'
 import { toast } from 'sonner'
 
-// 用户管理页面（租户级，user:manage）：建用户、启停、重置口令、分配角色、转移知识库。
+// 用户管理页面（租户级，user:manage）：建用户、启停、重置密码、分配角色、转移知识库。
 function Users() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
@@ -79,7 +79,7 @@ function Users() {
     mutationFn: (id: string) => adminApi.resetPassword(id),
     onSuccess: (data: AdminUserCreateResult) => {
       if (data.temp_password) {
-        setTempResult({ title: '口令已重置', username: data.username, pwd: data.temp_password })
+        setTempResult({ title: '密码已重置', username: data.username, pwd: data.temp_password })
       }
       queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     },
@@ -133,8 +133,8 @@ function Users() {
 
   async function handleReset(u: AdminUserItem) {
     const ok = await confirm({
-      title: '重置口令',
-      description: <>为「{u.username}」生成新的临时口令，该用户下次登录需强制改密，已签发 JWT 立即失效。</>,
+      title: '重置密码',
+      description: <>为「{u.username}」生成新的临时密码，该用户下次登录需强制改密，已签发 JWT 立即失效。</>,
       confirmText: '重置',
     })
     if (ok) resetMutation.mutate(u.id)
@@ -168,7 +168,7 @@ function Users() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">用户管理</h2>
-          <p className="text-muted-foreground text-sm mt-1">在本租户内创建用户、启停、重置口令、分配角色、转移知识库。新建用户首次登录需强制改密。</p>
+          <p className="text-muted-foreground text-sm mt-1">在本租户内创建用户、启停、重置密码、分配角色、转移知识库。新建用户首次登录需强制改密。</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -243,7 +243,7 @@ function Users() {
                   <TableCell>
                     <div className="flex justify-end gap-1">
                       {u.must_change_password && u.temp_password && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setTempResult({ title: '初始/临时口令', username: u.username, pwd: u.temp_password! })} title="查看临时口令">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setTempResult({ title: '初始/临时密码', username: u.username, pwd: u.temp_password! })} title="查看临时密码">
                           <Eye className="h-4 w-4" />
                         </Button>
                       )}
@@ -265,7 +265,7 @@ function Users() {
                         </Button>
                       )}
                       {!isSelf && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleReset(u)} title="重置口令">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleReset(u)} title="重置密码">
                           <KeyRound className="h-4 w-4" />
                         </Button>
                       )}
@@ -299,7 +299,7 @@ function Users() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>创建用户</DialogTitle>
-            <DialogDescription>系统将生成一次性临时口令，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
+            <DialogDescription>系统将生成一次性临时密码，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => { e.preventDefault(); const ue = validateUsername(username); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-2">
             <div>
@@ -348,17 +348,17 @@ function Users() {
         </DialogContent>
       </Dialog>
 
-      {/* 临时口令展示 */}
+      {/* 临时密码展示 */}
       <Dialog open={!!tempResult} onOpenChange={(o) => { if (!o) { setTempResult(null); setCopied(false) } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{tempResult?.title}</DialogTitle>
-            <DialogDescription>请立即复制临时口令，关闭后无法再次查看。用户首次登录需强制改密。</DialogDescription>
+            <DialogDescription>请立即复制临时密码，关闭后无法再次查看。用户首次登录需强制改密。</DialogDescription>
           </DialogHeader>
           <div className="space-y-2 mt-2 text-sm">
             <div><span className="text-muted-foreground">用户：</span><code>{tempResult?.username}</code></div>
             <div className="flex items-center gap-2 p-3 bg-muted rounded-md">
-              <span className="text-muted-foreground shrink-0">临时口令：</span>
+              <span className="text-muted-foreground shrink-0">临时密码：</span>
               <code className="flex-1 break-all">{tempResult?.pwd}</code>
               <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={copyPwd}>
                 {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}

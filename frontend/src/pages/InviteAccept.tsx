@@ -12,7 +12,7 @@ import { Label } from '@/components/ui/label'
 import { Card } from '@/components/ui/card'
 
 // 免登录邀请接受页：/invite/:token
-// 校验邀请有效性后，被邀请人填用户名/口令（建租户邀请还需填租户名）完成建号。
+// 校验邀请有效性后，被邀请人填用户名/密码（建租户邀请还需填租户名）完成建号。
 export default function InviteAccept() {
   const { token = '' } = useParams()
   const navigate = useNavigate()
@@ -36,7 +36,7 @@ export default function InviteAccept() {
     if (ue) return toast.error(ue)
     const pe = validatePassword(password)
     if (pe) return toast.error(pe)
-    if (password !== confirm) return toast.error('两次输入的口令不一致')
+    if (password !== confirm) return toast.error('两次输入的密码不一致')
     if (isCreateTenant) {
       const te = validateTenantName(tenantName)
       if (te) return toast.error(te)
@@ -99,11 +99,11 @@ export default function InviteAccept() {
             <Input id="username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="password">口令（≥8 位，含字母与数字）</Label>
+            <Label htmlFor="password">密码（≥8 位，含字母与数字）</Label>
             <PasswordInput id="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="confirm">确认口令</Label>
+            <Label htmlFor="confirm">确认密码</Label>
             <PasswordInput id="confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </div>
           <Button type="submit" className="w-full" disabled={submitting}>

@@ -16,7 +16,7 @@ import { AvatarPicker } from '@/components/AvatarPicker'
 import { toast } from 'sonner'
 
 // 租户管理页面（平台级，仅 Super_Admin / tenant:manage）：
-// 创建租户（自动建初始租户管理员，返回一次性临时口令）+ 启停 + 下钻该租户用户做兜底管理。
+// 创建租户（自动建初始租户管理员，返回一次性临时密码）+ 启停 + 下钻该租户用户做兜底管理。
 function Tenants() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
@@ -27,7 +27,7 @@ function Tenants() {
   const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [created, setCreated] = useState<TenantCreateResult | null>(null)
   const [copied, setCopied] = useState(false)
-  // 下钻：查看某租户的用户（兜底重置口令 / 启停）
+  // 下钻：查看某租户的用户（兜底重置密码 / 启停）
   const [drillTenant, setDrillTenant] = useState<TenantItem | null>(null)
   const [tempResult, setTempResult] = useState<{ username: string; pwd: string } | null>(null)
   const [tempCopied, setTempCopied] = useState(false)
@@ -155,8 +155,8 @@ function Tenants() {
 
   async function resetUser(u: AdminUserItem) {
     const ok = await confirm({
-      title: '兜底重置口令',
-      description: <>为「{u.username}」生成临时口令，该用户下次登录需强制改密，旧 JWT 立即失效。</>,
+      title: '兜底重置密码',
+      description: <>为「{u.username}」生成临时密码，该用户下次登录需强制改密，旧 JWT 立即失效。</>,
       confirmText: '重置',
     })
     if (ok) resetPwdMutation.mutate(u.id)
@@ -193,7 +193,7 @@ function Tenants() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">租户管理</h2>
-          <p className="text-muted-foreground text-sm mt-1">创建与启停业务租户。创建时自动生成该租户的初始管理员及一次性临时口令。</p>
+          <p className="text-muted-foreground text-sm mt-1">创建与启停业务租户。创建时自动生成该租户的初始管理员及一次性临时密码。</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -291,14 +291,14 @@ function Tenants() {
               <DialogHeader>
                 <DialogTitle>租户已创建</DialogTitle>
                 <DialogDescription>
-                  请立即复制初始管理员的临时口令，关闭后将无法再次查看。该管理员首次登录需强制改密。
+                  请立即复制初始管理员的临时密码，关闭后将无法再次查看。该管理员首次登录需强制改密。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-2 mt-4 text-sm">
                 <div><span className="text-muted-foreground">租户：</span>{created.name}</div>
                 <div><span className="text-muted-foreground">管理员账号：</span><code>{created.admin_username}</code></div>
                 <div className="flex items-center gap-2 p-3 bg-muted rounded-md">
-                  <span className="text-muted-foreground shrink-0">临时口令：</span>
+                  <span className="text-muted-foreground shrink-0">临时密码：</span>
                   <code className="flex-1 break-all">{created.admin_temp_password}</code>
                   <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={copyPwd}>
                     {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
@@ -350,13 +350,13 @@ function Tenants() {
         </DialogContent>
       </Dialog>
 
-      {/* 下钻：某租户用户的兜底管理（重置口令 / 启停） */}
+      {/* 下钻：某租户用户的兜底管理（重置密码 / 启停） */}
       <Dialog open={!!drillTenant} onOpenChange={(o) => { if (!o) setDrillTenant(null) }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>租户用户 · {drillTenant?.name}</DialogTitle>
             <DialogDescription>
-              超管兜底（break-glass）：跨租户重置口令、启停用户、补充租户管理员。日常用户管理由该租户管理员自行完成。
+              超管兜底（break-glass）：跨租户重置密码、启停用户、补充租户管理员。日常用户管理由该租户管理员自行完成。
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end">
@@ -411,7 +411,7 @@ function Tenants() {
                         <div className="flex justify-end gap-1">
                           {drillTenant?.is_active ? (
                             <>
-                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => resetUser(u)} title="重置口令">
+                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => resetUser(u)} title="重置密码">
                                 <KeyRound className="h-4 w-4" />
                               </Button>
                               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleUser(u)} title={u.is_active ? '停用' : '启用'}>
@@ -492,7 +492,7 @@ function Tenants() {
           <DialogHeader>
             <DialogTitle>新增租户管理员 · {drillTenant?.name}</DialogTitle>
             <DialogDescription>
-              为该租户补充一名管理员（admin 角色），用于原管理员不可用时接管。系统将生成一次性临时口令，其首次登录需强制改密。
+              为该租户补充一名管理员（admin 角色），用于原管理员不可用时接管。系统将生成一次性临时密码，其首次登录需强制改密。
             </DialogDescription>
           </DialogHeader>
           <form
@@ -516,17 +516,17 @@ function Tenants() {
         </DialogContent>
       </Dialog>
 
-      {/* 兜底重置口令结果 */}
+      {/* 兜底重置密码结果 */}
       <Dialog open={!!tempResult} onOpenChange={(o) => { if (!o) { setTempResult(null); setTempCopied(false) } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>口令已重置</DialogTitle>
-            <DialogDescription>请立即复制临时口令交给该用户，关闭后无法再次查看。其首次登录需强制改密。</DialogDescription>
+            <DialogTitle>密码已重置</DialogTitle>
+            <DialogDescription>请立即复制临时密码交给该用户，关闭后无法再次查看。其首次登录需强制改密。</DialogDescription>
           </DialogHeader>
           <div className="space-y-2 mt-2 text-sm">
             <div><span className="text-muted-foreground">用户：</span><code>{tempResult?.username}</code></div>
             <div className="flex items-center gap-2 p-3 bg-muted rounded-md">
-              <span className="text-muted-foreground shrink-0">临时口令：</span>
+              <span className="text-muted-foreground shrink-0">临时密码：</span>
               <code className="flex-1 break-all">{tempResult?.pwd}</code>
               <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={copyTemp}>
                 {tempCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
