@@ -552,11 +552,11 @@ export interface AdminUserItem {
   username: string
   is_active: boolean
   must_change_password: boolean
-}
-
-export interface AdminUserCreateResult extends AdminUserItem {
+  role_names: string[]
   temp_password: string | null
 }
+
+export interface AdminUserCreateResult extends AdminUserItem {}
 
 export interface AuditLogItem {
   id: string
@@ -576,6 +576,7 @@ export interface AuditLogItem {
 
 export interface InvitationItem {
   id: string
+  token: string | null
   scope: string
   tenant_id: string | null
   role_names: string[] | null
@@ -624,6 +625,11 @@ export const adminApi = {
     }),
   listTenantUsers: (tenantId: string) =>
     request<AdminUserItem[]>(`/admin/tenants/${tenantId}/users`),
+  createTenantAdmin: (tenantId: string, username: string, password?: string) =>
+    request<AdminUserCreateResult>(`/admin/tenants/${tenantId}/admins`, {
+      method: 'POST',
+      body: JSON.stringify({ username, password: password ?? null }),
+    }),
 
   // —— 用户（user:manage）——
   listUsers: (params?: { page?: number; page_size?: number; q?: string }) => {

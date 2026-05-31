@@ -155,6 +155,7 @@ async def change_password(
     validate_password(body.new_password)
     user.password_hash = await hash_password(body.new_password)
     user.must_change_password = False
+    user.temp_password = None  # 清除明文临时口令（首登改密后不再可见）
     user.token_version = user.token_version + 1  # 旧 token 失效
     add_audit(
         db, actor=identity, actor_username=user.username,

@@ -120,20 +120,22 @@ function Layout() {
             </button>
           </div>
 
-          {/* 常驻按钮区：新对话 + 导航 */}
+          {/* 常驻按钮区：新对话 + 导航。超管为纯平台管理身份，不使用对话/知识库功能，隐藏新对话。 */}
           <div className="px-3 pt-3 pb-2 space-y-1">
-            <button
-              onClick={onNewSession}
-              className={cn(
-                'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition-colors',
-                isChat && (currentSessionId === null)
-                  ? 'bg-sidebar-primary text-sidebar-primary-foreground'
-                  : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
-              )}
-            >
-              <SquarePen className="h-4 w-4" />
-              <span>新对话</span>
-            </button>
+            {!isSuperAdmin && (
+              <button
+                onClick={onNewSession}
+                className={cn(
+                  'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition-colors',
+                  isChat && (currentSessionId === null)
+                    ? 'bg-sidebar-primary text-sidebar-primary-foreground'
+                    : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+                )}
+              >
+                <SquarePen className="h-4 w-4" />
+                <span>新对话</span>
+              </button>
+            )}
             {visibleNavItems.map((item) => (
               <NavLink
                 key={item.to}
@@ -153,7 +155,8 @@ function Layout() {
             ))}
           </div>
 
-          {/* 历史对话列表 */}
+          {/* 历史对话列表（超管不显示，纯平台管理身份不参与对话） */}
+          {!isSuperAdmin ? (
           <div className="flex-1 overflow-auto px-2 pt-2 pb-2 space-y-0.5">
             <p className="px-3 pt-2 pb-1 text-xs text-sidebar-foreground/85 font-medium">历史对话</p>
             {sessions.map((session) => (
@@ -193,6 +196,9 @@ function Layout() {
               </div>
             )}
           </div>
+          ) : (
+            <div className="flex-1" />
+          )}
 
           {/* 底部：账号操作（改密 / 登出） */}
           <div className="border-t border-sidebar-border px-3 py-2 space-y-1">
@@ -234,6 +240,7 @@ function Layout() {
 
           {/* 导航图标 */}
           <div className="flex flex-col items-center pt-3 px-1">
+            {!isSuperAdmin && (
             <button
               onClick={onNewSession}
               className="h-10 w-full flex items-center justify-center cursor-pointer"
@@ -248,6 +255,7 @@ function Layout() {
                 <SquarePen className="h-4 w-4" />
               </div>
             </button>
+            )}
             {visibleNavItems.map((item) => (
               <NavLink
                 key={item.to}

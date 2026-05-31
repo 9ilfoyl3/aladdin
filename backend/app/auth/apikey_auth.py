@@ -142,6 +142,7 @@ class ApiKeyAuthenticator:
             op_level=OperationLevelEnum.TENANT,
             tenant_id=api_key.tenant_id,
             user_id=bound_user_id,
+            username=user.username,
             api_key_id=api_key.id,
             effective_permissions=perms,
             role_ids=role_ids,

@@ -119,6 +119,7 @@ async def _resolve_identity(
         op_level=op_level,
         tenant_id=user.tenant_id,
         user_id=user.id,
+        username=user.username,
         is_super_admin=user.is_super_admin,
         effective_permissions=perms,
         role_ids=role_ids,

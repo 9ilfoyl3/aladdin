@@ -52,7 +52,8 @@ def add_audit(
     entry = AuditLog(
         id=str(uuid.uuid4()),
         actor_user_id=(actor.user_id if actor else None),
-        actor_username=actor_username,
+        # 操作者用户名：显式传入优先（如登录失败场景），否则取身份对象自带的 username
+        actor_username=actor_username or (actor.username if actor else None),
         actor_tenant_id=(actor.tenant_id if actor else None),
         actor_is_super_admin=bool(actor.is_super_admin) if actor else False,
         action=action.value,

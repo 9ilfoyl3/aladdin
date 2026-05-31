@@ -47,6 +47,7 @@ class IdentityContext:
     op_level: OperationLevelEnum
     tenant_id: str | None = None          # platform 级 Super_Admin 为 None
     user_id: str | None = None            # JWT / 用户级 Key 时存在
+    username: str | None = None           # 操作者用户名（JWT 用户/用户级 Key），供审计记录
     external_user_id: str | None = None   # external_agent Key 时存在（= external_users.id）
     api_key_id: str | None = None         # 任意 api_key 通道时存在
     is_super_admin: bool = False

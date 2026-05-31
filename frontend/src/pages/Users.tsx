@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, Shield, ArrowRightLeft, Search } from 'lucide-react'
+import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, Shield, ArrowRightLeft, Search, Eye } from 'lucide-react'
 import { adminApi, type AdminUserItem, type AdminUserCreateResult } from '@/lib/api'
 import { validateUsername } from '@/lib/validation'
 import { useConfirm } from '@/lib/confirm-context'
@@ -19,7 +19,7 @@ import { toast } from 'sonner'
 function Users() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
-  const { hasPermission } = useAuth()
+  const { hasPermission, userId } = useAuth()
   const canManageRoles = hasPermission('role:manage')
 
   const [showCreate, setShowCreate] = useState(false)
@@ -45,6 +45,8 @@ function Users() {
     queryFn: () => adminApi.listRoles(),
     enabled: canManageRoles,
   })
+  // 租户管理员不得分配/移交 admin（管理员）角色，故可选角色里排除 admin
+  const assignableRoles = roles.filter((r) => r.name !== 'admin')
 
   const createMutation = useMutation({
     mutationFn: () => adminApi.createUser(username.trim(), selectedRoles),
@@ -163,7 +165,7 @@ function Users() {
       </div>
 
       {isLoading ? (
-        <TableSkeleton rows={5} columns={4} />
+        <TableSkeleton rows={5} columns={5} />
       ) : users.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
           <UsersIcon className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -175,15 +177,30 @@ function Users() {
             <TableHeader>
               <TableRow>
                 <TableHead>用户名</TableHead>
+                <TableHead>角色</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>改密标记</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {users.map((u) => (
+              {users.map((u) => {
+                const isSelf = !!userId && u.id === userId
+                return (
                 <TableRow key={u.id}>
-                  <TableCell className="font-medium">{u.username}</TableCell>
+                  <TableCell className="font-medium">
+                    {u.username}
+                    {isSelf && <Badge variant="outline" className="ml-2 text-xs">我</Badge>}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {(u.role_names && u.role_names.length > 0)
+                        ? u.role_names.map((rn) => (
+                            <Badge key={rn} variant="outline" className="text-xs">{rn}</Badge>
+                          ))
+                        : <span className="text-muted-foreground text-xs">—</span>}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     <Badge variant="outline" className={u.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
                       {u.is_active ? '启用' : '停用'}
@@ -194,24 +211,36 @@ function Users() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
-                      {canManageRoles && (
+                      {u.must_change_password && u.temp_password && (
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setTempResult({ title: '初始/临时口令', username: u.username, pwd: u.temp_password! })} title="查看临时口令">
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {canManageRoles && !isSelf && (
                         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openRoles(u)} title="分配角色">
                           <Shield className="h-4 w-4" />
                         </Button>
                       )}
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => { setTransferUser(u); setTransferTarget('') }} title="转移知识库">
-                        <ArrowRightLeft className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleReset(u)} title="重置口令">
-                        <KeyRound className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(u)} title={u.is_active ? '停用' : '启用'}>
-                        <Power className={u.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
-                      </Button>
+                      {!isSelf && (
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => { setTransferUser(u); setTransferTarget('') }} title="转移知识库">
+                          <ArrowRightLeft className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {!isSelf && (
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleReset(u)} title="重置口令">
+                          <KeyRound className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {!isSelf && (
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(u)} title={u.is_active ? '停用' : '启用'}>
+                          <Power className={u.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
+                        </Button>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+                )
+              })}
             </TableBody>
           </Table>
         </div>
@@ -239,11 +268,11 @@ function Users() {
               <Label>用户名</Label>
               <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="如：faguan1" className="mt-1" required />
             </div>
-            {canManageRoles && roles.length > 0 && (
+            {canManageRoles && assignableRoles.length > 0 && (
               <div>
                 <Label>角色</Label>
                 <div className="flex flex-wrap gap-2 mt-2">
-                  {roles.map((r) => (
+                  {assignableRoles.map((r) => (
                     <button
                       type="button"
                       key={r.id}
@@ -295,7 +324,7 @@ function Users() {
             <DialogDescription>勾选该用户的角色。变更经实时权限解析在下一次请求即时生效，无需重新登录。</DialogDescription>
           </DialogHeader>
           <div className="flex flex-wrap gap-2 mt-2">
-            {roles.map((r) => (
+            {assignableRoles.map((r) => (
               <button
                 type="button"
                 key={r.id}

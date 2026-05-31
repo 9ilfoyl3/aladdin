@@ -27,6 +27,9 @@ function Tenants() {
   const [drillTenant, setDrillTenant] = useState<TenantItem | null>(null)
   const [tempResult, setTempResult] = useState<{ username: string; pwd: string } | null>(null)
   const [tempCopied, setTempCopied] = useState(false)
+  // 下钻内：超管为该租户新增一名租户管理员（admin 角色）
+  const [showAddAdmin, setShowAddAdmin] = useState(false)
+  const [newAdminName, setNewAdminName] = useState('')
 
   const { data: tenants = [], isLoading } = useQuery({
     queryKey: ['admin-tenants'],
@@ -69,6 +72,17 @@ function Tenants() {
       queryClient.invalidateQueries({ queryKey: ['tenant-users', drillTenant?.id] })
     },
     onError: (e: Error) => toast.error(e.message || '重置失败'),
+  })
+
+  const addAdminMutation = useMutation({
+    mutationFn: () => adminApi.createTenantAdmin(drillTenant!.id, newAdminName.trim()),
+    onSuccess: (data) => {
+      if (data.temp_password) setTempResult({ username: data.username, pwd: data.temp_password })
+      setShowAddAdmin(false)
+      setNewAdminName('')
+      queryClient.invalidateQueries({ queryKey: ['tenant-users', drillTenant?.id] })
+    },
+    onError: (e: Error) => toast.error(e.message || '新增管理员失败'),
   })
 
   async function toggleStatus(t: TenantItem) {
@@ -253,9 +267,15 @@ function Tenants() {
           <DialogHeader>
             <DialogTitle>租户用户 · {drillTenant?.name}</DialogTitle>
             <DialogDescription>
-              超管兜底（break-glass）：跨租户重置口令、启停用户。日常用户管理由该租户管理员自行完成。
+              超管兜底（break-glass）：跨租户重置口令、启停用户、补充租户管理员。日常用户管理由该租户管理员自行完成。
             </DialogDescription>
           </DialogHeader>
+          <div className="flex justify-end">
+            <Button variant="outline" size="sm" onClick={() => { setNewAdminName(''); setShowAddAdmin(true) }}>
+              <Plus className="h-4 w-4" />
+              新增管理员
+            </Button>
+          </div>
           {drillUsers.length === 0 ? (
             <p className="text-sm text-muted-foreground py-6 text-center">该租户暂无用户</p>
           ) : (
@@ -298,6 +318,36 @@ function Tenants() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setDrillTenant(null)}>关闭</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 新增租户管理员（超管在下钻内补充管理员） */}
+      <Dialog open={showAddAdmin} onOpenChange={(o) => { if (!o) { setShowAddAdmin(false); setNewAdminName('') } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新增租户管理员 · {drillTenant?.name}</DialogTitle>
+            <DialogDescription>
+              为该租户补充一名管理员（admin 角色），用于原管理员不可用时接管。系统将生成一次性临时口令，其首次登录需强制改密。
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              const ue = validateUsername(newAdminName)
+              if (ue) return toast.error(ue)
+              addAdminMutation.mutate()
+            }}
+            className="space-y-4 mt-2"
+          >
+            <div>
+              <Label>管理员用户名</Label>
+              <Input value={newAdminName} onChange={(e) => setNewAdminName(e.target.value)} placeholder="如：admin_b" className="mt-1" required />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => { setShowAddAdmin(false); setNewAdminName('') }}>取消</Button>
+              <Button type="submit" disabled={addAdminMutation.isPending || !newAdminName.trim()}>创建</Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

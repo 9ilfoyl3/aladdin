@@ -87,6 +87,7 @@ class InvitationCreateResponse(BaseModel):
 
 class InvitationItem(BaseModel):
     id: str
+    token: str | None = None  # 明文 token，供列表随时复制（仅本端点返回）
     scope: str
     tenant_id: str | None
     role_names: list[str] | None
@@ -166,6 +167,9 @@ async def create_invitation(
             raise PermissionDeniedError("请在具体租户上下文内签发建用户邀请")
         tenant_id = identity.tenant_id
         role_names = body.role_names or [BuiltinRoleEnum.USER.value]
+        # 租户管理员不得经邀请分配 admin（管理员）角色
+        if not identity.is_super_admin and BuiltinRoleEnum.ADMIN.value in role_names:
+            raise PermissionDeniedError("无权经邀请分配管理员(admin)角色")
 
     raw_token = _generate_token()
     inv_id = str(uuid.uuid4())
@@ -173,6 +177,7 @@ async def create_invitation(
     db.add(Invitation(
         id=inv_id,
         token_hash=_hash_token(raw_token),
+        token_plain=raw_token,  # 保留明文供列表随时复制/重复使用
         scope=body.scope,
         tenant_id=tenant_id,
         role_names=role_names,
@@ -206,7 +211,7 @@ async def list_invitations(
     ),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """列出邀请（超管看全局；租管仅看本租户的 create_user 邀请）。不返回 token。"""
+    """列出邀请（超管看全局；租管仅看本租户）。返回明文 token 供随时复制。"""
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
     base = select(Invitation)
@@ -221,7 +226,7 @@ async def list_invitations(
     )).scalars().all()
     items = [
         InvitationItem(
-            id=r.id, scope=r.scope, tenant_id=r.tenant_id, role_names=r.role_names,
+            id=r.id, token=r.token_plain, scope=r.scope, tenant_id=r.tenant_id, role_names=r.role_names,
             max_uses=r.max_uses, used_count=r.used_count,
             expires_at=r.expires_at.isoformat() if r.expires_at else "",
             is_active=_invite_status_active(r),

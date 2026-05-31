@@ -263,6 +263,9 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 初始/重置临时口令明文：仅在用户首次改密前保留，供管理员再次查看/复制；
+    # 用户改密后由 change_password 置空。安全权衡：明文窗口仅限"首登改密前"。
+    temp_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # 停用/重置口令时自增，使旧 JWT 失效（token 内 token_version 不匹配即拒绝）
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -385,6 +388,10 @@ class Invitation(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # 明文 token：邀请链接需随时可复制/重复使用（管理员会忘记或多次发放），
+    # 故保留明文供列表展示与复制。安全权衡：邀请本身受 expires_at + max_uses 约束，
+    # 且接受建号仍走口令校验；吊销(is_active=False)即失效。
+    token_plain: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     scope: Mapped[str] = mapped_column(String, nullable=False)  # InvitationScopeEnum
     # create_user 时为目标租户；create_tenant 时为 NULL
     tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)

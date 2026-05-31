@@ -26,6 +26,7 @@ interface AuthState {
   isSuperAdmin: boolean
   mustChangePassword: boolean
   permissions: Set<string>
+  userId: string | null
   ready: boolean // 是否已完成初始权限加载
 }
 
@@ -44,6 +45,7 @@ const initialState: AuthState = {
   isSuperAdmin: false,
   mustChangePassword: false,
   permissions: new Set(),
+  userId: null,
   ready: false,
 }
 
@@ -71,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: true,
         isSuperAdmin: me.is_super_admin,
         permissions: new Set(me.permissions.map((p: PermissionItem) => p.code)),
+        userId: me.user_id || null,
         ready: true,
       }))
     } catch {

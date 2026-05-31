@@ -31,6 +31,7 @@ function Invitations() {
   const [maxUses, setMaxUses] = useState('') // 空=不限次
   const [created, setCreated] = useState<InvitationCreateResult | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const [page, setPage] = useState(1)
 
   const { data: invPage, isLoading } = useQuery({
@@ -71,6 +72,17 @@ function Invitations() {
     }
   }
 
+  function copyRowLink(inv: InvitationItem) {
+    if (!inv.token) {
+      toast.error('该邀请无可复制链接')
+      return
+    }
+    navigator.clipboard.writeText(inviteLink(inv.token))
+    setCopiedId(inv.id)
+    setTimeout(() => setCopiedId(null), 2000)
+    toast.success('链接已复制')
+  }
+
   async function handleRevoke(inv: InvitationItem) {
     const ok = await confirm({
       title: '吊销邀请',
@@ -98,7 +110,7 @@ function Invitations() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">邀请链接</h2>
-          <p className="text-muted-foreground text-sm mt-1">生成带有效期的注册邀请链接。链接仅创建时显示一次，请及时复制。</p>
+          <p className="text-muted-foreground text-sm mt-1">生成带有效期的注册邀请链接。链接可在列表随时复制、重复使用，直到过期 / 用满 / 吊销。</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -139,7 +151,10 @@ function Invitations() {
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1">
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => copyRowLink(inv)} disabled={!inv.is_active || !inv.token} title="复制链接">
+                        {copiedId === inv.id ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                      </Button>
                       <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleRevoke(inv)} disabled={!inv.is_active} title="吊销">
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
