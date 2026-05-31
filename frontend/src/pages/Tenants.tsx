@@ -271,11 +271,20 @@ function Tenants() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end">
-            <Button variant="outline" size="sm" onClick={() => { setNewAdminName(''); setShowAddAdmin(true) }}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { setNewAdminName(''); setShowAddAdmin(true) }}
+              disabled={!drillTenant?.is_active}
+              title={drillTenant?.is_active ? '新增管理员' : '租户已停用，数据冻结，仅可查看'}
+            >
               <Plus className="h-4 w-4" />
               新增管理员
             </Button>
           </div>
+          {!drillTenant?.is_active && (
+            <p className="text-xs text-amber-600">该租户已停用，数据已冻结，仅可查看，无法修改。</p>
+          )}
           {drillUsers.length === 0 ? (
             <p className="text-sm text-muted-foreground py-6 text-center">该租户暂无用户</p>
           ) : (
@@ -301,12 +310,18 @@ function Tenants() {
                       <TableCell className="text-muted-foreground text-xs">{u.must_change_password ? '待改密' : '正常'}</TableCell>
                       <TableCell>
                         <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => resetUser(u)} title="重置口令">
-                            <KeyRound className="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleUser(u)} title={u.is_active ? '停用' : '启用'}>
-                            <Power className={u.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
-                          </Button>
+                          {drillTenant?.is_active ? (
+                            <>
+                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => resetUser(u)} title="重置口令">
+                                <KeyRound className="h-4 w-4" />
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleUser(u)} title={u.is_active ? '停用' : '启用'}>
+                                <Power className={u.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
+                              </Button>
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">仅查看</span>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>

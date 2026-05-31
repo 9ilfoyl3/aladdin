@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, useNavigate, Navigate } from 'react-router-dom'
 import {
   Database,
   MessageSquare,
@@ -69,6 +69,15 @@ function Layout() {
     handleNewSession,
     handleDeleteSession,
   } = useSession()
+
+  // 内容与菜单一致性守卫：超管为纯平台管理身份，仅允许访问其菜单内的页面
+  // （租户管理 / 审计日志）与账号自助页（改密）。直接命中知识库/对话等页面时，
+  // 重定向回"租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
+  // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
+  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password'])
+  if (isSuperAdmin && !SUPER_ADMIN_ALLOWED_PATHS.has(location.pathname)) {
+    return <Navigate to="/tenants" replace />
+  }
 
   // 点击新对话：跳转到 chat 页面并重置会话
   function onNewSession() {

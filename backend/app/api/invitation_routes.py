@@ -166,6 +166,10 @@ async def create_invitation(
         if identity.tenant_id is None:
             raise PermissionDeniedError("请在具体租户上下文内签发建用户邀请")
         tenant_id = identity.tenant_id
+        # 停用租户冻结：不可再签发建用户邀请
+        tenant = await db.get(Tenant, tenant_id)
+        if tenant is None or not tenant.is_active:
+            raise PermissionDeniedError("该租户已停用，数据已冻结，无法签发邀请")
         role_names = body.role_names or [BuiltinRoleEnum.USER.value]
         # 租户管理员不得经邀请分配 admin（管理员）角色
         if not identity.is_super_admin and BuiltinRoleEnum.ADMIN.value in role_names:

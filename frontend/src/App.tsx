@@ -39,6 +39,13 @@ function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
+// 登录后默认落地页：超管为纯平台管理身份（无知识库/对话），落到"租户管理"；
+// 其余身份落到知识库。避免超管落到一个其菜单里并不存在的知识库页（右侧内容与左侧菜单不一致）。
+function DefaultLanding() {
+  const { isSuperAdmin } = useAuth()
+  return <Navigate to={isSuperAdmin ? '/tenants' : '/knowledge-bases'} replace />
+}
+
 // 应用根组件：路由配置
 function App() {
   return (
@@ -55,7 +62,7 @@ function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<Navigate to="/knowledge-bases" replace />} />
+        <Route index element={<DefaultLanding />} />
         <Route path="knowledge-bases" element={<KnowledgeBase />} />
         <Route path="knowledge-bases/:id" element={<Documents />} />
         <Route path="chat" element={<Chat />} />

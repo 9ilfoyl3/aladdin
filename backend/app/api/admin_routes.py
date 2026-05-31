@@ -228,6 +228,19 @@ def _forbid_self(identity: IdentityContext, target_user_id: str) -> None:
         raise PermissionDeniedError("不能对自己执行该操作")
 
 
+async def _assert_tenant_active(db: AsyncSession, tenant_id: str | None) -> None:
+    """停用租户 = 数据冻结、只读：禁止对其下对象做任何写操作（新增管理员/建用户/
+    启停/重置口令/改角色/转移知识库等），仅允许查看。要恢复写入须先重新启用该租户。
+
+    租户启停本身（set_tenant_status）不经此校验，否则无法再启用。
+    """
+    if tenant_id is None:
+        return
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is not None and not tenant.is_active:
+        raise PermissionDeniedError("该租户已停用，数据已冻结，仅可查看，无法修改")
+
+
 @router.get("/tenants/{tenant_id}/users", response_model=list[UserResponse])
 async def list_tenant_users(
     tenant_id: str,
@@ -273,6 +286,8 @@ async def create_tenant_admin(
     tenant = await db.get(Tenant, tenant_id)
     if tenant is None:
         raise CrossTenantError()
+    if not tenant.is_active:
+        raise PermissionDeniedError("该租户已停用，数据已冻结，仅可查看，无法新增管理员")
     username = validate_username(body.username)
     if body.password is not None:
         validate_password(body.password)
@@ -406,6 +421,8 @@ async def create_user(
     if body.password is not None:
         validate_password(body.password)
 
+    await _assert_tenant_active(db, tenant_id)
+
     exists = await db.scalar(
         select(func.count(User.id)).where(User.username == username)
     )
@@ -461,6 +478,7 @@ async def set_user_status(
         raise CrossTenantError()
     _require_same_tenant(identity, user.tenant_id)
     _forbid_self(identity, user_id)
+    await _assert_tenant_active(db, user.tenant_id)
     user.is_active = body.is_active
     if not body.is_active:
         user.token_version = user.token_version + 1  # 已签发 JWT 失效
@@ -488,6 +506,7 @@ async def reset_password(
         raise CrossTenantError()
     _require_same_tenant(identity, user.tenant_id)
     _forbid_self(identity, user_id)
+    await _assert_tenant_active(db, user.tenant_id)
     temp_pwd = _temp_password()
     user.password_hash = await hash_password(temp_pwd)
     user.must_change_password = True
@@ -533,6 +552,7 @@ async def transfer_knowledge_bases(
     if source is None:
         raise CrossTenantError()
     _require_same_tenant(identity, source.tenant_id)
+    await _assert_tenant_active(db, source.tenant_id)
 
     target = await db.get(User, body.target_user_id)
     if target is None:
@@ -622,6 +642,7 @@ async def create_role(
     tenant_id = identity.tenant_id
     if tenant_id is None:
         raise PermissionDeniedError("请在具体租户上下文内创建角色")
+    await _assert_tenant_active(db, tenant_id)
     name = validate_role_name(body.name)
     exists = await db.scalar(
         select(func.count(Role.id)).where(Role.tenant_id == tenant_id, Role.name == name)
@@ -683,6 +704,7 @@ async def set_role_permissions(
     if role is None:
         raise CrossTenantError()
     _require_same_tenant(identity, role.tenant_id)
+    await _assert_tenant_active(db, role.tenant_id)
     _guard_assignable_permissions(identity, body.permission_codes)
     await _set_role_permissions(db, role_id, body.permission_codes, replace=True)
     add_audit(
@@ -715,6 +737,7 @@ async def delete_role(
     if role is None:
         raise CrossTenantError()
     _require_same_tenant(identity, role.tenant_id)
+    await _assert_tenant_active(db, role.tenant_id)
     if role.is_builtin:
         raise PermissionDeniedError("内置角色不可删除")
     role_name = role.name
@@ -744,6 +767,7 @@ async def set_user_roles(
         raise CrossTenantError()
     _require_same_tenant(identity, user.tenant_id)
     _forbid_self(identity, user_id)
+    await _assert_tenant_active(db, user.tenant_id)
     # 校验角色同租户，并收集角色对象用于 admin 角色分配守卫
     role_objs: list[Role] = []
     for rid in body.role_ids:
