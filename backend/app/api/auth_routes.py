@@ -43,7 +43,6 @@ router = APIRouter(prefix="/api/auth", tags=["Auth"])
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
-    tenant_id: str | None = Field(default=None, description="多租户同名用户时指定归属租户")
 
 
 class LoginResponse(BaseModel):
@@ -83,19 +82,15 @@ class RegisterRequest(BaseModel):
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db_session)):
-    """登录：校验凭据，签发 JWT。凭据无效一律 401（不区分用户不存在/口令错，避免枚举）。"""
-    stmt = select(User).where(User.username == body.username)
-    if body.tenant_id is not None:
-        stmt = stmt.where(User.tenant_id == body.tenant_id)
-    candidates = (await db.execute(stmt)).scalars().all()
+    """登录：校验凭据，签发 JWT。凭据无效一律 401（不区分用户不存在/口令错，避免枚举）。
 
-    # 同名用户可能跨租户存在多条；逐一校验口令
-    matched: User | None = None
-    for u in candidates:
-        if await verify_password(body.password, u.password_hash):
-            matched = u
-            break
-    if matched is None:
+    用户名全局唯一，故仅凭 用户名+口令 即可定位账号，无需指定租户。
+    """
+    matched = (await db.execute(
+        select(User).where(User.username == body.username)
+    )).scalar_one_or_none()
+
+    if matched is None or not await verify_password(body.password, matched.password_hash):
         add_audit(
             db, actor=None, actor_username=body.username,
             action=AuditActionEnum.LOGIN_FAIL, result=AuditResultEnum.FAIL,
@@ -118,7 +113,6 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         target_type="user", target_id=matched.id, target_name=matched.username,
         request=request,
     )
-    # 直接写 actor_tenant_id（actor=None 时不会带），手动补租户归属用于审计过滤
     await db.commit()
     return LoginResponse(
         access_token=token,
@@ -195,11 +189,9 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db_sess
     username = validate_username(body.username)
     validate_password(body.password)
 
-    # 同租户用户名唯一
+    # 用户名全局唯一
     exists = await db.scalar(
-        select(func.count(User.id)).where(
-            User.tenant_id == body.tenant_id, User.username == username
-        )
+        select(func.count(User.id)).where(User.username == username)
     )
     if exists:
         raise PermissionDeniedError("用户名已存在")

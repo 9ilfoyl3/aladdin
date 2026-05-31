@@ -327,6 +327,11 @@ async def _accept_create_tenant(
         raise ValidationInputError("建租户邀请需提供 tenant_name")
     tenant_name = validate_tenant_name(body.tenant_name)
 
+    # 用户名全局唯一：先校验避免落库触发 500
+    dup = await db.scalar(select(func.count(User.id)).where(User.username == username))
+    if dup:
+        raise PermissionDeniedError("用户名已存在")
+
     tenant_id = str(uuid.uuid4())
     db.add(Tenant(id=tenant_id, name=tenant_name, tenant_type=TenantTypeEnum.BUSINESS.value, is_active=True))
     await db.flush()
@@ -356,9 +361,7 @@ async def _accept_create_user(
         raise PermissionDeniedError("目标租户不可用")
 
     exists = await db.scalar(
-        select(func.count(User.id)).where(
-            User.tenant_id == inv.tenant_id, User.username == username
-        )
+        select(func.count(User.id)).where(User.username == username)
     )
     if exists:
         raise PermissionDeniedError("用户名已存在")

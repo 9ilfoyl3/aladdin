@@ -99,6 +99,12 @@ async def create_tenant(
     admin_username = validate_username(body.admin_username)
     if body.admin_password is not None:
         validate_password(body.admin_password)
+    # 用户名全局唯一：建租户前先校验初始管理员用户名未被占用（避免落库触发 500）
+    dup = await db.scalar(
+        select(func.count(User.id)).where(User.username == admin_username)
+    )
+    if dup:
+        raise PermissionDeniedError("用户名已存在")
     tenant_id = str(uuid.uuid4())
     db.add(Tenant(id=tenant_id, name=name, tenant_type=TenantTypeEnum.BUSINESS.value, is_active=True))
     await db.flush()
@@ -205,6 +211,27 @@ def _require_same_tenant(identity: IdentityContext, target_tenant_id: str | None
         raise CrossTenantError()
 
 
+@router.get("/tenants/{tenant_id}/users", response_model=list[UserResponse])
+async def list_tenant_users(
+    tenant_id: str,
+    identity: IdentityContext = Depends(
+        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
+    ),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """平台级：列出指定租户下的全部用户（供超管下钻做兜底口令重置 / 启停）。
+
+    仅 Super_Admin（platform）。返回元数据，不含口令哈希。
+    """
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise CrossTenantError()
+    rows = (await db.execute(
+        select(User).where(User.tenant_id == tenant_id).order_by(User.username)
+    )).scalars().all()
+    return [_user_resp(u) for u in rows]
+
+
 def _guard_assignable_permissions(identity: IdentityContext, codes: list[str]) -> None:
     """防越权提权：
 
@@ -301,7 +328,7 @@ async def create_user(
         validate_password(body.password)
 
     exists = await db.scalar(
-        select(func.count(User.id)).where(User.tenant_id == tenant_id, User.username == username)
+        select(func.count(User.id)).where(User.username == username)
     )
     if exists:
         raise PermissionDeniedError("用户名已存在")

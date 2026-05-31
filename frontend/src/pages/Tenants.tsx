@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Building2, Power, Copy, Check } from 'lucide-react'
-import { adminApi, type TenantItem, type TenantCreateResult } from '@/lib/api'
+import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound } from 'lucide-react'
+import { adminApi, type TenantItem, type TenantCreateResult, type AdminUserItem } from '@/lib/api'
 import { validateTenantName, validateUsername } from '@/lib/validation'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
@@ -14,7 +14,7 @@ import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { toast } from 'sonner'
 
 // 租户管理页面（平台级，仅 Super_Admin / tenant:manage）：
-// 创建租户（自动建初始租户管理员，返回一次性临时口令）+ 启停。
+// 创建租户（自动建初始租户管理员，返回一次性临时口令）+ 启停 + 下钻该租户用户做兜底管理。
 function Tenants() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
@@ -23,10 +23,20 @@ function Tenants() {
   const [adminUsername, setAdminUsername] = useState('')
   const [created, setCreated] = useState<TenantCreateResult | null>(null)
   const [copied, setCopied] = useState(false)
+  // 下钻：查看某租户的用户（兜底重置口令 / 启停）
+  const [drillTenant, setDrillTenant] = useState<TenantItem | null>(null)
+  const [tempResult, setTempResult] = useState<{ username: string; pwd: string } | null>(null)
+  const [tempCopied, setTempCopied] = useState(false)
 
   const { data: tenants = [], isLoading } = useQuery({
     queryKey: ['admin-tenants'],
     queryFn: () => adminApi.listTenants(),
+  })
+
+  const { data: drillUsers = [] } = useQuery({
+    queryKey: ['tenant-users', drillTenant?.id],
+    queryFn: () => adminApi.listTenantUsers(drillTenant!.id),
+    enabled: !!drillTenant,
   })
 
   const createMutation = useMutation({
@@ -45,6 +55,22 @@ function Tenants() {
     onError: (e: Error) => toast.error(e.message || '操作失败'),
   })
 
+  const userStatusMutation = useMutation({
+    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
+      adminApi.setUserStatus(id, active),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tenant-users', drillTenant?.id] }),
+    onError: (e: Error) => toast.error(e.message || '操作失败'),
+  })
+
+  const resetPwdMutation = useMutation({
+    mutationFn: (userId: string) => adminApi.resetPassword(userId),
+    onSuccess: (data) => {
+      if (data.temp_password) setTempResult({ username: data.username, pwd: data.temp_password })
+      queryClient.invalidateQueries({ queryKey: ['tenant-users', drillTenant?.id] })
+    },
+    onError: (e: Error) => toast.error(e.message || '重置失败'),
+  })
+
   async function toggleStatus(t: TenantItem) {
     const ok = await confirm({
       title: t.is_active ? '停用租户' : '启用租户',
@@ -54,6 +80,26 @@ function Tenants() {
       confirmText: t.is_active ? '停用' : '启用',
     })
     if (ok) statusMutation.mutate({ id: t.id, active: !t.is_active })
+  }
+
+  async function toggleUser(u: AdminUserItem) {
+    const ok = await confirm({
+      title: u.is_active ? '停用用户' : '启用用户',
+      description: u.is_active
+        ? <>兜底停用「{u.username}」：该用户无法登录，已签发 JWT 立即失效（数据保留）。</>
+        : <>恢复「{u.username}」的登录能力。</>,
+      confirmText: u.is_active ? '停用' : '启用',
+    })
+    if (ok) userStatusMutation.mutate({ id: u.id, active: !u.is_active })
+  }
+
+  async function resetUser(u: AdminUserItem) {
+    const ok = await confirm({
+      title: '兜底重置口令',
+      description: <>为「{u.username}」生成临时口令，该用户下次登录需强制改密，旧 JWT 立即失效。</>,
+      confirmText: '重置',
+    })
+    if (ok) resetPwdMutation.mutate(u.id)
   }
 
   function closeCreate() {
@@ -69,6 +115,14 @@ function Tenants() {
       navigator.clipboard.writeText(created.admin_temp_password)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
+    }
+  }
+
+  function copyTemp() {
+    if (tempResult) {
+      navigator.clipboard.writeText(tempResult.pwd)
+      setTempCopied(true)
+      setTimeout(() => setTempCopied(false), 2000)
     }
   }
 
@@ -114,7 +168,17 @@ function Tenants() {
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setDrillTenant(t)}
+                        disabled={t.tenant_type === 'external'}
+                        title="查看用户（兜底管理）"
+                      >
+                        <UsersIcon className="h-4 w-4" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -180,6 +244,83 @@ function Tenants() {
               </form>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 下钻：某租户用户的兜底管理（重置口令 / 启停） */}
+      <Dialog open={!!drillTenant} onOpenChange={(o) => { if (!o) setDrillTenant(null) }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>租户用户 · {drillTenant?.name}</DialogTitle>
+            <DialogDescription>
+              超管兜底（break-glass）：跨租户重置口令、启停用户。日常用户管理由该租户管理员自行完成。
+            </DialogDescription>
+          </DialogHeader>
+          {drillUsers.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center">该租户暂无用户</p>
+          ) : (
+            <div className="border rounded-lg max-h-[50vh] overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>用户名</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>改密标记</TableHead>
+                    <TableHead className="text-right">兜底操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {drillUsers.map((u) => (
+                    <TableRow key={u.id}>
+                      <TableCell className="font-medium">{u.username}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={u.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
+                          {u.is_active ? '启用' : '停用'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-xs">{u.must_change_password ? '待改密' : '正常'}</TableCell>
+                      <TableCell>
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => resetUser(u)} title="重置口令">
+                            <KeyRound className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleUser(u)} title={u.is_active ? '停用' : '启用'}>
+                            <Power className={u.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDrillTenant(null)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 兜底重置口令结果 */}
+      <Dialog open={!!tempResult} onOpenChange={(o) => { if (!o) { setTempResult(null); setTempCopied(false) } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>口令已重置</DialogTitle>
+            <DialogDescription>请立即复制临时口令交给该用户，关闭后无法再次查看。其首次登录需强制改密。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 mt-2 text-sm">
+            <div><span className="text-muted-foreground">用户：</span><code>{tempResult?.username}</code></div>
+            <div className="flex items-center gap-2 p-3 bg-muted rounded-md">
+              <span className="text-muted-foreground shrink-0">临时口令：</span>
+              <code className="flex-1 break-all">{tempResult?.pwd}</code>
+              <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={copyTemp}>
+                {tempCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+              </Button>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => { setTempResult(null); setTempCopied(false) }}>完成</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

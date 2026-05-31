@@ -508,10 +508,10 @@ export interface MePermissionsResponse {
 }
 
 export const authApi = {
-  login: (username: string, password: string, tenantId?: string) =>
+  login: (username: string, password: string) =>
     request<LoginResponse>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password, tenant_id: tenantId ?? null }),
+      body: JSON.stringify({ username, password }),
     }),
   changePassword: (oldPassword: string, newPassword: string) =>
     request<{ detail: string }>('/auth/change-password', {
@@ -614,6 +614,8 @@ export const adminApi = {
       method: 'PUT',
       body: JSON.stringify({ is_active: isActive }),
     }),
+  listTenantUsers: (tenantId: string) =>
+    request<AdminUserItem[]>(`/admin/tenants/${tenantId}/users`),
 
   // —— 用户（user:manage）——
   listUsers: (params?: { page?: number; page_size?: number; q?: string }) => {

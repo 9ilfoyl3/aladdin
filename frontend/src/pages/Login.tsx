@@ -13,7 +13,6 @@ export default function Login() {
   const { login } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [tenantId, setTenantId] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   const onSubmit = async (e: React.FormEvent) => {
@@ -24,7 +23,7 @@ export default function Login() {
     }
     setSubmitting(true)
     try {
-      await login(username, password, tenantId || undefined)
+      await login(username, password)
       // 强制改密由路由守卫接管；否则进首页
       navigate('/', { replace: true })
     } catch (err) {
@@ -63,15 +62,6 @@ export default function Login() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="tenant">租户 ID（可选）</Label>
-            <Input
-              id="tenant"
-              value={tenantId}
-              onChange={(e) => setTenantId(e.target.value)}
-              placeholder="同名用户跨租户时填写"
             />
           </div>
           <Button type="submit" className="w-full" disabled={submitting}>

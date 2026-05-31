@@ -257,7 +257,8 @@ class User(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     # Super_Admin 不归属任何业务租户 -> 可空
     tenant_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("tenants.id"), index=True, nullable=True)
-    username: Mapped[str] = mapped_column(String, nullable=False)
+    # 用户名全局唯一（跨租户唯一）：登录仅凭 用户名+口令，无需再指定租户。
+    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -265,10 +266,6 @@ class User(Base):
     # 停用/重置口令时自增，使旧 JWT 失效（token 内 token_version 不匹配即拒绝）
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "username", name="uq_user_tenant_username"),
-    )
 
 
 class ExternalUser(Base):

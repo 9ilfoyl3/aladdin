@@ -30,7 +30,7 @@ interface AuthState {
 }
 
 interface AuthContextValue extends AuthState {
-  login: (username: string, password: string, tenantId?: string) => Promise<void>
+  login: (username: string, password: string) => Promise<void>
   logout: () => void
   refreshPermissions: () => Promise<void>
   clearMustChangePassword: () => void
@@ -85,8 +85,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refreshPermissions])
 
   const login = useCallback(
-    async (username: string, password: string, tenantId?: string) => {
-      const res = await authApi.login(username, password, tenantId)
+    async (username: string, password: string) => {
+      const res = await authApi.login(username, password)
       setToken(res.access_token)
       setState((prev) => ({
         ...prev,

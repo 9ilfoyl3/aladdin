@@ -51,10 +51,16 @@ function Layout() {
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const confirm = useConfirm()
-  const { hasPermission, logout } = useAuth()
+  const { hasPermission, isSuperAdmin, logout } = useAuth()
 
-  // 依据菜单权限点过滤导航项（超管恒可见，由 hasPermission 内部处理）
-  const visibleNavItems = navItems.filter((item) => hasPermission(item.menuPerm))
+  // 菜单可见性：
+  // - Super_Admin（平台级）：A方案——仅保留"租户管理 + 审计日志"，
+  //   不显示租户级（用户/角色/邀请）与内容/配置菜单（那些超管无租户上下文、不该管）。
+  // - 其他身份：按菜单权限点显隐。
+  const SUPER_ADMIN_MENUS = new Set(['/tenants', '/audit-logs'])
+  const visibleNavItems = navItems.filter((item) =>
+    isSuperAdmin ? SUPER_ADMIN_MENUS.has(item.to) : hasPermission(item.menuPerm)
+  )
 
   const {
     sessions,
