@@ -232,10 +232,15 @@ class PipelineWorker:
             await asyncio.sleep(self._health_check_interval)
 
     async def _ping_embedding(self) -> bool:
-        """检查 Embedding 服务是否可用（调用 /health 端点，不占用推理队列）"""
+        """检查 Embedding 服务是否可用
+
+        探活策略与连通性测试接口共用 app.models.probe：
+        1. 优先探 /health（自建服务即使推理队列打满也能秒回，不占队列）。
+        2. /health 不存在（云端网关如百炼）→ 降级为最小推理请求验证。
+        """
         try:
             from app.config import get_settings
-            import httpx
+            from app.models.probe import check_health
 
             settings = get_settings()
             base_url = settings.embed_base_url
@@ -249,21 +254,21 @@ class PipelineWorker:
                 )
                 return True
 
-            # 调 /health 端点（不经过推理队列）
-            health_url = base_url.rstrip("/").rsplit("/v1", 1)[0] + "/health"
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(health_url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # 兼容多种 health 响应格式：
-                    # - embedding-rerank-server: {"status": "ready"}
-                    # - Infinity: {"unix": 1748490407.766}（200 即健康）
-                    # - TEI: 200 即健康
-                    status = data.get("status")
-                    if status and status not in ("ready", "ok"):
-                        return False
-                    return True
-            return False
+            # 1. 先探 /health（不经过推理队列）
+            health = await check_health(base_url, timeout=10.0)
+            if health is True:
+                return True
+            if health is False:
+                return False
+
+            # 2. health is None：无 /health 路由（云端网关），发最小推理请求验证
+            from app.models.manager import get_model_manager
+            manager = get_model_manager()
+            await asyncio.wait_for(
+                manager.embedder.embed(["ping"]),
+                timeout=10.0,
+            )
+            return True
         except Exception as e:
             logger.debug("Embedding health check failed: %s", e)
             return False

@@ -2,7 +2,7 @@
 
 通过 HTTP 调用外部 Rerank 服务。
 支持三种接口格式：
-1. OpenAI 兼容格式（DashScope/千问等）：POST /reranks，body: {model, query, documents, top_n}
+1. OpenAI 兼容格式（DashScope/千问等）：POST /v1/reranks，body: {model, query, documents, top_n}
 2. 标准格式（TEI/Jina）：POST /rerank，body: {query, documents, top_n}
 3. 自定义格式：POST /ranking_score，body: {query, candidate}
 
@@ -45,17 +45,18 @@ class RemoteReranker(RerankProvider):
         """检测 API 格式
 
         Returns:
-            "standard" - 标准格式（URL 以 /v1 结尾或仅 host:port），拼接 /rerank
-            "custom" - 自定义端点（含具体路径），直接 POST
+            "openai"   - OpenAI 兼容格式（URL 以 /v1 结尾，如 DashScope），拼接 /reranks
+            "standard" - TEI/Jina 标准格式（仅 host:port），拼接 /rerank
+            "custom"   - 自定义端点（含其他具体路径），直接 POST
         """
         path = self.base_url.split("://", 1)[-1]  # 去掉协议
         segments = path.split("/")
-        # 只有 host:port → 标准格式
+        # 只有 host:port → TEI/Jina 标准格式
         if len(segments) <= 1 or segments[-1] == "":
             return "standard"
-        # 以 /v1 结尾 → 标准格式（拼接 /rerank）
+        # 以 /v1 结尾 → OpenAI 兼容格式（拼接 /reranks，如 DashScope/千问）
         if segments[-1] == "v1":
-            return "standard"
+            return "openai"
         # 含其他路径 → 自定义端点
         return "custom"
 
@@ -65,7 +66,7 @@ class RemoteReranker(RerankProvider):
         """调用远程服务对候选文档重排序
 
         自动检测接口格式：
-        - URL 以 /v1 结尾 → OpenAI 兼容格式，POST /reranks
+        - URL 以 /v1 结尾 → OpenAI 兼容格式，POST /v1/reranks
         - URL 仅为 host:port → TEI/Jina 标准格式，POST /rerank
         - URL 含其他路径 → 自定义格式，直接 POST
 
@@ -94,8 +95,20 @@ class RemoteReranker(RerankProvider):
                     "candidate": documents,
                 }
                 resp = await client.post(self.base_url, headers=headers, json=payload)
+            elif fmt == "openai":
+                # OpenAI 兼容格式（DashScope/千问）：POST /v1/reranks
+                # body: {model, query, documents, top_n}
+                url = f"{self.base_url}/reranks"
+                payload = {
+                    "query": query,
+                    "documents": documents,
+                    "top_n": top_k,
+                }
+                if self.model:
+                    payload["model"] = self.model
+                resp = await client.post(url, headers=headers, json=payload)
             else:
-                # 标准格式：POST /rerank
+                # 标准格式（TEI/Jina）：POST /rerank
                 url = f"{self.base_url}/rerank"
                 payload = {
                     "query": query,
