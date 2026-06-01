@@ -98,9 +98,6 @@ services:
 volumes:
   upload_data:
 
-# 共享外部网络：与 deploy-middleware/docker-compose.yml 同网，应用用服务名直连中间件。
-# 首次需手动创建： docker network create arag-network
 networks:
   default:
     name: arag-network
-    external: true

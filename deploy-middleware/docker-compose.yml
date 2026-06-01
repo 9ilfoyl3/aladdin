@@ -111,9 +111,6 @@ volumes:
   postgres_data:
   redis_data:
 
-# 共享外部网络：应用 compose 同样接入此网络，实现跨 compose 的服务名直连。
-# 首次需手动创建： docker network create arag-network
 networks:
   default:
     name: arag-network
-    external: true

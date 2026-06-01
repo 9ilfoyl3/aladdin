@@ -197,5 +197,4 @@ volumes:
 networks:
   default:
     name: arag-network
-    external: true
 
