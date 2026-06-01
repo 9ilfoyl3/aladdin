@@ -44,6 +44,9 @@ Write-Host "`n[5] 复制配置文件..." -ForegroundColor Cyan
 Copy-Item docker-compose-production.yml "$OUT\docker-compose.yml"
 Copy-Item backend\.env.example "$OUT\.env.example"
 Copy-Item frontend\nginx.conf "$OUT\nginx.conf"
+# 中间件 compose 单独放 middleware/ 子目录，便于独立启停管理
+New-Item -ItemType Directory -Force -Path "$OUT\middleware" | Out-Null
+Copy-Item deploy-middleware\docker-compose.yml "$OUT\middleware\docker-compose.yml"
 
 Write-Host "`n=== 完成 ===" -ForegroundColor Green
 $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)

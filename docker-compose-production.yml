@@ -1,99 +1,17 @@
-# Artoo 生产部署 docker-compose
-# 镜像名称通过 .env 中的 IMAGE_* 变量配置，支持不同架构和镜像库
+# ============================================================
+# Artoo 应用服务 docker-compose（backend / worker / frontend）
+# 镜像名通过 .env 的 IMAGE_* 配置，支持不同架构/镜像库。
+#
+# 基础设施（etcd/minio/milvus/postgres/redis）已拆到 deploy-middleware/docker-compose.yml，
+# 二者通过共享外部网络 arag-network 通信，本文件用服务名（postgres/milvus/redis）直连。
+#
+# 部署顺序：
+#   1) docker network create arag-network                    # 仅首次
+#   2) (cd deploy-middleware && docker compose --env-file ../.env up -d)   # 起中间件，等 healthy
+#   3) docker compose up -d                                  # 起应用（本文件）
+# ============================================================
 
 services:
-  # ============ 基础设施 ============
-
-  etcd:
-    container_name: arag-etcd
-    image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.25}
-    environment:
-      - ETCD_AUTO_COMPACTION_MODE=revision
-      - ETCD_AUTO_COMPACTION_RETENTION=1000
-      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-      - ETCD_SNAPSHOT_COUNT=50000
-    volumes:
-      - etcd_data:/etcd
-    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
-    healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    restart: unless-stopped
-
-  minio:
-    container_name: arag-minio
-    image: ${IMAGE_MINIO:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
-    environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    volumes:
-      - minio_data:/minio_data
-    command: minio server /minio_data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    restart: unless-stopped
-
-  milvus:
-    container_name: arag-milvus
-    image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.5.4}
-    command: ["milvus", "run", "standalone"]
-    environment:
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
-    volumes:
-      - milvus_data:/var/lib/milvus
-    expose:
-      - "19530"
-    depends_on:
-      - etcd
-      - minio
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    restart: unless-stopped
-
-  postgres:
-    container_name: arag-postgres
-    image: ${IMAGE_POSTGRES:-postgres:16-alpine}
-    environment:
-      POSTGRES_DB: artoo
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    expose:
-      - "5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # ============ 应用服务 ============
-
-  redis:
-    container_name: arag-redis
-    image: ${IMAGE_REDIS:-redis:7-alpine}
-    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
-    expose:
-      - "6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-
   backend:
     container_name: arag-backend
     image: ${IMAGE_BACKEND:-artoo-backend:latest}
@@ -126,13 +44,6 @@ services:
       - CONTENT_VIEW_BOUNDARY_OPEN=${CONTENT_VIEW_BOUNDARY_OPEN:-false}
     volumes:
       - upload_data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -171,13 +82,6 @@ services:
     volumes:
       - upload_data:/app/data
       - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
-    depends_on:
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -192,9 +96,11 @@ services:
     restart: unless-stopped
 
 volumes:
-  etcd_data:
-  minio_data:
-  milvus_data:
-  postgres_data:
   upload_data:
-  redis_data:
+
+# 共享外部网络：与 deploy-middleware/docker-compose.yml 同网，应用用服务名直连中间件。
+# 首次需手动创建： docker network create arag-network
+networks:
+  default:
+    name: arag-network
+    external: true

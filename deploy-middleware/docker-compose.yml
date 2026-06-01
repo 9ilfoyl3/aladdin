@@ -1,25 +1,24 @@
 # ============================================================
-# Aladdin 本地中间件（仅中间件，amd64 专用）
-# ------------------------------------------------------------
-# 用途：在 amd64 (x86_64) 主机本地起 etcd/minio/milvus/postgres/redis，
-#       后端(uvicorn)与 Worker、前端(npm run dev) 在宿主机本地运行。
-# 参考：docker-compose.yml(本地) + deploy-arm64/docker-compose.yml(生产)。
+# Artoo 中间件（基础设施）docker-compose —— 独立管理
+# 含：etcd / minio / milvus / postgres / redis
 #
-# 关键点（针对之前 arm64 镜像在 amd64 上跑崩的问题，从根本上规避）：
-#   - 每个服务显式 platform: linux/amd64，杜绝误用 arm64 镜像（QEMU 模拟会导致
-#     milvus 直接 core dumped(signal 6)、redis 因 ARM64-COW-BUG 拒绝启动）。
-#   - postgres 库名 = artoo（与 deploy 系列、LOCAL_WINDOWS_SETUP 文档一致）。
-#   - 需要被宿主机直连的端口（milvus/postgres/redis）映射到本机；etcd/minio 仅内网。
+# 与应用服务（backend/worker/frontend）通过共享外部网络 arag-network 通信，
+# 应用 compose 用服务名（postgres/milvus/redis）即可直连本组件。
 #
-# 启动： docker compose -f docker-compose-middleware-amd64.yml up -d
-# 查看： docker compose -f docker-compose-middleware-amd64.yml ps
-# 停止： docker compose -f docker-compose-middleware-amd64.yml down
+# 用法（在本目录内执行；--env-file 指向上层与应用共用的 .env）：
+#   docker network create arag-network          # 仅首次，创建共享网络
+#   docker compose --env-file ../.env up -d      # 启动中间件
+#   docker compose --env-file ../.env ps         # 等全部 healthy 再启动应用
+#   docker compose --env-file ../.env down       # 停止（数据卷保留）
+#
+# 注：本组件只用到 IMAGE_*（基础设施镜像）与 POSTGRES_PASSWORD，
+#     其余应用配置（JWT / Embedding 等）与本文件无关。
 # ============================================================
 
 services:
   etcd:
-    image: quay.io/coreos/etcd:v3.5.25
-    platform: linux/amd64
+    container_name: arag-etcd
+    image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.25}
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
@@ -36,8 +35,8 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
-    platform: linux/amd64
+    container_name: arag-minio
+    image: ${IMAGE_MINIO:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -52,17 +51,16 @@ services:
     restart: unless-stopped
 
   milvus:
-    image: milvusdb/milvus:v2.5.4
-    platform: linux/amd64
+    container_name: arag-milvus
+    image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.5.4}
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
-    ports:
-      - "19530:19530"
-      - "9091:9091"
+    expose:
+      - "19530"
     depends_on:
       - etcd
       - minio
@@ -74,14 +72,14 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
-    platform: linux/amd64
+    container_name: arag-postgres
+    image: ${IMAGE_POSTGRES:-postgres:16-alpine}
     environment:
       POSTGRES_DB: artoo
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    expose:
+      - "5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -92,10 +90,11 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
-    platform: linux/amd64
-    ports:
-      - "6379:6379"
+    container_name: arag-redis
+    image: ${IMAGE_REDIS:-redis:7-alpine}
+    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -111,3 +110,10 @@ volumes:
   milvus_data:
   postgres_data:
   redis_data:
+
+# 共享外部网络：应用 compose 同样接入此网络，实现跨 compose 的服务名直连。
+# 首次需手动创建： docker network create arag-network
+networks:
+  default:
+    name: arag-network
+    external: true

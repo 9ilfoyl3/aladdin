@@ -59,12 +59,27 @@ Write-Host "`n[5] 复制配置文件..." -ForegroundColor Cyan
 Copy-Item docker-compose-production.yml "$OUT\docker-compose.yml"
 Copy-Item backend\.env.example "$OUT\.env.example"
 Copy-Item frontend\nginx.conf "$OUT\nginx.conf"
+# 中间件 compose 单独放 middleware/ 子目录，便于独立启停管理
+New-Item -ItemType Directory -Force -Path "$OUT\middleware" | Out-Null
+Copy-Item deploy-middleware\docker-compose.yml "$OUT\middleware\docker-compose.yml"
 
 Write-Host "`n=== 完成 ===" -ForegroundColor Green
 $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)
 Write-Host "输出: $OUT\ ($size GB)"
 Write-Host ""
-Write-Host "用法:" -ForegroundColor Yellow
+Write-Host "产出结构:" -ForegroundColor Yellow
+Write-Host "  $OUT\app.tar               应用镜像（backend+frontend）"
+Write-Host "  $OUT\infra.tar             基础设施镜像（仅完整包）"
+Write-Host "  $OUT\docker-compose.yml    应用编排（backend/worker/frontend）"
+Write-Host "  $OUT\middleware\docker-compose.yml  中间件编排（独立启停）"
+Write-Host "  $OUT\nginx.conf / .env.example"
+Write-Host ""
+Write-Host "部署（服务器）:" -ForegroundColor Yellow
+Write-Host "  docker network create arag-network"
+Write-Host "  (cd middleware; docker compose --env-file ../.env up -d)   # 先起中间件，等 healthy"
+Write-Host "  docker compose up -d                                       # 再起应用"
+Write-Host ""
+Write-Host "打包用法:" -ForegroundColor Yellow
 Write-Host "  首次部署:      .\scripts\package-arm64.ps1"
 Write-Host "  更新应用:      .\scripts\package-arm64.ps1 -SkipInfra"
 Write-Host "  只更新后端:    .\scripts\package-arm64.ps1 -SkipInfra -BackendOnly"

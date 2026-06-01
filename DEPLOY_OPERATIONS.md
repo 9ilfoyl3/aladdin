@@ -55,12 +55,17 @@ make docker-package-amd64
 
 ```
 deploy-amd64/ (或 deploy-arm64/)
-├── app.tar            ← 应用镜像（backend + frontend）
-├── infra.tar          ← 基础设施镜像（首次才有）
-├── nginx.conf         ← nginx 配置
-├── docker-compose.yml ← 生产编排文件
-└── .env.example       ← 环境变量模板
+├── app.tar                      ← 应用镜像（backend + frontend）
+├── infra.tar                    ← 基础设施镜像（首次才有）
+├── docker-compose.yml           ← 应用编排（backend/worker/frontend）
+├── middleware/
+│   └── docker-compose.yml       ← 中间件编排（etcd/minio/milvus/postgres/redis，独立启停）
+├── nginx.conf                   ← nginx 配置
+└── .env.example                 ← 环境变量模板
 ```
+
+> 应用与中间件拆成两个 compose，共享外部网络 `arag-network`，可分别启停与升级
+> （更新应用镜像时不影响中间件与数据卷）。
 
 ---
 
@@ -78,26 +83,34 @@ docker load -i app.tar
 
 # 3. 配置环境变量
 cp .env.example .env
-vim .env    # 必须配置 LLM / Embedding / Rerank
+vim .env    # 必须配置 JWT_SECRET / SUPER_ADMIN_* / LLM / Embedding / Rerank
 
-# 4. 启动所有服务
+# 4. 创建共享网络（仅首次）
+docker network create arag-network
+
+# 5. 先启动中间件，等全部 healthy
+cd middleware && docker compose --env-file ../.env up -d && cd ..
+docker compose -f middleware/docker-compose.yml --env-file .env ps   # 等到 healthy
+
+# 6. 再启动应用服务
 docker compose up -d
 
-# 5. 验证
-docker compose ps    # 所有服务应为 healthy
+# 7. 验证
+docker compose ps                                   # 应用 backend/worker/frontend
+docker compose -f middleware/docker-compose.yml ps  # 中间件
 ```
 
-> 首次启动需等待约 30 秒，PostgreSQL 和 Milvus 初始化完成后 backend 自动创建表结构。
+> 首次启动需等待约 30 秒：中间件 healthy 后再起应用，backend 会自动建表 + 引导初始化。
 
 ### 迭代更新
 
 ```bash
 cd /opt/artoo
 
-# 加载新镜像
+# 加载新镜像（中间件不动）
 docker load -i app.tar
 
-# 重建应用服务（基础设施不动）
+# 仅重建应用服务（中间件与数据卷不受影响）
 docker compose up -d --force-recreate backend worker frontend
 
 # 清理旧镜像
@@ -167,26 +180,35 @@ PIPELINE_TASK_TIMEOUT_MINUTES=30
 
 ## 五、运维命令
 
+> 应用服务（backend/worker/frontend）用项目根的 `docker-compose.yml`；
+> 中间件（postgres/milvus/redis/etcd/minio）用 `middleware/docker-compose.yml`。
+> 下面命令默认操作应用；操作中间件时加 `-f middleware/docker-compose.yml`。
+
 ```bash
 # 查看状态
-docker compose ps
+docker compose ps                                   # 应用服务
+docker compose -f middleware/docker-compose.yml ps  # 中间件
 
 # 查看日志
 docker compose logs backend -f          # API 日志
 docker compose logs worker -f           # Worker 日志（文档处理）
 docker compose logs frontend -f         # nginx 日志
+docker compose -f middleware/docker-compose.yml logs postgres -f   # 中间件日志
 
 # 重启服务
 docker compose restart backend          # 重启 API
 docker compose restart worker           # 重启 Worker
 
-# 停止 / 启动
-docker compose down                     # 停止所有服务
-docker compose up -d                    # 启动所有服务
+# 停止 / 启动（仅应用，中间件与数据卷不受影响）
+docker compose down                     # 停止应用服务
+docker compose up -d                    # 启动应用服务
+
+# 停止中间件（数据卷保留）
+docker compose -f middleware/docker-compose.yml down
 
 # 清理（慎用）
-docker compose down -v                  # 停止并删除所有数据卷
-docker image prune -f                   # 清理无用镜像
+docker compose -f middleware/docker-compose.yml down -v   # 停止中间件并删除数据卷（清库！）
+docker image prune -f                                     # 清理无用镜像
 ```
 
 ### Worker 说明
