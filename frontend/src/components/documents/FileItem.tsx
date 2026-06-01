@@ -192,16 +192,23 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
           </div>
         )}
 
-        {/* 非完成状态指示器 - 底部居中 */}
+        {/* 处理中：底部进度条 + 居中「解析中 N%」标签，明确区分于排队/完成 */}
         {doc.status === 'processing' && (
-          <div className="absolute bottom-0 inset-x-0">
-            <div className="h-1 bg-muted/60 rounded-b overflow-hidden">
-              <div
-                className="h-full bg-primary transition-all duration-500 ease-out"
-                style={{ width: `${doc.progress || 0}%` }}
-              />
+          <>
+            <div className="absolute bottom-1 inset-x-1 flex justify-center">
+              <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
+                解析中 {Math.round(doc.progress || 0)}%
+              </Badge>
             </div>
-          </div>
+            <div className="absolute bottom-0 inset-x-0">
+              <div className="h-1 bg-muted/60 rounded-b overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all duration-500 ease-out"
+                  style={{ width: `${doc.progress || 0}%` }}
+                />
+              </div>
+            </div>
+          </>
         )}
         {doc.status === 'pending' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
@@ -211,9 +218,12 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
           </div>
         )}
 
-        {/* 失败状态 - 图标中间显示失败+重试 */}
+        {/* 失败状态 - 图标中间显示失败+重试（hover 显示失败原因） */}
         {doc.status === 'failed' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded"
+            title={doc.error_message || doc.progress_message || '处理失败'}
+          >
             <span className="text-[9px] text-red-500 font-medium">失败</span>
             {onRetry && (
               <button
