@@ -85,6 +85,9 @@ class KnowledgeBaseResponse(BaseModel):
     tenant_name: str | None = None
     # 展示用：该库点对点共享给的用户数（私有库显示「分享给 N 人」）
     share_count: int | None = None
+    # 当前请求者对该库是否有内容写权限（owner/组织读写/write 共享）。
+    # 供前端在文档页显隐上传/新建/删除等写操作入口；真正鉴权仍在后端守卫。
+    can_write: bool | None = None
 
 
 class ShareRequest(BaseModel):
@@ -123,6 +126,7 @@ def _to_resp(
     owner_username: str | None = None,
     tenant_name: str | None = None,
     share_count: int | None = None,
+    can_write: bool | None = None,
 ) -> KnowledgeBaseResponse:
     return KnowledgeBaseResponse(
         id=kb.id, name=kb.name, description=kb.description, config=kb.config,
@@ -131,7 +135,7 @@ def _to_resp(
         visibility=kb.visibility, owner_user_id=kb.owner_user_id,
         org_permission=kb.org_permission,
         owner_username=owner_username, tenant_name=tenant_name,
-        share_count=share_count,
+        share_count=share_count, can_write=can_write,
     )
 
 
@@ -308,7 +312,15 @@ async def get_knowledge_base(
     if kb is None:
         raise CrossTenantError()
     await _authorize_kb(db, identity, kb, KbAccessEnum.READ)
-    return _to_resp(kb)
+    # 计算写权限，供前端显隐写操作入口（owner/组织读写/write 共享 -> True）
+    grants = await _load_grants(db, kb.id)
+    write_decision = kb_authorization_decision(
+        identity,
+        kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
+        kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
+        access=KbAccessEnum.WRITE, grants=grants,
+    )
+    return _to_resp(kb, can_write=write_decision.allow)
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseResponse)

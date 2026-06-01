@@ -77,6 +77,31 @@ async def _authorize_kb_access(
     return kb
 
 
+async def _kb_write_allowed(
+    db: AsyncSession, identity: IdentityContext, kb: KnowledgeBase
+) -> bool:
+    """判断当前身份对该 KB 是否有内容写权限（owner / 组织读写 / write 共享）。
+
+    复用唯一判定纯函数 kb_authorization_decision(WRITE)，不另起规则。
+    用于：决定只读访客的文档列表是否过滤、前端是否显示写操作入口。
+    """
+    grant_rows = await db.execute(
+        select(
+            KnowledgeBaseGrant.grantee_type,
+            KnowledgeBaseGrant.grantee_id,
+            KnowledgeBaseGrant.permission,
+        ).where(KnowledgeBaseGrant.kb_id == kb.id)
+    )
+    grants = [GrantView(gt, gid, perm) for gt, gid, perm in grant_rows.all()]
+    decision = kb_authorization_decision(
+        identity,
+        kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
+        kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
+        access=KbAccessEnum.WRITE, grants=grants,
+    )
+    return decision.allow
+
+
 def _ensure_not_super_admin_content(identity: IdentityContext) -> None:
     """Content_View_Boundary：Super_Admin 默认不可读业务内容正文（R34）。
 
@@ -299,9 +324,15 @@ async def list_documents(
     identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """获取知识库下的文档列表（支持按文件夹过滤 + 分页/滚动加载）"""
+    """获取知识库下的文档列表（支持按文件夹过滤 + 分页/滚动加载）。
+
+    只读访客（无写权限：组织只读/共享只读/管理员看他人私有库）仅返回 completed 文档——
+    未完成/失败的文档是库主内务，对只读访客无意义且无操作入口，故不展示（方案 A）。
+    有写权限者（owner/组织读写/write 共享）看到全部状态文档，保留重试入口。
+    """
     # 先校验对该 KB 的读权限（跨租户/不可读 -> 404）
-    await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.READ)
+    kb = await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.READ)
+    can_write = await _kb_write_allowed(db, identity, kb)
 
     # 参数兜底
     page = max(1, page)
@@ -310,9 +341,12 @@ async def list_documents(
 
     # 按文件夹过滤
     if folder_id:
-        cond = (Document.kb_id == kb_id, Document.folder_id == folder_id)
+        cond = [Document.kb_id == kb_id, Document.folder_id == folder_id]
     else:
-        cond = (Document.kb_id == kb_id, Document.folder_id.is_(None))
+        cond = [Document.kb_id == kb_id, Document.folder_id.is_(None)]
+    # 只读访客：仅展示已完成文档
+    if not can_write:
+        cond.append(Document.status == "completed")
 
     # 总数
     total = await db.scalar(select(func.count(Document.id)).where(*cond)) or 0
