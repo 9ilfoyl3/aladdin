@@ -1,11 +1,11 @@
 """ApiKeyAuthenticator：API Key 校验 + 判型 + 身份合成（tenant-auth）。
 
 三处收敛点之一（认证侧）。替换原 verify_key 的"仅校验"，扩展为按 key_type 分支
-合成统一的 IdentityContext：
-  - tenant_level   -> Virtual_Identity + 固定 CONTENT_LEVEL_PERMISSIONS + Key 的 scope
-  - user_level     -> 绑定 user 实时权限；通道操作级别钉死 tenant
+合成统一的 IdentityContext（WeKnora 式固定角色，不再有权限点字典）：
+  - tenant_level   -> Virtual_Identity，role=None（机器身份，靠 kb_scope 裁剪）
+  - user_level     -> 绑定用户的固定角色（admin/member）；通道操作级别钉死 tenant
   - external_agent -> 校验 X-External-User-Id；按 (key_source, external_user_id) 懒创建
-                      External_User；tenant_id 硬锁 External_User_Tenant；固定权限
+                      External_User；tenant_id 硬锁 External_User_Tenant；固定 member
 
 错误语义：Key 不存在/撤销 -> 401；租户停用 -> 403；绑定用户停用 -> 403；
 代理 Key 缺 X-External-User-Id -> 400。
@@ -26,11 +26,10 @@ from app.api.errors import (
     UserDisabledError,
 )
 from app.auth.constants import (
-    CONTENT_LEVEL_PERMISSIONS,
-    EXTERNAL_USER_PERMISSIONS,
     EXTERNAL_USER_TENANT_ID,
     HEADER_EXTERNAL_USER_ID,
     ApiKeyTypeEnum,
+    TenantRoleEnum,
 )
 from app.auth.apikey_usage import record_api_key_usage
 from app.auth.identity import (
@@ -38,10 +37,6 @@ from app.auth.identity import (
     IdentitySourceEnum,
     KbScope,
     OperationLevelEnum,
-)
-from app.auth.permission_resolver import (
-    resolve_effective_permissions,
-    resolve_role_ids,
 )
 from app.schema.db import ApiKey, ExternalUser, Tenant, User
 
@@ -112,18 +107,18 @@ class ApiKeyAuthenticator:
         return identity
 
     def _auth_tenant_level(self, api_key: ApiKey) -> IdentityContext:
-        """租户级 Key -> Virtual_Identity（固定内容级权限 + Key 的 scope）。"""
+        """租户级 Key -> Virtual_Identity（机器身份 role=None，靠 Key 的 scope 裁剪）。"""
         return IdentityContext(
             source=IdentitySourceEnum.API_KEY,
             op_level=OperationLevelEnum.TENANT,
             tenant_id=api_key.tenant_id,
             api_key_id=api_key.id,
-            effective_permissions=CONTENT_LEVEL_PERMISSIONS,
+            role=None,  # 机器身份无角色，访问范围完全由 kb_scope 裁剪
             kb_scope=_scope_from_json(api_key.authorized_scope),
         )
 
     async def _auth_user_level(self, api_key: ApiKey) -> IdentityContext:
-        """用户级 Key -> 绑定 user 的实时权限；通道操作级别钉死 tenant。"""
+        """用户级 Key -> 绑定 user 的固定角色；通道操作级别钉死 tenant。"""
         bound_user_id = api_key.bound_user_id
         if not bound_user_id:
             # 数据不一致：用户级 Key 却无绑定用户。fail-closed。
@@ -134,9 +129,14 @@ class ApiKeyAuthenticator:
         if not user.is_active:
             raise UserDisabledError()
 
-        perms = await resolve_effective_permissions(self.session, bound_user_id)
-        role_ids = await resolve_role_ids(self.session, bound_user_id)
-        # 通道边界：Guard 还会剥离管理/平台操作；此处携带实时权限供内容级判定。
+        # 角色随绑定用户。super_admin 不应绑定到用户级 Key，但若出现则置 None 兜底；
+        # 否则取该用户的固定角色，缺失时回退 member（fail-safe，仅予最小角色）。
+        role = (
+            None
+            if user.is_super_admin
+            else (TenantRoleEnum(user.role) if user.role else TenantRoleEnum.MEMBER)
+        )
+        # 通道边界：Guard 还会剥离管理/平台操作；此处携带固定角色供内容级判定。
         return IdentityContext(
             source=IdentitySourceEnum.API_KEY,
             op_level=OperationLevelEnum.TENANT,
@@ -144,8 +144,7 @@ class ApiKeyAuthenticator:
             user_id=bound_user_id,
             username=user.username,
             api_key_id=api_key.id,
-            effective_permissions=perms,
-            role_ids=role_ids,
+            role=role,
         )
 
     async def _auth_external_agent(
@@ -170,7 +169,7 @@ class ApiKeyAuthenticator:
             tenant_id=EXTERNAL_USER_TENANT_ID,  # 硬锁定，忽略任何目标租户入口
             external_user_id=external_user.id,
             api_key_id=api_key.id,
-            effective_permissions=EXTERNAL_USER_PERMISSIONS,
+            role=TenantRoleEnum.MEMBER,  # 外部用户固定为 member
         )
 
     async def _get_or_create_external_user(

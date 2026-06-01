@@ -1,7 +1,10 @@
-"""tenant-auth 常量与枚举（禁止魔法值，集中定义）。
+"""tenant-rbac-refactor 常量与枚举（禁止魔法值，集中定义）。
 
-权限点、Key 类型、可见性、被授权主体类型一律用字符串枚举；
-并定义两组固定的内容级权限集合（不含任何管理/平台权限点）。
+权限模型已从「自定义角色 + 扁平权限点」重构为 WeKnora 式「固定角色 + 归属轴」：
+租户内人类成员仅有 ``admin`` / ``member`` 两个固定角色（见 ``TenantRoleEnum``），
+租户内权限由「固定角色 + 是否资源所有者」判定，不再依赖任何权限点字典。
+
+Key 类型、可见性、被授权主体类型、授权级别、审计动作等一律用字符串枚举表达。
 """
 
 from __future__ import annotations
@@ -9,60 +12,24 @@ from __future__ import annotations
 from enum import Enum
 
 
-class PermissionTypeEnum(str, Enum):
-    """权限点类型：驱动后端能力 / 前端菜单 / 前端按钮。"""
+class TenantRoleEnum(str, Enum):
+    """租户固定角色（取代自定义角色 + 权限点字典）。"""
 
-    API = "api"      # 功能/操作权限（后端能否执行某操作）
-    MENU = "menu"    # 前端菜单项可见性
-    BTN = "btn"      # 前端按钮/动作可见性
+    ADMIN = "admin"    # 租户管理员：管理本租户全部资源与用户，不受归属轴限制
+    MEMBER = "member"  # 普通成员（≈WeKnora contributor）：仅管自有资源，他人只读
 
 
-class PermissionEnum(str, Enum):
-    """权限点字典（code）。鉴权依据权限点而非硬编码角色名。
-
-    新增权限点 = 在此追加并由 Bootstrap 写入 permissions 表，无需改鉴权代码或表结构。
-    """
-
-    # —— 知识库内容能力（api） ——
-    KB_CREATE = "kb:create"
-    KB_READ = "kb:read"
-    KB_WRITE = "kb:write"
-    KB_WRITE_PUBLIC = "kb:write_public"          # 写入组织公共库（默认仅 admin）
-    KB_MANAGE_VISIBILITY = "kb:manage_visibility"  # 提升/收编可见性
-    KB_SHARE = "kb:share"                         # 点对点共享自己的库
-    QA_INVOKE = "qa:invoke"                       # 发起问答
-    RECALL_INVOKE = "recall:invoke"               # 发起召回
-
-    # —— 管理能力（api，Administrative_Operation） ——
-    APIKEY_MANAGE = "apikey:manage"        # 管理租户级 Key（管理员）
-    APIKEY_SELF = "apikey:self"            # 为自己创建/管理用户级 Key（普通用户即可，非管理级）
-    USER_MANAGE = "user:manage"
-    ROLE_MANAGE = "role:manage"
-    CONFIG_MANAGE = "config:manage"               # LLM/Embed/OCR/Agent/系统配置
-
-    # —— 平台能力（api，Platform_Operation，仅 Super_Admin/JWT） ——
-    TENANT_MANAGE = "tenant:manage"
-
-    # —— 前端菜单（menu） ——
-    MENU_KNOWLEDGE = "menu:knowledge"
-    MENU_CHAT = "menu:chat"
-    MENU_RETRIEVAL = "menu:retrieval"
-    MENU_SETTINGS = "menu:settings"
-    MENU_ADMIN = "menu:admin"
-    MENU_AUDIT = "menu:audit"          # 审计日志菜单（租管/超管）
-
-    # —— 前端按钮（btn） ——
-    BTN_KB_DELETE = "btn:kb_delete"
-    BTN_KB_SHARE = "btn:kb_share"
-    BTN_DOC_UPLOAD = "btn:doc_upload"
-    BTN_APIKEY_CREATE = "btn:apikey_create"
+# v1 接受的租户角色取值（创建/修改用户时校验用）
+TENANT_ROLES_ENABLED: frozenset[str] = frozenset(
+    {TenantRoleEnum.ADMIN.value, TenantRoleEnum.MEMBER.value}
+)
 
 
 class ApiKeyTypeEnum(str, Enum):
     """API Key 三模型。"""
 
     TENANT_LEVEL = "tenant_level"      # 机器凭据，合成 Virtual_Identity
-    USER_LEVEL = "user_level"          # 绑定用户，继承实时权限
+    USER_LEVEL = "user_level"          # 绑定用户，能力随该用户固定角色解析
     EXTERNAL_AGENT = "external_agent"  # 超管级代理，代表外部用户
 
 
@@ -70,22 +37,22 @@ class KbVisibilityEnum(str, Enum):
     """知识库可见性。"""
 
     PRIVATE = "private"            # 仅 owner 与被授权者
-    ORGANIZATION = "organization"  # 租户内公共：本租户全员可读，写需权限
+    ORGANIZATION = "organization"  # 租户内公共：本租户全员可读，写需 owner/admin
 
 
 class GranteeTypeEnum(str, Enum):
-    """被授权主体类型。v1 仅 user/role 生效；organization/tenant 结构预留、行为关闭。"""
+    """被授权主体类型。
 
-    USER = "user"
-    ROLE = "role"
-    # —— 预留（v1 创建端点拒绝、判定函数从不放行） ——
-    ORGANIZATION = "organization"
-    TENANT = "tenant"
+    点对点共享收敛后仅保留 ``user`` 一个取值（废弃自定义角色后按角色共享失去依附，
+    跨租户 organization/tenant 预留枚举一并移除）。
+    """
+
+    USER = "user"  # 点对点共享给具体注册用户
 
 
 # v1 实际接受的被授权主体类型（创建授权时校验用）
 GRANTEE_TYPES_ENABLED: frozenset[str] = frozenset(
-    {GranteeTypeEnum.USER.value, GranteeTypeEnum.ROLE.value}
+    {GranteeTypeEnum.USER.value}
 )
 
 
@@ -96,74 +63,24 @@ class GrantPermissionEnum(str, Enum):
     WRITE = "write"
 
 
+class OrgPermissionEnum(str, Enum):
+    """组织公共库开放维度（仅 visibility=organization 时有效）。"""
+
+    READ = "read"    # 组织成员仅可读内容
+    WRITE = "write"  # 组织成员可读写内容（上传/删除文档、建文件夹）
+
+
+# v1 接受的组织开放维度取值（设可见性时校验用）
+ORG_PERMISSIONS_ENABLED: frozenset[str] = frozenset(
+    {OrgPermissionEnum.READ.value, OrgPermissionEnum.WRITE.value}
+)
+
+
 class TenantTypeEnum(str, Enum):
     """租户类型。"""
 
     BUSINESS = "business"    # 普通业务租户
     EXTERNAL = "external"    # 外部用户内置租户（External_User_Tenant）
-    DEFAULT = "default"      # 保留（本特性不做历史迁移，不创建承接历史数据的默认租户）
-
-
-class BuiltinRoleEnum(str, Enum):
-    """内置角色名。"""
-
-    ADMIN = "admin"
-    USER = "user"
-
-
-# ============================================================
-# 固定内容级权限集合（不含任何管理/平台权限点）
-# 用于：租户级 Key 的 Virtual_Identity、外部用户身份。
-# 这两类身份永远不得触达 Administrative_Operation / Platform_Operation。
-# ============================================================
-
-# 租户级 API Key（Virtual_Identity）固定权限：内容读写 + 问答召回（受 scope 进一步约束）
-CONTENT_LEVEL_PERMISSIONS: frozenset[str] = frozenset({
-    PermissionEnum.KB_CREATE.value,
-    PermissionEnum.KB_READ.value,
-    PermissionEnum.KB_WRITE.value,
-    PermissionEnum.QA_INVOKE.value,
-    PermissionEnum.RECALL_INVOKE.value,
-})
-
-# 外部用户固定权限：管理自有私有库 + 读公共库 + 问答召回（不含写公共库、不含任何管理）
-EXTERNAL_USER_PERMISSIONS: frozenset[str] = frozenset({
-    PermissionEnum.KB_CREATE.value,
-    PermissionEnum.KB_READ.value,
-    PermissionEnum.KB_WRITE.value,
-    PermissionEnum.QA_INVOKE.value,
-    PermissionEnum.RECALL_INVOKE.value,
-})
-
-# 管理级权限点集合（API Key 通道一律不得拥有/行使）
-ADMINISTRATIVE_PERMISSIONS: frozenset[str] = frozenset({
-    PermissionEnum.APIKEY_MANAGE.value,
-    PermissionEnum.USER_MANAGE.value,
-    PermissionEnum.ROLE_MANAGE.value,
-    PermissionEnum.CONFIG_MANAGE.value,
-})
-
-# 平台级权限点集合（仅 Super_Admin 经 JWT 行使）
-PLATFORM_PERMISSIONS: frozenset[str] = frozenset({
-    PermissionEnum.TENANT_MANAGE.value,
-})
-
-# user 内置角色的默认权限点（基础内容能力，不含 kb:write_public、不含任何管理/平台权限点）
-USER_ROLE_DEFAULT_PERMISSIONS: frozenset[str] = frozenset({
-    PermissionEnum.KB_CREATE.value,
-    PermissionEnum.KB_READ.value,
-    PermissionEnum.KB_WRITE.value,
-    PermissionEnum.KB_SHARE.value,
-    PermissionEnum.QA_INVOKE.value,
-    PermissionEnum.RECALL_INVOKE.value,
-    PermissionEnum.APIKEY_SELF.value,  # 仅为自己创建用户级 Key（非管理级，不等于 apikey:manage）
-    PermissionEnum.MENU_KNOWLEDGE.value,
-    PermissionEnum.MENU_CHAT.value,
-    PermissionEnum.MENU_RETRIEVAL.value,
-    PermissionEnum.BTN_DOC_UPLOAD.value,
-    PermissionEnum.BTN_KB_SHARE.value,
-    PermissionEnum.BTN_APIKEY_CREATE.value,
-})
 
 
 # 外部用户内置租户的固定标识（Bootstrap 创建时使用，保证幂等可查）
@@ -176,73 +93,21 @@ HEADER_EXTERNAL_USER_ID = "X-External-User-Id"
 HEADER_TENANT_ID = "X-Tenant-ID"
 
 
-# Tenant_Admin（内置 admin 角色）权限点 = 全部权限点 − 平台级权限点。
-# 租户管理员"除超管职权外都有"：能管本租户用户/角色/Key/可见性/审计，
-# 但绝不持有 tenant:manage（平台级）——故前端"租户管理"菜单对其自动隐藏，
-# 后端平台端点也因 op_level=platform 将其拒绝。
-TENANT_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
-    {p.value for p in PermissionEnum} - PLATFORM_PERMISSIONS
-)
-
-
 # ============================================================
-# 中文展示标签（前端权限/角色界面用，单一真值来源）
-# 后端权限点 code 是稳定的英文契约；这里集中提供给前端展示的中文名，避免前端散落硬编码。
+# 中文展示标签（前端角色界面用，单一真值来源）
+# 角色 code 是稳定的英文契约；这里集中提供给前端展示的中文名，避免前端散落硬编码。
 # ============================================================
 
-# 权限点 code -> 中文名（对标具体页面/动作/能力）
-PERMISSION_LABELS: dict[str, str] = {
-    # —— 功能（api）：后端能做什么 ——
-    PermissionEnum.KB_CREATE.value: "创建知识库",
-    PermissionEnum.KB_READ.value: "查看知识库",
-    PermissionEnum.KB_WRITE.value: "编辑知识库（文档增删改）",
-    PermissionEnum.KB_WRITE_PUBLIC.value: "写入组织公共库",
-    PermissionEnum.KB_MANAGE_VISIBILITY.value: "管理知识库可见性",
-    PermissionEnum.KB_SHARE.value: "共享知识库给他人",
-    PermissionEnum.QA_INVOKE.value: "使用智能问答",
-    PermissionEnum.RECALL_INVOKE.value: "使用检索召回",
-    PermissionEnum.APIKEY_MANAGE.value: "管理租户 API Key",
-    PermissionEnum.APIKEY_SELF.value: "管理本人 API Key",
-    PermissionEnum.USER_MANAGE.value: "用户管理",
-    PermissionEnum.ROLE_MANAGE.value: "角色管理",
-    PermissionEnum.CONFIG_MANAGE.value: "系统与模型配置",
-    PermissionEnum.TENANT_MANAGE.value: "租户管理（平台级）",
-    # —— 菜单（menu）：左侧能看到哪些页面 ——
-    PermissionEnum.MENU_KNOWLEDGE.value: "菜单：知识库",
-    PermissionEnum.MENU_CHAT.value: "菜单：智能问答",
-    PermissionEnum.MENU_RETRIEVAL.value: "菜单：检索测试",
-    PermissionEnum.MENU_SETTINGS.value: "菜单：系统配置",
-    PermissionEnum.MENU_ADMIN.value: "菜单：管理后台",
-    PermissionEnum.MENU_AUDIT.value: "菜单：审计日志",
-    # —— 按钮（btn）：页面内能看到哪些操作按钮 ——
-    PermissionEnum.BTN_KB_DELETE.value: "按钮：删除知识库",
-    PermissionEnum.BTN_KB_SHARE.value: "按钮：共享知识库",
-    PermissionEnum.BTN_DOC_UPLOAD.value: "按钮：上传文档",
-    PermissionEnum.BTN_APIKEY_CREATE.value: "按钮：创建 API Key",
-}
-
-# 权限点类型 -> 中文名 + 释义
-PERMISSION_TYPE_LABELS: dict[str, str] = {
-    PermissionTypeEnum.API.value: "功能权限",
-    PermissionTypeEnum.MENU.value: "菜单可见",
-    PermissionTypeEnum.BTN.value: "按钮可见",
-}
-
-# 内置角色名 -> 中文名（自定义角色无映射时前端原样展示其名）
+# 角色 code -> 中文名
 ROLE_LABELS: dict[str, str] = {
-    BuiltinRoleEnum.ADMIN.value: "管理员",
-    BuiltinRoleEnum.USER.value: "普通用户",
+    TenantRoleEnum.ADMIN.value: "管理员",
+    TenantRoleEnum.MEMBER.value: "普通成员",
 }
 
 
-def permission_label(code: str) -> str:
-    """权限点中文名；未登记的回退为 code 本身。"""
-    return PERMISSION_LABELS.get(code, code)
-
-
-def role_label(name: str) -> str:
-    """角色中文名；自定义角色回退为原名。"""
-    return ROLE_LABELS.get(name, name)
+def role_label(role: str) -> str:
+    """角色中文名；未登记的角色回退为原值。"""
+    return ROLE_LABELS.get(role, role)
 
 
 class AuditActionEnum(str, Enum):
@@ -257,13 +122,9 @@ class AuditActionEnum(str, Enum):
     USER_CREATE = "user.create"
     USER_SET_STATUS = "user.set_status"
     USER_RESET_PASSWORD = "user.reset_password"
-    USER_SET_ROLES = "user.set_roles"
     USER_TRANSFER_KB = "user.transfer_kb"
     USER_UPDATE_PROFILE = "user.update_profile"
     TENANT_UPDATE_PROFILE = "tenant.update_profile"
-    ROLE_CREATE = "role.create"
-    ROLE_SET_PERMISSIONS = "role.set_permissions"
-    ROLE_DELETE = "role.delete"
     APIKEY_CREATE = "apikey.create"
     APIKEY_REVOKE = "apikey.revoke"
     APIKEY_UPDATE_SCOPE = "apikey.update_scope"
@@ -290,4 +151,4 @@ class InvitationScopeEnum(str, Enum):
     """邀请链接用途。"""
 
     CREATE_TENANT = "create_tenant"  # 仅 Super_Admin 可发：被邀请人建租户 + 自身为租管
-    CREATE_USER = "create_user"      # user:manage 可发：在签发者租户内建普通用户
+    CREATE_USER = "create_user"      # 租户管理员可发：在签发者租户内建普通用户

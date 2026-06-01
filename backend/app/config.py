@@ -98,13 +98,11 @@ class Settings(BaseSettings):
     upload_max_file_size_mb: int = 500  # 单文件最大 MB
 
     # ============================================================
-    # 认证与授权（tenant-auth）
+    # 认证与授权（tenant-rbac-refactor）
     # ============================================================
-    # 鉴权总开关（灰度阀）：False 时旁路 Authorization_Guard，仅用于联调/分步验证。
-    # 见 design.md「显式兼容清单」C1——正式启用后应置 True 或移除旁路。
-    auth_enabled: bool = True
+    # 鉴权始终强制：已移除 auth_enabled 旁路后门（清理 E），任何受保护端点缺有效凭据恒 401。
 
-    # JWT（HS256）。jwt_secret 为启动期硬依赖：auth_enabled=True 时缺失则 fail-fast。
+    # JWT（HS256）。jwt_secret 为启动期硬依赖：缺失则在 get_settings() fail-fast。
     jwt_secret: str = ""
     jwt_expire_minutes: int = 720  # JWT 有效期（分钟），默认 12 小时
 
@@ -128,5 +126,15 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    """获取全局配置单例"""
-    return Settings()
+    """获取全局配置单例。
+
+    启动期 fail-fast：jwt_secret 为空即抛 RuntimeError，禁止用空密钥静默兜底进入
+    可服务状态（清理 E 后鉴权始终强制，密钥缺失必须显式失败）。
+    """
+    settings = Settings()
+    if not settings.jwt_secret:
+        raise RuntimeError(
+            "jwt_secret 未配置：请设置环境变量 JWT_SECRET（HS256 签名密钥），"
+            "缺失时服务拒绝启动（fail-fast）。"
+        )
+    return settings

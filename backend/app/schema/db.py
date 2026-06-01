@@ -36,6 +36,9 @@ class KnowledgeBase(Base, TenantScopedMixin):
     # tenant-auth：归属与可见性
     owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)  # KB_Owner
     visibility: Mapped[str] = mapped_column(String, default="private", nullable=False)  # private | organization
+    # 组织公共库开放维度：read（默认，组织成员仅可读）| write（组织成员可写内容）。
+    # 仅 visibility=organization 时有效；private 忽略（不参与判定）。
+    org_permission: Mapped[str] = mapped_column(String, default="read", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -168,9 +171,6 @@ class EmbedConfig(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     config_type: Mapped[str] = mapped_column(String(20), nullable=False)  # embedding | rerank
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="remote")  # 统一为 remote
-    # 保留字段（兼容旧数据库，不再使用）
-    local_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    device: Mapped[str] = mapped_column(String(10), default="cpu")
     # 远程服务字段
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)  # BAAI/bge-m3 等
     base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
@@ -264,6 +264,9 @@ class User(Base):
     # 用户名全局唯一（跨租户唯一）：登录仅凭 用户名+口令，无需再指定租户。
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # 固定角色：admin | member。创建路径一律显式赋值（建用户=member、建管理员/注册=admin）；
+    # Super_Admin 为 None（不参与租户角色）。不设列级 default 以免覆盖 Super_Admin 的显式 None。
+    role: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -303,60 +306,18 @@ class ExternalUser(Base):
     )
 
 
-class Role(Base):
-    """角色表：一组权限点的命名集合，租户内对象（绝不跨租户）"""
-    __tablename__ = "roles"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String, ForeignKey("tenants.id"), index=True, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)  # admin | user | 自定义
-    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_role_tenant_name"),
-    )
-
-
-class Permission(Base):
-    """权限点字典（全局共享定义，不归属租户）。新增权限点=插入数据，无需改表。"""
-    __tablename__ = "permissions"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    code: Mapped[str] = mapped_column(String, unique=True, nullable=False)  # kb:create / menu:knowledge / btn:kb_delete
-    type: Mapped[str] = mapped_column(String, nullable=False)  # api | menu | btn
-    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
-
-class RolePermission(Base):
-    """角色-权限点关联表"""
-    __tablename__ = "role_permissions"
-
-    role_id: Mapped[str] = mapped_column(String, ForeignKey("roles.id"), primary_key=True)
-    permission_id: Mapped[str] = mapped_column(String, ForeignKey("permissions.id"), primary_key=True)
-
-
-class UserRole(Base):
-    """用户-角色关联表"""
-    __tablename__ = "user_roles"
-
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), primary_key=True)
-    role_id: Mapped[str] = mapped_column(String, ForeignKey("roles.id"), primary_key=True)
-
-
 class KnowledgeBaseGrant(Base):
     """统一知识库授权/共享表：把 私有/组织公共/点对点 统一到一套授权数据（R16）"""
     __tablename__ = "knowledge_base_grants"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     kb_id: Mapped[str] = mapped_column(String, ForeignKey("knowledge_bases.id"), index=True, nullable=False)
-    # v1 仅接受 user|role；organization|tenant 为预留枚举（结构预留、行为关闭，R16.2/16.3）
-    grantee_type: Mapped[str] = mapped_column(String, nullable=False)
-    grantee_id: Mapped[str] = mapped_column(String, nullable=False)  # user_id 或 role_id
+    # 本次重构后语义固定为 user：废弃自定义角色后按角色共享失去依附，
+    # organization/tenant 跨租户预留亦一并移除，grantee_type 恒为 "user"。
+    grantee_type: Mapped[str] = mapped_column(String, nullable=False, default="user")
+    grantee_id: Mapped[str] = mapped_column(String, nullable=False)  # user_id
     permission: Mapped[str] = mapped_column(String, nullable=False)  # read | write
     granted_by: Mapped[str] = mapped_column(String, nullable=False)  # 发起共享的 user_id
-    # 面向未来跨租户预留，v1 恒为 NULL、鉴权代码从不读取（R16.7）
-    source_tenant_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (
@@ -377,6 +338,9 @@ class AuditLog(Base):
     actor_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     actor_tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
     actor_is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 操作者写入时刻的固定角色快照（admin/member/None）。审计是不可变事实，故快照而非
+    # 展示时 join 当前用户（用户后续改角色/删号不影响历史记录的真实性）。
+    actor_role: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     action: Mapped[str] = mapped_column(String, index=True, nullable=False)  # AuditActionEnum
     target_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # tenant|user|role|api_key|kb|invitation
     target_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)

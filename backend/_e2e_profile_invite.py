@@ -33,8 +33,9 @@ def main():
 
         # 超管 me/profile：身份=超级管理员
         prof = c.get(f"{BASE}/api/auth/me/profile", headers=auth(sa)).json()
-        check("超管资料 is_super_admin", prof.get("is_super_admin") is True, str(prof.get("role_names")))
-        check("超管身份名=超级管理员", prof.get("role_names") == ["超级管理员"])
+        check("超管资料 is_super_admin", prof.get("is_super_admin") is True, str(prof.get("role")))
+        check("超管角色为空(role=None)", prof.get("role") is None, str(prof.get("role")))
+        check("超管身份名=超级管理员", prof.get("role_label") == "超级管理员", str(prof.get("role_label")))
 
         # 建租户（带简介+头像）
         r = c.post(f"{BASE}/api/admin/tenants", headers=auth(sa),
@@ -70,7 +71,7 @@ def main():
         check("租管自助改资料 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
         check("租管资料回显简介", r.json().get("description") == "我是管理员")
         check("租管资料回显头像", bool(r.json().get("avatar")))
-        check("租管身份名含 admin（前端经 roleLabel 显示为管理员）", "admin" in r.json().get("role_names", []), str(r.json().get("role_names")))
+        check("租管身份为 admin（前端经 roleLabel 显示为管理员）", r.json().get("role") == "admin", str(r.json().get("role")))
 
         # 租管不能改租户资料（平台级）——应 403
         r = c.put(f"{BASE}/api/admin/tenants/{tid}/profile", headers=auth(adm),

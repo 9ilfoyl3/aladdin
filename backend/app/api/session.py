@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, delete
 
-from app.api.deps import authorization_guard
+from app.api.deps import require_authenticated
 from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.auth.identity import IdentityContext
 from app.config import get_settings
@@ -86,7 +86,7 @@ async def _get_owned_session(session, session_id: str) -> ChatSession:
 
 @router.get("")
 async def list_sessions(
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ) -> list[SessionItem]:
     """获取会话列表（按更新时间倒序，仅本租户；空会话过滤）"""
     async with async_session() as session:
@@ -120,7 +120,7 @@ async def list_sessions(
 @router.post("")
 async def create_session(
     req: SessionCreate,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ) -> SessionItem:
     """创建新会话（盖章 tenant_id）"""
     new_session = ChatSession(
@@ -145,7 +145,7 @@ async def create_session(
 async def update_session(
     session_id: str,
     req: SessionUpdate,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ) -> SessionItem:
     """更新会话（重命名）"""
     async with async_session() as session:
@@ -171,7 +171,7 @@ async def update_session(
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ):
     """删除会话及其所有消息（仅本租户）"""
     async with async_session() as session:
@@ -184,7 +184,7 @@ async def delete_session(
 @router.get("/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ) -> list[MessageItem]:
     """获取会话的所有消息（消息正文受内容边界约束）"""
     _ensure_not_super_admin_content(identity)
@@ -210,7 +210,7 @@ async def get_session_messages(
 @router.delete("/{session_id}/messages")
 async def clear_session_messages(
     session_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
 ):
     """清空会话消息（保留会话本身，仅本租户）"""
     async with async_session() as session:

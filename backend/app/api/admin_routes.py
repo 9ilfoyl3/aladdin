@@ -1,15 +1,17 @@
-"""管理路由（tenant-auth）：平台级（Super_Admin）与租户级（Tenant_Admin）。
+"""管理路由（tenant-rbac-refactor）：平台级（Super_Admin）与租户级（Tenant_Admin）。
 
-平台级（op_level=platform，allow_api_key=False，仅 Super_Admin/JWT）：
-  - 租户 CRUD / 启停
-  - 为新租户创建初始 Tenant_Admin
-  - 跨租户兜底：重置任意管理员口令、启停任意用户
+平台级（require_platform：op_level=platform、禁 api_key、仅 Super_Admin/JWT）：
+  - 租户 CRUD / 启停 / 维护展示资料
+  - 为新租户创建初始 Tenant_Admin、补充 Tenant_Admin（直接写 role=admin）
+  - 跨租户兜底：列出指定租户用户、重置任意管理员口令、启停任意用户
 
-租户级（需相应权限点，allow_api_key=False）：
-  - 本租户用户 CRUD / 启停 / 口令重置（user:manage）
-  - 自定义角色 CRUD、角色权限点分配、用户角色分配（role:manage）
+租户级（require_tenant_admin：admin 或 super_admin、禁 api_key）：
+  - 本租户用户 CRUD / 启停 / 口令重置 / 转移知识库
+  - 审计日志查询（租管限本租户，超管全局）
 
-越租户操作一律 404（存在性非泄露）。
+本次重构已删除自定义角色 / 权限点端点（角色 CRUD、权限点字典、用户角色分配）：
+租户内权限改由「固定角色（admin/member）+ 归属轴」判定。建用户固定写 role=member；
+建初始/补充 Tenant_Admin 写 role=admin。越租户操作一律 404（存在性非泄露）。
 """
 
 from __future__ import annotations
@@ -21,27 +23,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import authorization_guard, get_db_session
+from app.api.deps import get_db_session, require_platform, require_tenant_admin
 from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.auth.audit import add_audit
-from app.auth.bootstrap import ensure_tenant_builtin_roles
 from app.auth.constants import (
     AuditActionEnum,
-    BuiltinRoleEnum,
-    PermissionEnum,
-    PERMISSION_TYPE_LABELS,
-    PLATFORM_PERMISSIONS,
+    TenantRoleEnum,
     TenantTypeEnum,
-    permission_label,
 )
-from app.auth.identity import IdentityContext, OperationLevelEnum
+from app.auth.identity import IdentityContext
 from app.auth.password import hash_password
-from app.auth.permission_resolver import resolve_role_ids
 from app.auth.validators import (
     validate_avatar,
     validate_description,
     validate_password,
-    validate_role_name,
     validate_tenant_name,
     validate_username,
 )
@@ -49,12 +44,8 @@ from app.schema.api import PageResult
 from app.schema.db import (
     AuditLog,
     KnowledgeBase,
-    Permission,
-    Role,
-    RolePermission,
     Tenant,
     User,
-    UserRole,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -67,8 +58,6 @@ def _temp_password() -> str:
 # ============================================================
 # 平台级：租户管理（Super_Admin）
 # ============================================================
-
-_PLATFORM = dict(op_level=OperationLevelEnum.PLATFORM, allow_api_key=False)
 
 
 class TenantCreate(BaseModel):
@@ -97,12 +86,10 @@ class TenantCreateResponse(TenantResponse):
 async def create_tenant(
     body: TenantCreate,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """创建租户 + 预置 admin/user 角色 + 初始 Tenant_Admin（分配 admin 角色）。"""
+    """创建租户 + 初始 Tenant_Admin（固定角色 role=admin）。"""
     name = validate_tenant_name(body.name)
     admin_username = validate_username(body.admin_username)
     if body.admin_password is not None:
@@ -120,15 +107,7 @@ async def create_tenant(
                   is_active=True, description=description, avatar=avatar))
     await db.flush()
 
-    # 预置该租户内置角色
-    code_to_id = {
-        code: pid
-        for pid, code in (await db.execute(select(Permission.id, Permission.code))).all()
-    }
-    roles = await ensure_tenant_builtin_roles(db, tenant_id, code_to_id)
-    await db.flush()
-
-    # 初始 Tenant_Admin
+    # 初始 Tenant_Admin：固定角色直接写 role=admin（不再经角色关联表）
     is_generated = body.admin_password is None
     temp_pwd = body.admin_password or _temp_password()
     admin_id = str(uuid.uuid4())
@@ -136,11 +115,11 @@ async def create_tenant(
     db.add(User(
         id=admin_id, tenant_id=tenant_id, username=admin_username,
         password_hash=admin_pwd_hash, is_active=True,
+        role=TenantRoleEnum.ADMIN.value,
         must_change_password=True,  # 强制首次改密
         # 生成的临时口令保留明文，供超管在该管理员首登改密前再次查看/复制
         temp_password=temp_pwd if is_generated else None,
     ))
-    db.add(UserRole(user_id=admin_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
     add_audit(
         db, actor=identity, action=AuditActionEnum.TENANT_CREATE,
         target_type="tenant", target_id=tenant_id, target_name=name,
@@ -158,9 +137,7 @@ async def create_tenant(
 
 @router.get("/tenants", response_model=list[TenantResponse])
 async def list_tenants(
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     rows = (await db.execute(select(Tenant).order_by(Tenant.name))).scalars().all()
@@ -187,9 +164,7 @@ async def update_tenant_profile(
     tenant_id: str,
     body: TenantProfileUpdate,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """平台级：超管维护租户（企业组织）的名称/简介/头像。租户内成员不可改这些。"""
@@ -217,9 +192,7 @@ async def set_tenant_status(
     tenant_id: str,
     body: TenantToggle,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """启停租户（停用 != 删除，保留全部数据）。"""
@@ -238,14 +211,13 @@ async def set_tenant_status(
 
 
 # ============================================================
-# 租户级：用户管理（user:manage）+ 跨租户兜底（Super_Admin）
+# 租户级：用户管理（require_tenant_admin）+ 跨租户兜底（Super_Admin）
 # ============================================================
 
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=1)
     password: str | None = Field(default=None, description="不填则生成临时口令并强制改密")
-    role_names: list[str] = Field(default_factory=lambda: [BuiltinRoleEnum.USER.value])
     description: str | None = Field(default=None, description="可选：用户简介")
     avatar: str | None = Field(default=None, description="可选：用户头像 data URL（≤200KB）")
 
@@ -256,8 +228,8 @@ class UserResponse(BaseModel):
     username: str
     is_active: bool
     must_change_password: bool
-    # 角色名列表（供列表展示）
-    role_names: list[str] = Field(default_factory=list)
+    # 固定角色：admin / member；Super_Admin 为 None
+    role: str | None = None
     # 首登改密前可见的临时口令明文（改密后为 None）
     temp_password: str | None = None
     # 简介与头像（列表/详情展示）
@@ -278,7 +250,7 @@ def _require_same_tenant(identity: IdentityContext, target_tenant_id: str | None
 
 
 def _forbid_self(identity: IdentityContext, target_user_id: str) -> None:
-    """管理员不得对自己执行危险管理操作（停用/重置/改角色/转移），避免自锁或自降权。
+    """管理员不得对自己执行危险管理操作（停用/重置/转移），避免自锁或自降权。
 
     Super_Admin 做跨租户兜底时操作的恒是他人（其自身无业务租户），故仅对租户管理员生效。
     自身改密走"修改口令"入口，不经这些端点。
@@ -289,7 +261,7 @@ def _forbid_self(identity: IdentityContext, target_user_id: str) -> None:
 
 async def _assert_tenant_active(db: AsyncSession, tenant_id: str | None) -> None:
     """停用租户 = 数据冻结、只读：禁止对其下对象做任何写操作（新增管理员/建用户/
-    启停/重置口令/改角色/转移知识库等），仅允许查看。要恢复写入须先重新启用该租户。
+    启停/重置口令/转移知识库等），仅允许查看。要恢复写入须先重新启用该租户。
 
     租户启停本身（set_tenant_status）不经此校验，否则无法再启用。
     """
@@ -303,9 +275,7 @@ async def _assert_tenant_active(db: AsyncSession, tenant_id: str | None) -> None
 @router.get("/tenants/{tenant_id}/users", response_model=list[UserResponse])
 async def list_tenant_users(
     tenant_id: str,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """平台级：列出指定租户下的全部用户（供超管下钻做兜底口令重置 / 启停）。
@@ -318,8 +288,7 @@ async def list_tenant_users(
     rows = (await db.execute(
         select(User).where(User.tenant_id == tenant_id).order_by(User.username)
     )).scalars().all()
-    role_map = await _role_names_for_users(db, [u.id for u in rows])
-    return [_user_resp(u, role_map.get(u.id, [])) for u in rows]
+    return [_user_resp(u) for u in rows]
 
 
 class TenantAdminCreate(BaseModel):
@@ -332,12 +301,10 @@ async def create_tenant_admin(
     tenant_id: str,
     body: TenantAdminCreate,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.TENANT_MANAGE.value}, **_PLATFORM)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """平台级：在指定租户内**新增一个租户管理员**（admin 角色）。
+    """平台级：在指定租户内**新增一个租户管理员**（固定角色 role=admin）。
 
     仅 Super_Admin。用于租户原管理员被停用/不可用时补充管理员，避免租户无人可管。
     用户名全局唯一；生成临时口令时强制首登改密、明文保留至改密前。
@@ -354,58 +321,28 @@ async def create_tenant_admin(
     if dup:
         raise PermissionDeniedError("用户名已存在")
 
-    # 确保该租户的内置 admin/user 角色存在（历史租户兜底）
-    code_to_id = {
-        code: pid for pid, code in (await db.execute(select(Permission.id, Permission.code))).all()
-    }
-    roles = await ensure_tenant_builtin_roles(db, tenant_id, code_to_id)
-
     is_generated = body.password is None
     temp_pwd = body.password or _temp_password()
     user_id = str(uuid.uuid4())
     db.add(User(
         id=user_id, tenant_id=tenant_id, username=username,
         password_hash=await hash_password(temp_pwd), is_active=True,
+        role=TenantRoleEnum.ADMIN.value,
         must_change_password=is_generated,
         temp_password=temp_pwd if is_generated else None,
     ))
-    db.add(UserRole(user_id=user_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
     add_audit(
         db, actor=identity, action=AuditActionEnum.USER_CREATE,
         target_type="user", target_id=user_id, target_name=username,
-        detail={"tenant_id": tenant_id, "role_names": [BuiltinRoleEnum.ADMIN.value],
+        detail={"tenant_id": tenant_id, "role": TenantRoleEnum.ADMIN.value,
                 "by_super_admin": True}, request=request,
     )
     await db.commit()
     return UserCreateResponse(
         id=user_id, tenant_id=tenant_id, username=username, is_active=True,
-        must_change_password=is_generated, role_names=[BuiltinRoleEnum.ADMIN.value],
+        must_change_password=is_generated, role=TenantRoleEnum.ADMIN.value,
         temp_password=temp_pwd if is_generated else None,
     )
-
-
-def _guard_assignable_permissions(identity: IdentityContext, codes: list[str]) -> None:
-    """防越权提权：
-
-    - 平台级权限点（tenant:manage 等）绝不允许写入任何租户角色（仅 Super_Admin 平台身份持有）。
-    - 非 Super_Admin 只能把"自己当前已拥有"的权限点分配给角色，不能凭空授予自己没有的能力。
-    Super_Admin 经此放行（其本就持平台全权，且通常不在具体租户内编辑角色）。
-    """
-    requested = set(codes)
-    # 平台级权限点永不进租户角色
-    platform_in_req = requested & set(PLATFORM_PERMISSIONS)
-    if platform_in_req:
-        raise PermissionDeniedError(
-            f"不可将平台级权限点分配给租户角色：{sorted(platform_in_req)}"
-        )
-    if identity.is_super_admin:
-        return
-    owned = set(identity.effective_permissions or frozenset())
-    escalated = requested - owned
-    if escalated:
-        raise PermissionDeniedError(
-            f"不能分配你自身不具备的权限点：{sorted(escalated)}"
-        )
 
 
 @router.get("/users", response_model=PageResult[UserResponse])
@@ -413,9 +350,7 @@ async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     q: str | None = Query(None, description="按用户名模糊搜索"),
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """分页列出本租户用户（Super_Admin 列全部），支持按用户名模糊搜索。仅元数据。"""
@@ -434,43 +369,25 @@ async def list_users(
     rows = (await db.execute(
         base.order_by(User.username).offset(offset).limit(page_size)
     )).scalars().all()
-    role_map = await _role_names_for_users(db, [u.id for u in rows])
-    items = [_user_resp(u, role_map.get(u.id, [])) for u in rows]
+    items = [_user_resp(u) for u in rows]
     return PageResult[UserResponse](
         items=items, total=total, page=page, page_size=page_size,
         has_more=offset + len(items) < total,
     )
 
 
-@router.get("/users/{user_id}/roles")
-async def get_user_roles(
-    user_id: str,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """查询某用户当前的角色 id 列表。"""
-    user = await db.get(User, user_id)
-    if user is None:
-        raise CrossTenantError()
-    _require_same_tenant(identity, user.tenant_id)
-    role_ids = (await db.execute(
-        select(UserRole.role_id).where(UserRole.user_id == user_id)
-    )).scalars().all()
-    return {"user_id": user_id, "role_ids": list(role_ids)}
-
-
 @router.post("/users", response_model=UserCreateResponse, status_code=201)
 async def create_user(
     body: UserCreate,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """在管理员本租户内创建用户并分配角色（R12.5：管理员建号，不受注册模式限制）。"""
+    """在管理员本租户内创建用户（固定角色 member）。
+
+    租户管理员建号一律为 member（R2.1/R2.6）；UserCreate 不暴露角色字段，
+    租管在本端点无法请求把用户设为 admin（设立 admin 仅经平台流程，R2.2/R14.5）。
+    """
     tenant_id = identity.tenant_id
     if tenant_id is None:
         # Super_Admin 不属于业务租户，建号须经平台流程指定租户，这里拒绝歧义路径
@@ -490,10 +407,6 @@ async def create_user(
     if exists:
         raise PermissionDeniedError("用户名已存在")
 
-    # 角色：不选则兜底为 user；租户管理员不得分配 admin（管理员）角色
-    role_names = body.role_names or [BuiltinRoleEnum.USER.value]
-    _assert_can_assign_roles(identity, role_names=role_names)
-
     is_generated = body.password is None
     temp_pwd = body.password or _temp_password()
     user_id = str(uuid.uuid4())
@@ -501,21 +414,21 @@ async def create_user(
     db.add(User(
         id=user_id, tenant_id=tenant_id, username=username,
         password_hash=user_pwd_hash, is_active=True,
+        role=TenantRoleEnum.MEMBER.value,  # 租管建号固定 member
         must_change_password=is_generated,  # 生成临时口令则强制改密
         # 生成的临时口令保留明文供管理员在用户首登改密前再次查看；自带口令不保留
         temp_password=temp_pwd if is_generated else None,
         description=description, avatar=avatar,
     ))
-    await _assign_roles(db, tenant_id, user_id, role_names)
     add_audit(
         db, actor=identity, action=AuditActionEnum.USER_CREATE,
         target_type="user", target_id=user_id, target_name=username,
-        detail={"role_names": role_names}, request=request,
+        detail={"role": TenantRoleEnum.MEMBER.value}, request=request,
     )
     await db.commit()
     return UserCreateResponse(
         id=user_id, tenant_id=tenant_id, username=username, is_active=True,
-        must_change_password=is_generated, role_names=role_names,
+        must_change_password=is_generated, role=TenantRoleEnum.MEMBER.value,
         temp_password=temp_pwd if is_generated else None,
         description=description, avatar=avatar,
     )
@@ -530,9 +443,7 @@ async def set_user_status(
     user_id: str,
     body: UserStatusToggle,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """启停用户（停用 != 删除）。停用时自增 token_version 使其已签发 JWT 失效。"""
@@ -558,9 +469,7 @@ async def set_user_status(
 async def reset_password(
     user_id: str,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """管理员重置用户口令：生成临时口令 + 强制改密 + 失效旧 JWT。"""
@@ -583,7 +492,8 @@ async def reset_password(
     await db.commit()
     return UserCreateResponse(
         id=user.id, tenant_id=user.tenant_id, username=user.username,
-        is_active=user.is_active, must_change_password=True, temp_password=temp_pwd,
+        is_active=user.is_active, must_change_password=True, role=user.role,
+        temp_password=temp_pwd,
     )
 
 
@@ -596,9 +506,7 @@ async def transfer_knowledge_bases(
     user_id: str,
     body: TransferKbRequest,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """把源用户名下全部知识库的归属转移给同租户内另一启用用户。
@@ -658,218 +566,7 @@ async def transfer_knowledge_bases(
 
 
 # ============================================================
-# 租户级：角色与权限点（role:manage）
-# ============================================================
-
-
-class RoleCreate(BaseModel):
-    name: str = Field(..., min_length=1)
-    description: str | None = None
-    permission_codes: list[str] = Field(default_factory=list)
-
-
-class RoleResponse(BaseModel):
-    id: str
-    tenant_id: str
-    name: str
-    is_builtin: bool
-    permission_codes: list[str] = Field(default_factory=list)
-
-
-class PermissionDictItem(BaseModel):
-    code: str
-    type: str
-    # 中文展示名（对标具体页面/动作/能力）+ 类型中文名，供前端直观呈现
-    label: str
-    type_label: str
-
-
-@router.get("/permissions", response_model=list[PermissionDictItem])
-async def list_permission_dict(
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """权限点字典（全部 code + type + 中文名），供角色编辑界面挑选。租户无关、全局一致。"""
-    rows = (await db.execute(
-        select(Permission.code, Permission.type).order_by(Permission.type, Permission.code)
-    )).all()
-    return [
-        PermissionDictItem(
-            code=c, type=t,
-            label=permission_label(c),
-            type_label=PERMISSION_TYPE_LABELS.get(t, t),
-        )
-        for c, t in rows
-    ]
-
-
-@router.post("/roles", response_model=RoleResponse, status_code=201)
-async def create_role(
-    body: RoleCreate,
-    request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """在本租户内创建自定义角色并分配权限点（仅本租户内存在与生效）。"""
-    tenant_id = identity.tenant_id
-    if tenant_id is None:
-        raise PermissionDeniedError("请在具体租户上下文内创建角色")
-    await _assert_tenant_active(db, tenant_id)
-    name = validate_role_name(body.name)
-    exists = await db.scalar(
-        select(func.count(Role.id)).where(Role.tenant_id == tenant_id, Role.name == name)
-    )
-    if exists:
-        raise PermissionDeniedError("角色名已存在")
-    _guard_assignable_permissions(identity, body.permission_codes)
-    role_id = str(uuid.uuid4())
-    db.add(Role(id=role_id, tenant_id=tenant_id, name=name, is_builtin=False, description=body.description))
-    await _set_role_permissions(db, role_id, body.permission_codes)
-    add_audit(
-        db, actor=identity, action=AuditActionEnum.ROLE_CREATE,
-        target_type="role", target_id=role_id, target_name=name,
-        detail={"permission_codes": body.permission_codes}, request=request,
-    )
-    await db.commit()
-    return RoleResponse(id=role_id, tenant_id=tenant_id, name=name, is_builtin=False,
-                        permission_codes=body.permission_codes)
-
-
-@router.get("/roles", response_model=list[RoleResponse])
-async def list_roles(
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """列出本租户角色（含其权限点）。"""
-    tenant_id = identity.tenant_id
-    roles = (await db.execute(select(Role).where(Role.tenant_id == tenant_id))).scalars().all()
-    out: list[RoleResponse] = []
-    for r in roles:
-        codes = (await db.execute(
-            select(Permission.code)
-            .join(RolePermission, RolePermission.permission_id == Permission.id)
-            .where(RolePermission.role_id == r.id)
-        )).scalars().all()
-        out.append(RoleResponse(id=r.id, tenant_id=r.tenant_id, name=r.name,
-                                is_builtin=r.is_builtin, permission_codes=list(codes)))
-    return out
-
-
-class RolePermissionsUpdate(BaseModel):
-    permission_codes: list[str]
-
-
-@router.put("/roles/{role_id}/permissions", response_model=RoleResponse)
-async def set_role_permissions(
-    role_id: str,
-    body: RolePermissionsUpdate,
-    request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """为角色重设权限点集合（变更经实时解析在下次请求即时生效）。"""
-    role = await db.get(Role, role_id)
-    if role is None:
-        raise CrossTenantError()
-    _require_same_tenant(identity, role.tenant_id)
-    await _assert_tenant_active(db, role.tenant_id)
-    _guard_assignable_permissions(identity, body.permission_codes)
-    await _set_role_permissions(db, role_id, body.permission_codes, replace=True)
-    add_audit(
-        db, actor=identity, action=AuditActionEnum.ROLE_SET_PERMISSIONS,
-        target_type="role", target_id=role.id, target_name=role.name,
-        detail={"permission_codes": body.permission_codes}, request=request,
-    )
-    await db.commit()
-    return RoleResponse(id=role.id, tenant_id=role.tenant_id, name=role.name,
-                        is_builtin=role.is_builtin, permission_codes=body.permission_codes)
-
-
-class UserRolesUpdate(BaseModel):
-    role_ids: list[str]
-
-
-@router.delete("/roles/{role_id}", status_code=204)
-async def delete_role(
-    role_id: str,
-    request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """删除自定义角色（内置 admin/user 不可删）。同租户校验，越租户 404。"""
-    from sqlalchemy import delete as sql_delete
-
-    role = await db.get(Role, role_id)
-    if role is None:
-        raise CrossTenantError()
-    _require_same_tenant(identity, role.tenant_id)
-    await _assert_tenant_active(db, role.tenant_id)
-    if role.is_builtin:
-        raise PermissionDeniedError("内置角色不可删除")
-    role_name = role.name
-    await db.execute(sql_delete(RolePermission).where(RolePermission.role_id == role_id))
-    await db.execute(sql_delete(UserRole).where(UserRole.role_id == role_id))
-    await db.execute(sql_delete(Role).where(Role.id == role_id))
-    add_audit(
-        db, actor=identity, action=AuditActionEnum.ROLE_DELETE,
-        target_type="role", target_id=role_id, target_name=role_name, request=request,
-    )
-    await db.commit()
-
-
-@router.put("/users/{user_id}/roles")
-async def set_user_roles(
-    user_id: str,
-    body: UserRolesUpdate,
-    request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.ROLE_MANAGE.value}, allow_api_key=False)
-    ),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """重设用户的角色集合（即时生效）。所列角色必须属于同一租户。"""
-    user = await db.get(User, user_id)
-    if user is None:
-        raise CrossTenantError()
-    _require_same_tenant(identity, user.tenant_id)
-    _forbid_self(identity, user_id)
-    await _assert_tenant_active(db, user.tenant_id)
-    # 校验角色同租户，并收集角色对象用于 admin 角色分配守卫
-    role_objs: list[Role] = []
-    for rid in body.role_ids:
-        role = await db.get(Role, rid)
-        if role is None or role.tenant_id != user.tenant_id:
-            raise CrossTenantError()
-        role_objs.append(role)
-    # 租户管理员不得分配/移交 admin 角色（仅 Super_Admin 可设租户管理员）
-    _assert_can_assign_roles(identity, role_objs=role_objs)
-    # 清空重设
-    existing = (await db.execute(select(UserRole).where(UserRole.user_id == user_id))).scalars().all()
-    for ur in existing:
-        await db.delete(ur)
-    for rid in body.role_ids:
-        db.add(UserRole(user_id=user_id, role_id=rid))
-    add_audit(
-        db, actor=identity, action=AuditActionEnum.USER_SET_ROLES,
-        target_type="user", target_id=user.id, target_name=user.username,
-        detail={"role_ids": body.role_ids}, request=request,
-    )
-    await db.commit()
-    return {"detail": "已更新用户角色", "role_ids": body.role_ids}
-
-
-# ============================================================
-# 审计日志查询（user:manage 或 role:manage 即可读；租管限本租户，超管全局）
+# 审计日志查询（require_tenant_admin：租管限本租户，超管全局）
 # ============================================================
 
 
@@ -879,6 +576,8 @@ class AuditLogItem(BaseModel):
     actor_username: str | None
     actor_tenant_id: str | None
     actor_is_super_admin: bool
+    # 操作者写入时刻的固定角色快照（admin/member/None）
+    actor_role: str | None
     action: str
     target_type: str | None
     target_id: str | None
@@ -895,9 +594,7 @@ async def list_audit_logs(
     page_size: int = Query(20, ge=1, le=100),
     action: str | None = Query(None, description="按动作过滤"),
     actor: str | None = Query(None, description="按操作者用户名模糊过滤"),
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """审计日志（只读）。超管看全局；租管仅看本租户操作者产生的记录。"""
@@ -923,6 +620,7 @@ async def list_audit_logs(
         AuditLogItem(
             id=r.id, actor_user_id=r.actor_user_id, actor_username=r.actor_username,
             actor_tenant_id=r.actor_tenant_id, actor_is_super_admin=r.actor_is_super_admin,
+            actor_role=r.actor_role,
             action=r.action, target_type=r.target_type, target_id=r.target_id,
             target_name=r.target_name, detail=r.detail, result=r.result, ip=r.ip,
             created_at=r.created_at.isoformat() if r.created_at else "",
@@ -940,75 +638,12 @@ async def list_audit_logs(
 # ============================================================
 
 
-def _user_resp(user: User, role_names: list[str] | None = None) -> UserResponse:
+def _user_resp(user: User) -> UserResponse:
     return UserResponse(
         id=user.id, tenant_id=user.tenant_id, username=user.username,
         is_active=user.is_active, must_change_password=user.must_change_password,
-        role_names=role_names or [],
+        role=user.role,
         # 仅在用户尚未改密时返回临时口令明文（改密后该字段已被清空）
         temp_password=user.temp_password if user.must_change_password else None,
         description=user.description, avatar=user.avatar,
     )
-
-
-async def _role_names_for_users(db: AsyncSession, user_ids: list[str]) -> dict[str, list[str]]:
-    """批量解析 user_id -> 角色名列表（供列表展示，避免 N+1）。"""
-    if not user_ids:
-        return {}
-    rows = await db.execute(
-        select(UserRole.user_id, Role.name)
-        .join(Role, Role.id == UserRole.role_id)
-        .where(UserRole.user_id.in_(user_ids))
-    )
-    out: dict[str, list[str]] = {}
-    for uid, rname in rows.all():
-        out.setdefault(uid, []).append(rname)
-    return out
-
-
-def _assert_can_assign_roles(
-    identity: IdentityContext, role_names: list[str] | None = None,
-    role_objs: list[Role] | None = None,
-) -> None:
-    """租户管理员不得分配/移交 admin（管理员）角色——只有 Super_Admin 可设租户管理员。
-
-    role_names: 按名校验（建用户场景）；role_objs: 按角色对象校验（改用户角色场景）。
-    """
-    if identity.is_super_admin:
-        return
-    names = set(role_names or [])
-    if role_objs:
-        names |= {r.name for r in role_objs}
-    if BuiltinRoleEnum.ADMIN.value in names:
-        raise PermissionDeniedError("无权分配/移交管理员(admin)角色，请联系平台超级管理员")
-
-
-async def _assign_roles(db: AsyncSession, tenant_id: str, user_id: str, role_names: list[str]) -> None:
-    for name in role_names:
-        role = (await db.execute(
-            select(Role).where(Role.tenant_id == tenant_id, Role.name == name)
-        )).scalar_one_or_none()
-        if role is not None:
-            db.add(UserRole(user_id=user_id, role_id=role.id))
-
-
-async def _set_role_permissions(
-    db: AsyncSession, role_id: str, permission_codes: list[str], replace: bool = False
-) -> None:
-    if replace:
-        existing = (await db.execute(
-            select(RolePermission).where(RolePermission.role_id == role_id)
-        )).scalars().all()
-        for rp in existing:
-            await db.delete(rp)
-    # code -> id
-    code_to_id = {
-        code: pid
-        for pid, code in (await db.execute(
-            select(Permission.id, Permission.code).where(Permission.code.in_(permission_codes))
-        )).all()
-    }
-    for code in permission_codes:
-        pid = code_to_id.get(code)
-        if pid:
-            db.add(RolePermission(role_id=role_id, permission_id=pid))

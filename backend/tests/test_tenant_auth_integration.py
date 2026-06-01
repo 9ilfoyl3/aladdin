@@ -14,7 +14,6 @@ import tempfile
 import pytest
 
 os.environ.setdefault("JWT_SECRET", "test-secret-key-integration-0123456789abcdef")
-os.environ.setdefault("AUTH_ENABLED", "true")
 os.environ.setdefault("SUPER_ADMIN_USERNAME", "root")
 os.environ.setdefault("SUPER_ADMIN_PASSWORD", "RootPass#123")
 
@@ -100,7 +99,7 @@ def _super_admin_token(client):
 def test_default_deny_and_login(client):
     # Property 19: 无凭据访问受保护路由 -> 401
     assert client.get("/api/admin/tenants").status_code == 401
-    assert client.get("/api/auth/me/permissions").status_code == 401
+    assert client.get("/api/auth/me").status_code == 401
     # 凭据错误 -> 401
     assert _login(client, "root", "wrong").status_code == 401
 
@@ -115,8 +114,8 @@ def test_must_change_password_gate(client):
     assert client.get("/api/admin/tenants", headers=_bearer(tok)).status_code == 401
 
 
-def test_account_lifecycle_and_perms(client):
-    # Property 13/14: 角色权限并集 / 停用即时失效
+def test_account_lifecycle_and_role(client):
+    # 固定角色：建用户得 member / 停用即时失效
     sa = _super_admin_token(client)
     # 建租户
     r = client.post("/api/admin/tenants", headers=_bearer(sa),
@@ -129,21 +128,21 @@ def test_account_lifecycle_and_perms(client):
     client.post("/api/auth/change-password", headers=_bearer(tok0),
                 json={"old_password": tadmin_pwd, "new_password": "Admin#1234"})
     tadmin = _login(client, "tadmin", "Admin#1234", tid).json()["access_token"]
-    # 建普通用户
+    # 建普通用户（固定角色 member，不再接受 role_names）
     r = client.post("/api/admin/users", headers=_bearer(tadmin),
-                    json={"username": "alice", "role_names": ["user"]})
+                    json={"username": "alice"})
     assert r.status_code == 201
     alice_pwd = r.json()["temp_password"]
     tok = _login(client, "alice", alice_pwd, tid).json()["access_token"]
     client.post("/api/auth/change-password", headers=_bearer(tok),
                 json={"old_password": alice_pwd, "new_password": "Alice#1234"})
     alice = _login(client, "alice", "Alice#1234", tid).json()["access_token"]
-    # me/permissions：含 user 角色权限点
-    perms = {p["code"] for p in client.get("/api/auth/me/permissions", headers=_bearer(alice)).json()["permissions"]}
-    assert "kb:create" in perms and "user:manage" not in perms
-    # 停用 alice -> 其 token 失效（Property 14）
-    # 找到 alice 的 user_id：用 tadmin 重置她口令需要 id，简化为停用所有同租户用户中的 alice
-    # 这里直接通过登录响应没有 id，改用：tadmin 创建第二个用户并停用之验证停用闸门
+    # /me：alice 为 member、非超管
+    me = client.get("/api/auth/me", headers=_bearer(alice))
+    assert me.status_code == 200
+    assert me.json()["role"] == "member"
+    assert me.json()["is_super_admin"] is False
+    # 停用 bob -> 其 token 失效
     r2 = client.post("/api/admin/users", headers=_bearer(tadmin), json={"username": "bob"})
     bob_pwd = r2.json()["temp_password"]
     bob_id = r2.json()["id"]
@@ -152,7 +151,7 @@ def test_account_lifecycle_and_perms(client):
     assert client.put(f"/api/admin/users/{bob_id}/status", headers=_bearer(tadmin),
                       json={"is_active": False}).status_code == 200
     # bob 旧 token 失效
-    assert client.get("/api/auth/me/permissions", headers=_bearer(bob_tok)).status_code == 401
+    assert client.get("/api/auth/me", headers=_bearer(bob_tok)).status_code == 401
     # bob 无法再登录
     assert _login(client, "bob", bob_pwd, tid).status_code == 403
 

@@ -111,10 +111,9 @@ LLM_BASE_URL=http://localhost:11434
 LLM_MODEL=qwen2.5:7b
 LLM_API_KEY=
 
-# ===== 认证与授权（tenant-auth，本次新增，必须配） =====
-# 联调建议：先 false 跑通原功能，再改 true 验鉴权（见第 6 节）。
-AUTH_ENABLED=true
-# JWT 密钥（auth_enabled=true 必填，缺失则启动失败）。生成见下方命令。
+# ===== 认证与授权（tenant-rbac-refactor，必须配） =====
+# 鉴权始终强制（已移除灰度旁路）。
+# JWT 密钥（必填，缺失则启动失败 fail-fast）。生成见下方命令。
 JWT_SECRET=请粘贴下方命令生成的随机串
 JWT_EXPIRE_MINUTES=720
 # 初始超级管理员（首次启动自动创建，强制首次登录改密）。必填，别用弱口令。
@@ -218,11 +217,7 @@ $ta = (Invoke-RestMethod -Uri http://localhost:8000/api/auth/login -Method Post 
 
 ---
 
-## 7. 灰度联调（推荐先做）
-
-如果只想先确认"租户改造没破坏原功能"，把 `.env` 设 `AUTH_ENABLED=false` 重启后端：
-- Guard 旁路（匿名 platform 身份），前端不跳登录，原功能照常用。
-- 确认建库/上传/问答都正常后，再改回 `AUTH_ENABLED=true` 验鉴权。
+## 7. 快速自检（推荐先做）
 
 ---
 
@@ -234,7 +229,6 @@ SQLite 临时库起一个最小后端，**不依赖 Postgres/Milvus/Redis**（Re
 ```powershell
 cd backend
 $env:DATABASE_URL="sqlite+aiosqlite:///./_smoke.db"
-$env:AUTH_ENABLED="true"
 $env:JWT_SECRET="local-smoke-secret-0123456789abcdef"
 $env:SUPER_ADMIN_USERNAME="root"
 $env:SUPER_ADMIN_PASSWORD="ChangeMe#2024"
@@ -290,7 +284,7 @@ cd backend
 
 | 现象 | 原因 / 解决 |
 | --- | --- |
-| 后端启动报 `jwt_secret 未配置` | `.env` 没填 `JWT_SECRET`，且 `AUTH_ENABLED=true`。填上即可。 |
+| 后端启动报 `jwt_secret 未配置` | `.env` 没填 `JWT_SECRET`。填上即可（鉴权始终强制，缺密钥会 fail-fast）。 |
 | 后端启动报缺 Super_Admin 配置 | 填 `SUPER_ADMIN_USERNAME` / `SUPER_ADMIN_PASSWORD`。 |
 | 后端连不上数据库 | `DATABASE_URL` 的库名与 docker-compose（`artoo`）不一致；或 Docker 没起。 |
 | 前端请求 404/连不上 | 后端没跑在 **8000**；或没用 `npm run dev`（vite 代理只在 dev 生效）。 |

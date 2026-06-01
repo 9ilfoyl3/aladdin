@@ -17,7 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import generate_api_key, get_key_prefix, hash_key
-from app.api.deps import authorization_guard, get_db_session
+from app.api.deps import (
+    get_db_session,
+    require_authenticated,
+    require_platform,
+    require_tenant_admin,
+)
 from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.auth.audit import add_audit
 from app.auth.constants import (
@@ -25,9 +30,8 @@ from app.auth.constants import (
     EXTERNAL_USER_TENANT_ID,
     ApiKeyTypeEnum,
     KbVisibilityEnum,
-    PermissionEnum,
 )
-from app.auth.identity import IdentityContext, OperationLevelEnum
+from app.auth.identity import IdentityContext
 from app.schema.db import ApiKey, KnowledgeBase
 
 router = APIRouter(prefix="/api/api-keys", tags=["API Keys"])
@@ -116,9 +120,7 @@ async def _validate_scope_same_tenant(
 async def create_tenant_key(
     request: Request,
     body: CreateTenantKeyRequest = CreateTenantKeyRequest(),
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """创建租户级 API Key（机器凭据），盖 tenant_id + 记录 scope，仅返回一次明文。"""
@@ -162,9 +164,7 @@ async def update_key_scope(
     key_id: str,
     body: UpdateScopeRequest,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """编辑租户级 Key 的授权范围（校验 KB 同租户；不改明文/不重签；即时生效）。"""
@@ -196,9 +196,7 @@ async def update_key_scope(
 @router.post("/me", response_model=CreateApiKeyResponse)
 async def create_user_key(
     request: CreateUserKeyRequest = CreateUserKeyRequest(),
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_SELF.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """普通用户为自己创建用户级 Key（绑定本人，继承实时权限）。"""
@@ -236,9 +234,7 @@ async def create_user_key(
 async def create_proxy_key(
     request: Request,
     body: CreateProxyKeyRequest = CreateProxyKeyRequest(),
-    identity: IdentityContext = Depends(
-        authorization_guard(op_level=OperationLevelEnum.PLATFORM, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """签发超管级代理 Key（仅 Super_Admin）。tenant 锁定 External_User_Tenant。"""
@@ -277,9 +273,7 @@ async def create_proxy_key(
 
 @router.get("", response_model=ApiKeyListResponse)
 async def list_api_keys(
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """列出本租户 API Key（仅前缀）。Super_Admin 可列全部（platform 不过滤）。"""
@@ -301,9 +295,7 @@ async def list_api_keys(
 
 @router.get("/me", response_model=ApiKeyListResponse)
 async def list_my_keys(
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_SELF.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """普通用户列出自己创建的用户级 Key（仅前缀）。"""
@@ -328,9 +320,7 @@ async def list_my_keys(
 async def revoke_api_key(
     key_id: str,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.APIKEY_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """撤销 API Key（软删除，校验归属本租户）。

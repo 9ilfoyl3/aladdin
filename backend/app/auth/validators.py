@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 
 from app.api.errors import ValidationInputError
+from app.auth.constants import ORG_PERMISSIONS_ENABLED, TENANT_ROLES_ENABLED, TenantTypeEnum
 
 # 用户名：以字母/数字开头，整体 3–32，允许字母数字与 _ . -
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
@@ -67,14 +68,41 @@ def validate_tenant_name(name: str) -> str:
     return n
 
 
-def validate_role_name(name: str) -> str:
-    """校验角色名（1–32，去首尾空白）。非法 -> 400。"""
-    if name is None:
-        raise ValidationInputError("角色名不能为空")
-    n = name.strip()
-    if len(n) < 1 or len(n) > 32:
-        raise ValidationInputError("角色名长度需为 1–32 个字符")
-    return n
+def validate_role(role: str) -> str:
+    """校验固定角色取值（仅 ``admin`` / ``member``）。非法 -> 400。
+
+    取代旧的自定义角色名校验：固定角色模型下角色是稳定枚举，任意其它取值
+    （含 viewer/owner/空串/任意杂串）一律拒绝。
+    """
+    if role is None:
+        raise ValidationInputError("角色不能为空")
+    r = role.strip()
+    if r not in TENANT_ROLES_ENABLED:
+        raise ValidationInputError("角色取值非法：仅支持 admin / member")
+    return r
+
+
+def validate_tenant_type(tenant_type: str) -> str:
+    """校验租户类型（仅 ``business`` / ``external``）。非法 -> 400。
+
+    default 等遗留/非法取值一律拒绝（枚举已收敛）。
+    """
+    if tenant_type is None:
+        raise ValidationInputError("租户类型不能为空")
+    t = tenant_type.strip()
+    if t not in (TenantTypeEnum.BUSINESS.value, TenantTypeEnum.EXTERNAL.value):
+        raise ValidationInputError("租户类型非法：仅支持 business / external")
+    return t
+
+
+def validate_org_permission(org_permission: str) -> str:
+    """校验组织公共库开放维度（仅 ``read`` / ``write``）。非法 -> 400。"""
+    if org_permission is None:
+        raise ValidationInputError("开放维度不能为空")
+    p = org_permission.strip()
+    if p not in ORG_PERMISSIONS_ENABLED:
+        raise ValidationInputError("开放维度非法：仅支持 read / write")
+    return p
 
 
 # 简介：可空，最长 500 字符

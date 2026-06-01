@@ -25,7 +25,7 @@ from app.schema.db import KnowledgeBase, KnowledgeBaseGrant
 
 
 async def _load_grants_for_kb(session: AsyncSession, kb_id: str) -> list[GrantView]:
-    """加载某 KB 适用的授权记录（仅 v1 生效的 user/role）。"""
+    """加载某 KB 适用的授权记录（仅 user-grant）。"""
     rows = await session.execute(
         select(
             KnowledgeBaseGrant.grantee_type,
@@ -36,7 +36,7 @@ async def _load_grants_for_kb(session: AsyncSession, kb_id: str) -> list[GrantVi
     return [
         GrantView(grantee_type=gt, grantee_id=gid, permission=perm)
         for gt, gid, perm in rows.all()
-        if gt in (GranteeTypeEnum.USER.value, GranteeTypeEnum.ROLE.value)
+        if gt == GranteeTypeEnum.USER.value
     ]
 
 
@@ -62,6 +62,7 @@ async def authorize_requested_kbs(
             kb_tenant_id=kb.tenant_id,
             kb_owner_user_id=kb.owner_user_id,
             kb_visibility=kb.visibility,
+            kb_org_permission=kb.org_permission,
             access=access,
             grants=grants,
         )
@@ -82,8 +83,11 @@ async def assemble_allowed_kb_ids(
     - 租户级 Key（Virtual_Identity，无 subject）：按 ApiKey_Authorized_Scope——
       all_public_kbs ? 本租户全部 organization KB : ∅，并入显式 explicit_kb_ids（限同租户）。
     - 外部用户：自有 Private_KB ∪ External_User_Tenant 全部 Public_KB。
+    - 租户管理员（admin）：本租户全部 KB（含他人私有库，只读监管）；写/改/删另由
+      kb_authorization_decision 与 owner 闸门裁决（admin 不写他人库内容、不动他人库实体）。
     - 注册用户 / 用户级 Key：自有 Private_KB ∪ 同租户全部 Public_KB ∪ 被授予 read/write 的 Shared_KB。
-    - Super_Admin（platform）：不在此组装（内容检索不属其职权，受内容边界约束）。
+    - Super_Admin（platform，tenant_id=None）：经顶部早返回得空集（内容检索不属其职权，
+      受内容边界约束）。
     """
     tenant_id = identity.tenant_id
     if tenant_id is None:
@@ -119,6 +123,12 @@ async def assemble_allowed_kb_ids(
     if identity.is_external_user:
         return own_ids | public_ids
 
+    # 租户管理员 / 超管：监管可读本租户全部库（含他人私有库）。
+    # 与 owner-only 实体操作解耦——这里只决定「列表/检索可见（read）」范围；
+    # 写/改/删仍由 kb_authorization_decision 与 owner 闸门各自裁决（admin 不写他人库内容）。
+    if identity.is_tenant_admin or identity.is_super_admin:
+        return {kid for kid, _o, _v in kbs}
+
     # 注册用户 / 用户级 Key：自有 ∪ 公共 ∪ 被共享（read/write）
     shared_ids = await _shared_kb_ids(session, identity)
     # 仅保留同租户的被共享库（跨租户 grant 在 v1 不存在，这里再过滤一道）
@@ -127,24 +137,15 @@ async def assemble_allowed_kb_ids(
 
 
 async def _shared_kb_ids(session: AsyncSession, identity: IdentityContext) -> set[str]:
-    """经 KnowledgeBaseGrant 直接（user）或经角色（role）被授予 read/write 的 KB id。"""
-    conds = []
-    if identity.user_id is not None:
-        conds.append(
-            (KnowledgeBaseGrant.grantee_type == GranteeTypeEnum.USER.value)
-            & (KnowledgeBaseGrant.grantee_id == identity.user_id)
-        )
-    if identity.role_ids:
-        conds.append(
-            (KnowledgeBaseGrant.grantee_type == GranteeTypeEnum.ROLE.value)
-            & (KnowledgeBaseGrant.grantee_id.in_(list(identity.role_ids)))
-        )
-    if not conds:
+    """经 KnowledgeBaseGrant 直接被授予（user）read/write 的 KB id。"""
+    subject_id = identity.acting_subject_id
+    if subject_id is None:
         return set()
 
-    from sqlalchemy import or_
-
     rows = await session.execute(
-        select(KnowledgeBaseGrant.kb_id).where(or_(*conds))
+        select(KnowledgeBaseGrant.kb_id).where(
+            (KnowledgeBaseGrant.grantee_type == GranteeTypeEnum.USER.value)
+            & (KnowledgeBaseGrant.grantee_id == subject_id)
+        )
     )
     return {r[0] for r in rows.all()}

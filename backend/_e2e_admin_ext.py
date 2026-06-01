@@ -1,4 +1,4 @@
-"""E2E for tenant-auth admin extensions: audit, invitations, transfer-kb, paging, admin-role perm fix."""
+"""E2E for tenant-auth admin extensions: audit, invitations, transfer-kb, paging, fixed-role check."""
 from __future__ import annotations
 import sys, uuid, httpx
 
@@ -28,7 +28,7 @@ r = c.post("/api/auth/login", json={"username": "superadmin", "password": "Super
 ck("super admin login", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
 sa = r.json()["access_token"]
 
-print("== admin role perm fix ==")
+print("== admin role check ==")
 # create tenant + admin
 r = c.post("/api/admin/tenants", headers=auth(sa),
            json={"name": f"法院E-{SFX}", "admin_username": f"admine_{SFX}"})
@@ -37,11 +37,10 @@ tid = r.json()["id"]; atemp = r.json()["admin_temp_password"]
 atok = c.post("/api/auth/login", json={"username": f"admine_{SFX}", "password": atemp, "tenant_id": tid}).json()["access_token"]
 c.post("/api/auth/change-password", headers=auth(atok), json={"old_password": atemp, "new_password": "AdminE#2026"})
 atok = c.post("/api/auth/login", json={"username": f"admine_{SFX}", "password": "AdminE#2026", "tenant_id": tid}).json()["access_token"]
-# tenant admin perms: must NOT contain tenant:manage, must contain menu:audit + user:manage
-perms = {p["code"] for p in c.get("/api/auth/me/permissions", headers=auth(atok)).json()["permissions"]}
-ck("tenant admin lacks tenant:manage", "tenant:manage" not in perms, str(sorted(perms)))
-ck("tenant admin has menu:audit", "menu:audit" in perms, "")
-ck("tenant admin has user:manage", "user:manage" in perms, "")
+# tenant admin identity（固定角色模型）：role == admin，非超管
+me = c.get("/api/auth/me", headers=auth(atok)).json()
+ck("tenant admin role == admin", me.get("role") == "admin", str(me))
+ck("tenant admin not super admin", me.get("is_super_admin") is False, str(me))
 # tenant admin cannot list tenants (platform) -> 403
 ck("tenant admin tenant list -> 403", c.get("/api/admin/tenants", headers=auth(atok)).status_code == 403, "")
 
@@ -90,7 +89,7 @@ ck("tenant admin create_tenant invite -> 403",
    c.post("/api/admin/invitations", headers=auth(atok), json={"scope": "create_tenant", "expires_in_hours": 24}).status_code == 403, "")
 # tenant admin create_user invite
 r = c.post("/api/admin/invitations", headers=auth(atok),
-           json={"scope": "create_user", "expires_in_hours": 24, "max_uses": 1, "role_names": ["user"]})
+           json={"scope": "create_user", "expires_in_hours": 24, "max_uses": 1})
 ck("tenant admin create_user invite 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
 uinv_token = r.json()["token"]
 # info (no auth)
@@ -108,11 +107,11 @@ ck("one-time invite exhausted -> 404", r.status_code == 404, f"{r.status_code}")
 r = c.post(f"/api/invitations/{tinv_token}/accept", json={"username": f"newadmin_{SFX}", "password": "NewAdmin#2026", "tenant_name": f"法院F-{SFX}"})
 ck("accept create_tenant 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
 new_tid = r.json().get("tenant_id")
-# the new tenant admin can login and is admin (has user:manage, lacks tenant:manage)
+# the new tenant admin can login and is admin (固定角色 role=admin)
 ntok = c.post("/api/auth/login", json={"username": f"newadmin_{SFX}", "password": "NewAdmin#2026", "tenant_id": new_tid}).json()["access_token"]
-nperms = {p["code"] for p in c.get("/api/auth/me/permissions", headers=auth(ntok)).json()["permissions"]}
-ck("invited tenant admin has user:manage", "user:manage" in nperms, "")
-ck("invited tenant admin lacks tenant:manage", "tenant:manage" not in nperms, "")
+nme = c.get("/api/auth/me", headers=auth(ntok)).json()
+ck("invited tenant admin role == admin", nme.get("role") == "admin", str(nme))
+ck("invited tenant admin not super admin", nme.get("is_super_admin") is False, str(nme))
 # revoke invite
 r = c.post("/api/admin/invitations", headers=auth(atok), json={"scope": "create_user", "expires_in_hours": 24})
 rid = r.json()["id"]

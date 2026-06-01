@@ -250,7 +250,6 @@ function Tenants() {
                         size="icon"
                         className="h-8 w-8"
                         onClick={() => openEditProfile(t)}
-                        disabled={t.tenant_type === 'external'}
                         title="编辑资料（名称/简介/头像）"
                       >
                         <Pencil className="h-4 w-4" />
@@ -260,8 +259,7 @@ function Tenants() {
                         size="icon"
                         className="h-8 w-8"
                         onClick={() => setDrillTenant(t)}
-                        disabled={t.tenant_type === 'external'}
-                        title="查看用户（兜底管理）"
+                        title="查看用户 / 管理管理员"
                       >
                         <UsersIcon className="h-4 w-4" />
                       </Button>
@@ -271,7 +269,7 @@ function Tenants() {
                         className="h-8 w-8"
                         onClick={() => toggleStatus(t)}
                         disabled={t.tenant_type === 'external'}
-                        title={t.tenant_type === 'external' ? '内置租户不可停用' : (t.is_active ? '停用' : '启用')}
+                        title={t.tenant_type === 'external' ? '内置外部租户不可停用（停用将阻断全部外部用户接入）' : (t.is_active ? '停用' : '启用')}
                       >
                         <Power className={t.is_active ? 'h-4 w-4 text-destructive' : 'h-4 w-4 text-green-600'} />
                       </Button>
@@ -313,8 +311,9 @@ function Tenants() {
             <div>
               <DialogHeader>
                 <DialogTitle>创建租户</DialogTitle>
+                <DialogDescription>创建业务租户并自动生成其初始管理员，系统将返回一次性临时密码。头像与简介可选。</DialogDescription>
               </DialogHeader>
-              <form onSubmit={(e) => { e.preventDefault(); const ne = validateTenantName(name); const ue = validateUsername(adminUsername); if (ne) return toast.error(ne); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-4">
+              <form onSubmit={(e) => { e.preventDefault(); const ne = validateTenantName(name); const ue = validateUsername(adminUsername); if (ne) return toast.error(ne); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-2">
                 <div>
                   <Label>租户头像（可选）</Label>
                   <div className="mt-1.5">
@@ -323,11 +322,11 @@ function Tenants() {
                 </div>
                 <div>
                   <Label>租户名称</Label>
-                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：法院A" className="mt-1" required />
+                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：法院A" className="mt-1.5" required />
                 </div>
                 <div>
                   <Label>初始管理员用户名</Label>
-                  <Input value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} placeholder="如：admin_a" className="mt-1" required />
+                  <Input value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} placeholder="如：admin_a" className="mt-1.5" required />
                 </div>
                 <div>
                   <Label>租户简介（可选）</Label>
@@ -337,7 +336,7 @@ function Tenants() {
                     rows={3}
                     maxLength={500}
                     placeholder="企业/组织简介（≤500 字）"
-                    className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="mt-1.5 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   />
                 </div>
                 <DialogFooter>
@@ -394,10 +393,8 @@ function Tenants() {
                       <TableCell className="font-medium">{u.username}</TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
-                          {(u.role_names && u.role_names.length > 0)
-                            ? u.role_names.map((rn) => (
-                                <Badge key={rn} variant="outline" className="text-xs">{roleLabel(rn)}</Badge>
-                              ))
+                          {u.role
+                            ? <Badge variant="outline" className="text-xs">{roleLabel(u.role)}</Badge>
                             : <span className="text-muted-foreground text-xs">—</span>}
                         </div>
                       </TableCell>

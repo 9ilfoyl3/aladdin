@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, Shield, ArrowRightLeft, Search, Eye } from 'lucide-react'
+import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, ArrowRightLeft, Search, Eye } from 'lucide-react'
 import { adminApi, type AdminUserItem, type AdminUserCreateResult } from '@/lib/api'
 import { validateUsername } from '@/lib/validation'
 import { roleLabel } from '@/lib/labels'
@@ -17,23 +17,19 @@ import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { AvatarPicker } from '@/components/AvatarPicker'
 import { toast } from 'sonner'
 
-// 用户管理页面（租户级，user:manage）：建用户、启停、重置密码、分配角色、转移知识库。
+// 用户管理页面（租户级，仅 admin）：建用户（固定 member）、启停、重置密码、转移知识库。
+// 固定角色模型下，租管创建的用户一律为 member；设立 admin 由超管经平台流程完成。
 function Users() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
-  const { hasPermission, userId } = useAuth()
-  const canManageRoles = hasPermission('role:manage')
+  const { userId } = useAuth()
 
   const [showCreate, setShowCreate] = useState(false)
   const [username, setUsername] = useState('')
-  const [selectedRoles, setSelectedRoles] = useState<string[]>(['user'])
   const [createDesc, setCreateDesc] = useState('')
   const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [tempResult, setTempResult] = useState<{ title: string; username: string; pwd: string } | null>(null)
   const [copied, setCopied] = useState(false)
-  const [rolesUser, setRolesUser] = useState<AdminUserItem | null>(null)
-  const [rolesDraft, setRolesDraft] = useState<string[]>([])
-  const [rolesInitial, setRolesInitial] = useState<string[]>([])
   const [transferUser, setTransferUser] = useState<AdminUserItem | null>(null)
   const [transferTarget, setTransferTarget] = useState<string>('')
   const [search, setSearch] = useState('')
@@ -45,23 +41,14 @@ function Users() {
   })
   const users = usersPage?.items ?? []
 
-  const { data: roles = [] } = useQuery({
-    queryKey: ['admin-roles'],
-    queryFn: () => adminApi.listRoles(),
-    enabled: canManageRoles,
-  })
-  // 租户管理员不得分配/移交 admin（管理员）角色，故可选角色里排除 admin
-  const assignableRoles = roles.filter((r) => r.name !== 'admin')
-
   const createMutation = useMutation({
-    mutationFn: () => adminApi.createUser(username.trim(), selectedRoles, undefined, createDesc, createAvatar),
+    mutationFn: () => adminApi.createUser(username.trim(), undefined, createDesc, createAvatar),
     onSuccess: (data: AdminUserCreateResult) => {
       if (data.temp_password) {
         setTempResult({ title: '用户已创建', username: data.username, pwd: data.temp_password })
       }
       setShowCreate(false)
       setUsername('')
-      setSelectedRoles(['user'])
       setCreateDesc('')
       setCreateAvatar(null)
       queryClient.invalidateQueries({ queryKey: ['admin-users'] })
@@ -85,30 +72,6 @@ function Users() {
     },
     onError: (e: Error) => toast.error(e.message || '重置失败'),
   })
-
-  const setRolesMutation = useMutation({
-    mutationFn: () => adminApi.setUserRoles(rolesUser!.id, rolesDraft),
-    onSuccess: () => {
-      toast.success('角色已更新，下一次请求即时生效')
-      setRolesUser(null)
-      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
-    },
-    onError: (e: Error) => toast.error(e.message || '更新失败'),
-  })
-
-  // 角色未变化则不触发请求（避免无意义写操作与审计噪声）
-  function saveRoles() {
-    if (!rolesUser) return
-    const before = [...rolesInitial].sort()
-    const after = [...rolesDraft].sort()
-    const unchanged = before.length === after.length && before.every((v, i) => v === after[i])
-    if (unchanged) {
-      toast.info('角色未变化')
-      setRolesUser(null)
-      return
-    }
-    setRolesMutation.mutate()
-  }
 
   const transferMutation = useMutation({
     mutationFn: () => adminApi.transferKnowledgeBases(transferUser!.id, transferTarget),
@@ -140,21 +103,6 @@ function Users() {
     if (ok) resetMutation.mutate(u.id)
   }
 
-  async function openRoles(u: AdminUserItem) {
-    const res = await adminApi.getUserRoles(u.id)
-    setRolesDraft(res.role_ids)
-    setRolesInitial(res.role_ids)
-    setRolesUser(u)
-  }
-
-  function toggleRole(roleId: string) {
-    setRolesDraft((prev) => (prev.includes(roleId) ? prev.filter((r) => r !== roleId) : [...prev, roleId]))
-  }
-
-  function toggleCreateRole(name: string) {
-    setSelectedRoles((prev) => (prev.includes(name) ? prev.filter((r) => r !== name) : [...prev, name]))
-  }
-
   function copyPwd() {
     if (tempResult) {
       navigator.clipboard.writeText(tempResult.pwd)
@@ -168,7 +116,7 @@ function Users() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">用户管理</h2>
-          <p className="text-muted-foreground text-sm mt-1">在本租户内创建用户、启停、重置密码、分配角色、转移知识库。新建用户首次登录需强制改密。</p>
+          <p className="text-muted-foreground text-sm mt-1">在本租户内创建用户（普通成员）、启停、重置密码、转移知识库。新建用户首次登录需强制改密。</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -224,13 +172,9 @@ function Users() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {(u.role_names && u.role_names.length > 0)
-                        ? u.role_names.map((rn) => (
-                            <Badge key={rn} variant="outline" className="text-xs">{roleLabel(rn)}</Badge>
-                          ))
-                        : <span className="text-muted-foreground text-xs">—</span>}
-                    </div>
+                    {u.role
+                      ? <Badge variant="outline" className="text-xs">{roleLabel(u.role)}</Badge>
+                      : <span className="text-muted-foreground text-xs">—</span>}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline" className={u.is_active ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}>
@@ -245,11 +189,6 @@ function Users() {
                       {u.must_change_password && u.temp_password && (
                         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setTempResult({ title: '初始/临时密码', username: u.username, pwd: u.temp_password! })} title="查看临时密码">
                           <Eye className="h-4 w-4" />
-                        </Button>
-                      )}
-                      {canManageRoles && !isSelf && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openRoles(u)} title="分配角色">
-                          <Shield className="h-4 w-4" />
                         </Button>
                       )}
                       {!isSelf && (
@@ -295,11 +234,11 @@ function Users() {
       )}
 
       {/* 创建用户 */}
-      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setSelectedRoles(['user']); setCreateDesc(''); setCreateAvatar(null) } }}>
+      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setCreateDesc(''); setCreateAvatar(null) } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>创建用户</DialogTitle>
-            <DialogDescription>系统将生成一次性临时密码，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
+            <DialogDescription>新用户将作为普通成员加入本租户。系统将生成一次性临时密码，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => { e.preventDefault(); const ue = validateUsername(username); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-2">
             <div>
@@ -310,25 +249,8 @@ function Users() {
             </div>
             <div>
               <Label>用户名</Label>
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="如：faguan1" className="mt-1" required />
+              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="如：faguan1" className="mt-1.5" required />
             </div>
-            {canManageRoles && assignableRoles.length > 0 && (
-              <div>
-                <Label>角色</Label>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {assignableRoles.map((r) => (
-                    <button
-                      type="button"
-                      key={r.id}
-                      onClick={() => toggleCreateRole(r.name)}
-                      className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${selectedRoles.includes(r.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
-                    >
-                      {roleLabel(r.name)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
             <div>
               <Label>简介（可选）</Label>
               <textarea
@@ -337,11 +259,11 @@ function Users() {
                 rows={3}
                 maxLength={500}
                 placeholder="用户简介（≤500 字）"
-                className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="mt-1.5 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setUsername(''); setSelectedRoles(['user']); setCreateDesc(''); setCreateAvatar(null) }}>取消</Button>
+              <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setUsername(''); setCreateDesc(''); setCreateAvatar(null) }}>取消</Button>
               <Button type="submit" disabled={createMutation.isPending || !username.trim()}>创建</Button>
             </DialogFooter>
           </form>
@@ -367,32 +289,6 @@ function Users() {
           </div>
           <DialogFooter>
             <Button onClick={() => { setTempResult(null); setCopied(false) }}>完成</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 分配角色 */}
-      <Dialog open={!!rolesUser} onOpenChange={(o) => { if (!o) setRolesUser(null) }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>分配角色 · {rolesUser?.username}</DialogTitle>
-            <DialogDescription>勾选该用户的角色。变更经实时权限解析在下一次请求即时生效，无需重新登录。</DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-wrap gap-2 mt-2">
-            {assignableRoles.map((r) => (
-              <button
-                type="button"
-                key={r.id}
-                onClick={() => toggleRole(r.id)}
-                className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${rolesDraft.includes(r.id) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}`}
-              >
-                {roleLabel(r.name)}{r.is_builtin ? ' (内置)' : ''}
-              </button>
-            ))}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRolesUser(null)}>取消</Button>
-            <Button onClick={saveRoles} disabled={setRolesMutation.isPending}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

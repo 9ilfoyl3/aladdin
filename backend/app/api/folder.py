@@ -12,10 +12,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import authorization_guard, get_db_session
+from app.api.deps import get_db_session, require_authenticated, require_member
 from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_folder_name
-from app.auth.constants import PermissionEnum
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.schema.api import PageResult
@@ -49,7 +48,8 @@ async def _authorize_kb(
     decision = kb_authorization_decision(
         identity,
         kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
-        kb_visibility=kb.visibility, access=access, grants=grants,
+        kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
+        access=access, grants=grants,
     )
     if not decision.allow:
         if decision.http_status == 403:
@@ -113,7 +113,7 @@ async def list_folders(
     parent_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """获取指定目录下的文件夹列表（分页/滚动加载）"""
@@ -187,9 +187,7 @@ async def list_folders(
 async def create_folder(
     kb_id: str,
     body: FolderCreate,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """创建文件夹"""
@@ -238,9 +236,7 @@ async def create_folder(
 async def update_folder(
     folder_id: str,
     body: FolderUpdate,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """更新文件夹（重命名/移动）"""
@@ -287,9 +283,7 @@ async def update_folder(
 @router.delete("/api/folders/{folder_id}", status_code=204)
 async def delete_folder(
     folder_id: str,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """删除文件夹（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
@@ -356,9 +350,7 @@ async def delete_folder(
 async def move_items(
     kb_id: str,
     body: FolderMoveRequest,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """移动文件或文件夹到目标目录"""
@@ -394,7 +386,7 @@ async def move_items(
 async def get_breadcrumb(
     kb_id: str,
     folder_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """获取文件夹的面包屑路径"""

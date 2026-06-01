@@ -1,17 +1,20 @@
 """FastAPI 依赖装配：AuthorizationGuard（单一鉴权扼流点）与 get_repo。
 
-三处收敛点之一（鉴权侧）。所有受保护端点通过 Depends(authorization_guard(...)) 接入，
-默认拒绝。Guard 内部顺序（任一不满足即拒绝）：
-  1. 解析凭据 -> IdentityContext（无有效凭据 401）
-  2. must_change_password 闸门（除改自身口令外一律 403）
-  3. 通道级别校验（allow_api_key=False 遇 api_key -> 403；op_level=platform 要求
-     is_super_admin 且 source=jwt；api_key 一律不得行使管理/平台权限点）
-  4. X-Tenant-ID 目标租户归属校验（api_key 忽略该头恒用自身 tenant；JWT 普通用户
-     不一致 -> 403；Super_Admin 容器/账号范围可指定）
-  5. 所需权限点校验（缺失 -> 403）
-  6. set contextvar 三态（请求结束 reset），返回 IdentityContext
+三处收敛点之一（鉴权侧）。所有受保护端点通过 Depends(authorization_guard(...)) 或其
+便捷包装（require_platform / require_tenant_admin / require_member / require_authenticated）
+接入，默认拒绝。守卫由「声明操作级别」驱动，权限判定全部下沉到四个纯函数 gate
+（_platform_gate / _admin_gate / _member_floor / _must_change_gate），便于单元/属性测试。
 
-灰度开关 auth_enabled=False 时旁路鉴权（见 design 显式兼容清单 C1）。
+Guard 内部顺序（任一不满足即拒绝）：
+  1. 解析凭据 -> IdentityContext（无有效凭据 401）
+  2. must_change_password 闸门（除显式 allow_must_change_password 的端点外一律 403）
+  3. 通道级别校验（allow_api_key=False 遇 api_key -> 403）
+  4. platform 闸门（op_level=platform 要求 super_admin 且 source=jwt）
+  5. admin 闸门（require_admin 要求 admin 或 super_admin）
+  6. member_floor 闸门（require_member_floor 要求 role∈{admin,member} 或 super_admin）
+  7. X-Tenant-ID 目标租户归属校验（api_key 忽略该头恒用自身 tenant；JWT 普通用户
+     不一致 -> 403；Super_Admin 容器/账号范围可指定）
+  8. set contextvar 三态（请求结束 reset），返回 IdentityContext
 """
 
 from __future__ import annotations
@@ -29,9 +32,8 @@ from app.api.errors import (
 )
 from app.auth.apikey_auth import ApiKeyAuthenticator
 from app.auth.constants import (
-    ADMINISTRATIVE_PERMISSIONS,
     HEADER_TENANT_ID,
-    PLATFORM_PERMISSIONS,
+    TenantRoleEnum,
 )
 from app.auth.identity import (
     IdentityContext,
@@ -39,11 +41,6 @@ from app.auth.identity import (
     OperationLevelEnum,
 )
 from app.auth.jwt_auth import JwtError, decode_token
-from app.auth.permission_resolver import (
-    resolve_effective_permissions,
-    resolve_role_ids,
-)
-from app.config import get_settings
 from app.repositories.tenant_repo import (
     TenantRepository,
     reset_tenant_scope,
@@ -68,6 +65,32 @@ def _extract_bearer(request: Request) -> str | None:
 def _is_api_key_token(token: str) -> bool:
     """API Key 以 sk- 开头；其余按 JWT 解析。"""
     return token.startswith("sk-")
+
+
+# ============================================================
+# 纯判定 gate（无 I/O，全可单元/属性测试；Properties 6-9 驱动）
+# ============================================================
+
+
+def _platform_gate(identity: IdentityContext) -> bool:
+    """平台级：当且仅当 super_admin 且来源为 JWT。"""
+    return identity.is_super_admin and identity.source == IdentitySourceEnum.JWT
+
+
+def _admin_gate(identity: IdentityContext) -> bool:
+    """管理级：admin 或 super_admin（布尔判等，无等级比较）。注意通道(api_key)拦截在守卫里单独做。"""
+    return identity.is_tenant_admin or identity.is_super_admin
+
+
+def _member_floor(identity: IdentityContext) -> bool:
+    """建归属资源最低档：role∈{admin,member}（外部用户=member 满足）或 super_admin。
+    role 为 None 的 tenant_level 机器身份不满足。"""
+    return identity.role is not None or identity.is_super_admin
+
+
+def _must_change_gate(must_change: bool, allow: bool) -> bool:
+    """强制改密闸门：返回 True 表示应拒绝（must_change 且端点未声明 allow）。"""
+    return must_change and not allow
 
 
 async def _resolve_identity(
@@ -108,9 +131,13 @@ async def _resolve_identity(
         if tenant is None or not tenant.is_active:
             raise TenantDisabledError()
 
-    # role_ids 解析一次，复用给权限点解析（消除同请求内对 user_roles 的二次查询）
-    role_ids = await resolve_role_ids(session, user.id)
-    perms = await resolve_effective_permissions(session, user.id, role_ids=role_ids)
+    # 固定角色：Super_Admin 不参与租户角色（role=None）；普通用户取 User.role，
+    # 缺省回退为 member（与 DB 默认一致）。
+    role = (
+        None
+        if user.is_super_admin
+        else (TenantRoleEnum(user.role) if user.role else TenantRoleEnum.MEMBER)
+    )
     op_level = (
         OperationLevelEnum.PLATFORM if user.is_super_admin else OperationLevelEnum.TENANT
     )
@@ -121,82 +148,64 @@ async def _resolve_identity(
         user_id=user.id,
         username=user.username,
         is_super_admin=user.is_super_admin,
-        effective_permissions=perms,
-        role_ids=role_ids,
+        role=role,
     )
     return identity, bool(user.must_change_password)
 
 
 def authorization_guard(
     *,
-    required_permissions: set[str] | None = None,
     op_level: OperationLevelEnum = OperationLevelEnum.TENANT,
+    require_admin: bool = False,
+    require_member_floor: bool = False,
     allow_api_key: bool = True,
     allow_must_change_password: bool = False,
 ) -> Callable[..., AsyncGenerator[IdentityContext, None]]:
-    """鉴权依赖工厂（默认拒绝）。
+    """鉴权依赖工厂（默认拒绝，声明式）。
 
     实现为 yield 依赖：yield 出 IdentityContext 供端点使用，请求结束后在 finally
     中 reset 仓储兜底 contextvar，避免租户范围跨请求泄漏（连接/任务复用场景）。
 
     Args:
-        required_permissions: 端点所需权限点；缺任一 -> 403。
-        op_level: TENANT（默认）或 PLATFORM（仅 Super_Admin/JWT）。
+        op_level: TENANT（默认）或 PLATFORM（仅 super_admin/JWT，见 _platform_gate）。
+        require_admin: 要求管理级（admin 或 super_admin，见 _admin_gate）。
+        require_member_floor: 要求成员及以上（role 非空 或 super_admin，见 _member_floor）。
         allow_api_key: 管理/平台端点设 False，api_key 通道访问 -> 403。
         allow_must_change_password: 仅"改自身口令"端点设 True，绕过强制改密闸门。
     """
-    required = required_permissions or set()
 
     async def _guard(request: Request) -> AsyncGenerator[IdentityContext, None]:
         from app.storage.database import async_session
 
-        settings = get_settings()
         scope_token = None
         try:
-            # —— 灰度旁路（C1）：仅当显式关闭鉴权 ——
-            if not settings.auth_enabled:
-                # 旁路时给一个 platform 级匿名身份，便于联调；正式环境 auth_enabled=True。
-                yield IdentityContext(
-                    source=IdentitySourceEnum.JWT,
-                    op_level=OperationLevelEnum.PLATFORM,
-                    tenant_id=None,
-                    is_super_admin=True,
-                )
-                return
-
             async with async_session() as session:
                 identity, must_change_pwd = await _resolve_identity(request, session)
 
-                # 2) must_change_password 闸门（复用解析阶段已读出的标记，不再二次查库）
-                if not allow_must_change_password and must_change_pwd:
+                # 1) must_change_password 闸门（复用解析阶段已读出的标记，不再二次查库）
+                if _must_change_gate(must_change_pwd, allow_must_change_password):
                     raise PermissionDeniedError("请先修改初始口令后再操作")
 
-                # 3) 通道级别校验
+                # 2) 通道级别校验
                 if not allow_api_key and identity.source == IdentitySourceEnum.API_KEY:
                     raise PermissionDeniedError("该操作不允许通过 API Key 调用")
 
-                if op_level == OperationLevelEnum.PLATFORM:
-                    if not (identity.is_super_admin and identity.source == IdentitySourceEnum.JWT):
-                        raise PermissionDeniedError("仅平台超级管理员可执行该操作")
+                # 3) platform 闸门
+                if op_level == OperationLevelEnum.PLATFORM and not _platform_gate(identity):
+                    raise PermissionDeniedError("仅平台超级管理员可执行该操作")
 
-                # api_key 通道一律不得行使管理/平台权限点（即便绑定用户持有）
-                if identity.source == IdentitySourceEnum.API_KEY:
-                    forbidden = (ADMINISTRATIVE_PERMISSIONS | PLATFORM_PERMISSIONS) & required
-                    if forbidden:
-                        raise PermissionDeniedError("API Key 通道不可执行管理或平台操作")
+                # 4) admin 闸门
+                if require_admin and not _admin_gate(identity):
+                    raise PermissionDeniedError("需要管理员权限")
 
-                # 4) 目标租户入口归属校验
+                # 5) member_floor 闸门
+                if require_member_floor and not _member_floor(identity):
+                    raise PermissionDeniedError("需要成员及以上角色")
+
+                # 6) 目标租户入口归属校验
                 _enforce_target_tenant(request, identity)
 
-                # 5) 所需权限点校验（Super_Admin 平台身份隐含拥有全部权限点，
-                #    其职权由 is_super_admin 而非 RBAC 角色承载，故跳过权限点缺失校验；
-                #    但内容正文仍受 Content_View_Boundary 约束，由各内容端点单独拦截）
-                if not identity.is_super_admin:
-                    missing = required - identity.effective_permissions
-                    if missing:
-                        raise PermissionDeniedError("权限不足")
-
-            # 6) 设置 contextvar 三态（仓储兜底用），yield 给端点，结束后 reset。
+            # 7) 设置 contextvar 三态（仓储兜底用），yield 给端点，结束后 reset。
             scope_token = set_tenant_scope(scope_from_identity(identity))
             yield identity
         finally:
@@ -204,6 +213,31 @@ def authorization_guard(
                 reset_tenant_scope(scope_token)
 
     return _guard
+
+
+# ============================================================
+# 便捷包装：按操作级别声明，收敛守卫调用面
+# ============================================================
+
+
+def require_platform(**kw):
+    """平台级端点：仅 super_admin/JWT，禁 api_key 通道。"""
+    return authorization_guard(op_level=OperationLevelEnum.PLATFORM, allow_api_key=False, **kw)
+
+
+def require_tenant_admin(**kw):
+    """租户管理端点：admin 或 super_admin，禁 api_key 通道。"""
+    return authorization_guard(require_admin=True, allow_api_key=False, **kw)
+
+
+def require_member(**kw):
+    """需成员及以上：role∈{admin,member} 或 super_admin（外部用户=member 满足）。"""
+    return authorization_guard(require_member_floor=True, **kw)
+
+
+def require_authenticated(**kw):
+    """仅要求通过认证（默认 TENANT 级，允许 api_key 通道）。"""
+    return authorization_guard(**kw)
 
 
 def _enforce_target_tenant(request: Request, identity: IdentityContext) -> None:

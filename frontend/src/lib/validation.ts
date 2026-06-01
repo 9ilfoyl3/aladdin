@@ -26,9 +26,3 @@ export function validateTenantName(name: string): string | null {
   if (n.length < 1 || n.length > 64) return '租户名长度需为 1–64 个字符'
   return null
 }
-
-export function validateRoleName(name: string): string | null {
-  const n = name.trim()
-  if (n.length < 1 || n.length > 32) return '角色名长度需为 1–32 个字符'
-  return null
-}

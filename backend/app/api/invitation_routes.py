@@ -1,12 +1,16 @@
-"""邀请链接路由（tenant-auth 管理扩展）。
+"""邀请链接路由（tenant-rbac-refactor 管理扩展）。
 
 两类邀请（带有效期 + 可选次数，token 只存哈希）：
-- create_tenant：仅 Super_Admin 签发。被邀请人接受后创建一个新租户 + 自身成为该租户管理员。
-- create_user：具备 user:manage 的租户管理员签发，scope 锁定签发者租户，被邀请人接受后
-  在该租户内创建一个普通用户（按签发时预设角色）。
+- create_tenant：仅 Super_Admin 签发。被邀请人接受后创建一个新租户 + 自身成为该租户管理员
+  （固定角色 role=admin）。
+- create_user：租户管理员（require_tenant_admin）签发，scope 锁定签发者租户，被邀请人接受后
+  在该租户内创建一个普通用户（固定角色 role=member）。
+
+固定角色模型下不再有"邀请预设自定义角色"：建用户邀请一律产出 member；
+设立 admin 仅经平台流程（建租户邀请的注册人成为该租户 admin）。
 
 安全：
-- 管理端点（签发/列表/吊销）经 Authorization_Guard，allow_api_key=False。
+- 管理端点（签发/列表/吊销/查创建用户）经 require_tenant_admin（禁 api_key）。
 - 接受端点免登录（被邀请人尚无账号），但严格受 token 有效性 + scope 约束，
   且建号仍走用户名/口令校验。
 - 有效期由 expires_at 强制；max_uses 可选（null=有效期内不限次，1=一次性）。
@@ -24,18 +28,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import authorization_guard, get_db_session
+from app.api.deps import get_db_session, require_tenant_admin
 from app.api.errors import CrossTenantError, PermissionDeniedError, ValidationInputError
 from app.auth.audit import add_audit
-from app.auth.bootstrap import ensure_tenant_builtin_roles
 from app.auth.constants import (
     AuditActionEnum,
-    BuiltinRoleEnum,
     InvitationScopeEnum,
-    PermissionEnum,
+    TenantRoleEnum,
     TenantTypeEnum,
 )
-from app.auth.identity import IdentityContext, IdentitySourceEnum, OperationLevelEnum
+from app.auth.identity import IdentityContext, IdentitySourceEnum
 from app.auth.jwt_auth import issue_token
 from app.auth.password import hash_password
 from app.auth.validators import (
@@ -46,7 +48,7 @@ from app.auth.validators import (
     validate_username,
 )
 from app.schema.api import PageResult
-from app.schema.db import Invitation, Permission, Role, Tenant, User, UserRole
+from app.schema.db import Invitation, Tenant, User
 
 router = APIRouter(prefix="/api", tags=["Invitation"])
 
@@ -78,8 +80,6 @@ class CreateInvitationRequest(BaseModel):
     scope: str = Field(..., description="create_tenant | create_user")
     expires_in_hours: int = Field(..., ge=1, le=24 * 30, description="有效期（小时），1h–30d")
     max_uses: int | None = Field(default=None, ge=1, description="可用次数；留空=有效期内不限次")
-    role_names: list[str] = Field(default_factory=lambda: [BuiltinRoleEnum.USER.value],
-                                  description="create_user 时新用户预设角色")
 
 
 class InvitationCreateResponse(BaseModel):
@@ -96,7 +96,6 @@ class InvitationItem(BaseModel):
     token: str | None = None  # 明文 token，供列表随时复制（仅本端点返回）
     scope: str
     tenant_id: str | None
-    role_names: list[str] | None
     max_uses: int | None
     used_count: int
     expires_at: str
@@ -143,7 +142,7 @@ def _invite_status_active(inv: Invitation) -> bool:
 
 
 # ============================================================
-# 签发（管理端，allow_api_key=False）
+# 签发（管理端，require_tenant_admin：admin 或 super_admin，禁 api_key）
 # ============================================================
 
 
@@ -151,25 +150,25 @@ def _invite_status_active(inv: Invitation) -> bool:
 async def create_invitation(
     body: CreateInvitationRequest,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """签发邀请链接。
 
-    create_tenant 仅 Super_Admin；create_user 由 user:manage 签发并锁本租户。
+    create_tenant 仅 Super_Admin（被邀请人成为新租户 admin）；
+    create_user 由租户管理员签发并锁本租户（被邀请人成为 member）。
     """
     if body.scope not in (InvitationScopeEnum.CREATE_TENANT.value, InvitationScopeEnum.CREATE_USER.value):
         raise ValidationInputError("scope 仅支持 create_tenant | create_user")
 
     tenant_id: str | None = None
-    role_names: list[str] | None = None
+    inv_target_name: str  # 审计可读名
 
     if body.scope == InvitationScopeEnum.CREATE_TENANT.value:
         # 建租户邀请属平台操作，仅 Super_Admin
         if not (identity.is_super_admin and identity.source == IdentitySourceEnum.JWT):
             raise PermissionDeniedError("仅平台超级管理员可签发建租户邀请")
+        inv_target_name = "建租户邀请"
     else:
         # 建用户邀请：锁签发者租户（Super_Admin 无业务租户，不能签发建用户邀请）
         if identity.tenant_id is None:
@@ -179,10 +178,7 @@ async def create_invitation(
         tenant = await db.get(Tenant, tenant_id)
         if tenant is None or not tenant.is_active:
             raise PermissionDeniedError("该租户已停用，数据已冻结，无法签发邀请")
-        role_names = body.role_names or [BuiltinRoleEnum.USER.value]
-        # 租户管理员不得经邀请分配 admin（管理员）角色
-        if not identity.is_super_admin and BuiltinRoleEnum.ADMIN.value in role_names:
-            raise PermissionDeniedError("无权经邀请分配管理员(admin)角色")
+        inv_target_name = f"建用户邀请@{tenant.name}"
 
     raw_token = _generate_token()
     inv_id = str(uuid.uuid4())
@@ -193,7 +189,7 @@ async def create_invitation(
         token_plain=raw_token,  # 保留明文供列表随时复制/重复使用
         scope=body.scope,
         tenant_id=tenant_id,
-        role_names=role_names,
+        role_names=None,  # 固定角色模型：建用户邀请一律 member，不再预设自定义角色
         max_uses=body.max_uses,
         used_count=0,
         expires_at=expires_at,
@@ -203,7 +199,7 @@ async def create_invitation(
     ))
     add_audit(
         db, actor=identity, action=AuditActionEnum.INVITATION_CREATE,
-        target_type="invitation", target_id=inv_id,
+        target_type="invitation", target_id=inv_id, target_name=inv_target_name,
         detail={"scope": body.scope, "tenant_id": tenant_id,
                 "max_uses": body.max_uses, "expires_at": expires_at.isoformat()},
         request=request,
@@ -219,9 +215,7 @@ async def create_invitation(
 async def list_invitations(
     page: int = 1,
     page_size: int = 20,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """列出邀请（超管看全局；租管仅看本租户）。返回明文 token 供随时复制。"""
@@ -239,7 +233,7 @@ async def list_invitations(
     )).scalars().all()
     items = [
         InvitationItem(
-            id=r.id, token=r.token_plain, scope=r.scope, tenant_id=r.tenant_id, role_names=r.role_names,
+            id=r.id, token=r.token_plain, scope=r.scope, tenant_id=r.tenant_id,
             max_uses=r.max_uses, used_count=r.used_count,
             expires_at=r.expires_at.isoformat() if r.expires_at else "",
             is_active=_invite_status_active(r),
@@ -258,9 +252,7 @@ async def list_invitations(
 async def revoke_invitation(
     invitation_id: str,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """吊销邀请（软删除：is_active=False）。租管仅能吊销本租户邀请。"""
@@ -289,9 +281,7 @@ class InvitationCreatedUser(BaseModel):
 @router.get("/admin/invitations/{invitation_id}/users", response_model=list[InvitationCreatedUser])
 async def list_invitation_created_users(
     invitation_id: str,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.USER_MANAGE.value}, allow_api_key=False)
-    ),
+    identity: IdentityContext = Depends(require_tenant_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """列出"通过该邀请链接创建"的用户（按创建时间倒序）。
@@ -365,11 +355,20 @@ async def accept_invitation(
     inv.used_count = inv.used_count + 1
     if inv.max_uses is not None and inv.used_count >= inv.max_uses:
         inv.is_active = False
+    # 审计对象指向**被创建主体**（建租户邀请→tenant，建用户邀请→user），
+    # 所用邀请 id 记入 detail.via_invitation，形成可追溯链。
+    if inv.scope == InvitationScopeEnum.CREATE_TENANT.value:
+        target_type, target_id = "tenant", result.get("tenant_id")
+        target_name = body.tenant_name
+    else:
+        target_type, target_id = "user", result.get("user_id")
+        target_name = username
     add_audit(
         db, actor=None, actor_username=username,
         action=AuditActionEnum.INVITATION_ACCEPT,
-        target_type="invitation", target_id=inv.id,
-        detail={"scope": inv.scope, "created_user": result.get("user_id"),
+        target_type=target_type, target_id=target_id, target_name=target_name,
+        detail={"scope": inv.scope, "via_invitation": inv.id,
+                "created_user": result.get("user_id"),
                 "created_tenant": result.get("tenant_id")},
         request=request,
     )
@@ -381,7 +380,7 @@ async def _accept_create_tenant(
     db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest,
     description: str | None, avatar: str | None,
 ) -> dict:
-    """建租户 + 预置角色 + 该用户成为租户管理员（admin 角色）。"""
+    """建租户 + 该用户成为租户管理员（固定角色 role=admin）。"""
     if not body.tenant_name:
         raise ValidationInputError("建租户邀请需提供 tenant_name")
     tenant_name = validate_tenant_name(body.tenant_name)
@@ -395,21 +394,15 @@ async def _accept_create_tenant(
     db.add(Tenant(id=tenant_id, name=tenant_name, tenant_type=TenantTypeEnum.BUSINESS.value, is_active=True))
     await db.flush()
 
-    code_to_id = {
-        code: pid for pid, code in (await db.execute(select(Permission.id, Permission.code))).all()
-    }
-    roles = await ensure_tenant_builtin_roles(db, tenant_id, code_to_id)
-    await db.flush()
-
     user_id = str(uuid.uuid4())
     db.add(User(
         id=user_id, tenant_id=tenant_id, username=username,
         password_hash=await hash_password(body.password),
+        role=TenantRoleEnum.ADMIN.value,
         is_active=True, must_change_password=False,  # 自助设置的口令，无需再强制改
         created_via_invitation_id=inv.id,
         description=description, avatar=avatar,
     ))
-    db.add(UserRole(user_id=user_id, role_id=roles[BuiltinRoleEnum.ADMIN.value]))
     return {"detail": "租户与管理员已创建", "tenant_id": tenant_id, "user_id": user_id}
 
 
@@ -417,7 +410,7 @@ async def _accept_create_user(
     db: AsyncSession, inv: Invitation, username: str, body: AcceptInvitationRequest,
     description: str | None, avatar: str | None,
 ) -> dict:
-    """在邀请绑定的租户内建普通用户（按预设角色）。"""
+    """在邀请绑定的租户内建普通用户（固定角色 role=member）。"""
     tenant = await db.get(Tenant, inv.tenant_id)
     if tenant is None or not tenant.is_active:
         raise PermissionDeniedError("目标租户不可用")
@@ -432,15 +425,9 @@ async def _accept_create_user(
     db.add(User(
         id=user_id, tenant_id=inv.tenant_id, username=username,
         password_hash=await hash_password(body.password),
+        role=TenantRoleEnum.MEMBER.value,  # 邀请建号固定 member
         is_active=True, must_change_password=False,
         created_via_invitation_id=inv.id,
         description=description, avatar=avatar,
     ))
-    # 预设角色（限本租户内存在的角色名）
-    for name in (inv.role_names or [BuiltinRoleEnum.USER.value]):
-        role = (await db.execute(
-            select(Role).where(Role.tenant_id == inv.tenant_id, Role.name == name)
-        )).scalar_one_or_none()
-        if role is not None:
-            db.add(UserRole(user_id=user_id, role_id=role.id))
     return {"detail": "用户已创建", "tenant_id": inv.tenant_id, "user_id": user_id}

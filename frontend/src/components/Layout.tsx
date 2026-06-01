@@ -17,7 +17,6 @@ import {
   KeyRound,
   Building2,
   Users as UsersIcon,
-  ShieldCheck,
   Mail,
   ScrollText,
   ChevronUp,
@@ -27,24 +26,25 @@ import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
-import { roleLabel } from '@/lib/labels'
 
-// 导航项配置。menuPerm 为驱动可见性的菜单权限点（超管恒可见）；
-// 配置/管理类页面归 config:manage。null 表示任意登录用户可见。
+// 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
+// - content：内容菜单，member/admin 均可见；
+// - manage：租户管理菜单，仅 admin 可见；
+// - platform：平台菜单（租户管理），仅 Super_Admin 可见。
+// 审计日志归 manage（admin 可见），但 Super_Admin 经下方 SUPER_ADMIN_MENUS 单独放行。
 const navItems = [
-  { to: '/knowledge-bases', label: '知识库', icon: Database, menuPerm: 'menu:knowledge' },
-  { to: '/retrieval', label: '检索测试', icon: Search, menuPerm: 'menu:retrieval' },
-  { to: '/models', label: '模型管理', icon: Cpu, menuPerm: 'config:manage' },
-  { to: '/agent-config', label: '智能体', icon: Bot, menuPerm: 'config:manage' },
-  { to: '/embed-config', label: 'Embedding', icon: Layers, menuPerm: 'config:manage' },
-  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, menuPerm: 'config:manage' },
-  { to: '/api-keys', label: 'API Key', icon: Key, menuPerm: 'apikey:manage' },
-  { to: '/tenants', label: '租户管理', icon: Building2, menuPerm: 'tenant:manage' },
-  { to: '/users', label: '用户管理', icon: UsersIcon, menuPerm: 'user:manage' },
-  { to: '/roles', label: '角色管理', icon: ShieldCheck, menuPerm: 'role:manage' },
-  { to: '/invitations', label: '邀请链接', icon: Mail, menuPerm: 'user:manage' },
-  { to: '/audit-logs', label: '审计日志', icon: ScrollText, menuPerm: 'menu:audit' },
-  { to: '/settings', label: '系统配置', icon: Settings, menuPerm: 'config:manage' },
+  { to: '/knowledge-bases', label: '知识库', icon: Database, group: 'content' },
+  { to: '/retrieval', label: '检索测试', icon: Search, group: 'content' },
+  { to: '/models', label: '模型管理', icon: Cpu, group: 'manage' },
+  { to: '/agent-config', label: '智能体', icon: Bot, group: 'manage' },
+  { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'manage' },
+  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'manage' },
+  { to: '/api-keys', label: 'API Key', icon: Key, group: 'manage' },
+  { to: '/tenants', label: '租户管理', icon: Building2, group: 'platform' },
+  { to: '/users', label: '用户管理', icon: UsersIcon, group: 'manage' },
+  { to: '/invitations', label: '邀请链接', icon: Mail, group: 'manage' },
+  { to: '/audit-logs', label: '审计日志', icon: ScrollText, group: 'manage' },
+  { to: '/settings', label: '系统配置', icon: Settings, group: 'manage' },
 ] as const
 
 // 布局组件：侧边栏 + 主内容区
@@ -55,16 +55,20 @@ function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const confirm = useConfirm()
-  const { hasPermission, isSuperAdmin, logout, profile } = useAuth()
+  const { isSuperAdmin, isAdmin, logout, profile } = useAuth()
 
-  // 菜单可见性：
-  // - Super_Admin（平台级）：A方案——仅保留"租户管理 + 审计日志"，
-  //   不显示租户级（用户/角色/邀请）与内容/配置菜单（那些超管无租户上下文、不该管）。
-  // - 其他身份：按菜单权限点显隐。
+  // 菜单可见性（固定角色模型，取代权限点）：
+  // - Super_Admin（平台级）：仅保留"租户管理 + 审计日志"（平台菜单），
+  //   不显示租户级管理与内容菜单（超管无租户上下文、不该管）。
+  // - admin（租户管理员）：管理菜单（manage）+ 内容菜单（content）。
+  // - member（普通成员）：仅内容菜单（content）。
   const SUPER_ADMIN_MENUS = new Set(['/tenants', '/audit-logs'])
-  const visibleNavItems = navItems.filter((item) =>
-    isSuperAdmin ? SUPER_ADMIN_MENUS.has(item.to) : hasPermission(item.menuPerm)
-  )
+  const visibleNavItems = navItems.filter((item) => {
+    if (isSuperAdmin) return SUPER_ADMIN_MENUS.has(item.to)
+    if (item.group === 'platform') return false // 平台菜单仅 Super_Admin
+    if (item.group === 'content') return true // 内容菜单 admin/member 均可见
+    return isAdmin // manage 菜单仅 admin
+  })
 
   const {
     sessions,
@@ -261,7 +265,7 @@ function Layout() {
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-sidebar-foreground">{profile?.username ?? '—'}</div>
                 <div className="truncate text-xs text-sidebar-foreground/60">
-                  {profile && profile.role_names.length > 0 ? profile.role_names.map(roleLabel).join('、') : '用户'}
+                  {profile?.role_label ?? '用户'}
                 </div>
               </div>
               <ChevronUp className={cn('h-4 w-4 text-sidebar-foreground/50 shrink-0 transition-transform', accountMenuOpen ? '' : 'rotate-180')} />

@@ -4,11 +4,15 @@
 使用 httpx AsyncClient + 内存 SQLite 数据库。
 """
 
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock 重型依赖模块，避免导入 FlagEmbedding / torch 等
 sys.modules.setdefault("pymilvus", MagicMock())
+
+# get_settings() 启动期 fail-fast 需要 JWT_SECRET（清理 E 后鉴权始终强制）
+os.environ.setdefault("JWT_SECRET", "admin-api-test-secret-0123456789abcdef")
 
 import pytest
 import pytest_asyncio
@@ -44,13 +48,47 @@ async def client():
     # 覆盖依赖
     from app.main import app
     from app.storage.database import get_db
+    import app.api.deps as deps
+    import app.storage.database as dbmod
+    from app.auth.identity import IdentityContext, IdentitySourceEnum, OperationLevelEnum
+    from app.auth.constants import TenantRoleEnum
+
+    # 把全局 async_session 指向测试用内存 sqlite：KB/文档路由用 get_db_session、守卫与
+    # kb_scope 直接用 app.storage.database.async_session，均须落到测试库（否则连真实 PG 失败）。
+    _orig_async_session = dbmod.async_session
+    dbmod.async_session = _test_session_factory
+
+    # 进程隔离地注入一个固定的租户管理员身份：本测试聚焦知识库/文档/系统配置的**功能正确性**，
+    # 与鉴权无关（清理 E 后已无 auth_enabled 旁路），故 monkeypatch _resolve_identity 让所有
+    # 守卫放行；身份带 tenant_id 以便建库盖章。鉴权本身正确性由 tenant-auth 套件覆盖。
+    _orig_resolve = deps._resolve_identity
+
+    async def _fake_resolve(request, session):
+        return (
+            IdentityContext(
+                source=IdentitySourceEnum.JWT,
+                op_level=OperationLevelEnum.TENANT,
+                tenant_id="t-test",
+                user_id="u-test",
+                username="tester",
+                is_super_admin=False,
+                role=TenantRoleEnum.ADMIN,
+            ),
+            False,
+        )
+
+    deps._resolve_identity = _fake_resolve
     app.dependency_overrides[get_db] = _override_get_db
+    deps.get_db_session = _override_get_db
+    app.dependency_overrides[deps.get_db_session] = _override_get_db
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
     # 清理
+    deps._resolve_identity = _orig_resolve
+    dbmod.async_session = _orig_async_session
     app.dependency_overrides.clear()
     async with _test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -88,7 +126,7 @@ class TestKnowledgeBaseCRUD:
         resp = await client.get("/api/knowledge-bases")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 2
+        assert len(data["items"]) == 2
 
     @pytest.mark.asyncio
     async def test_get_knowledge_base(self, client):
@@ -194,7 +232,7 @@ class TestDocumentManagement:
 
         resp = await client.get(f"/api/knowledge-bases/{kb_id}/documents")
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        assert len(resp.json()["items"]) == 2
 
     @pytest.mark.asyncio
     async def test_get_document(self, client, kb_id):
@@ -263,15 +301,15 @@ class TestSystemAPI:
 
     @pytest.mark.asyncio
     async def test_update_config(self, client):
-        """更新系统配置"""
+        """更新系统配置（更新 LLM 模型与分块参数，返回脱敏配置）"""
         resp = await client.put("/api/system/config", json={
-            "agent_max_iterations": 5,
-            "agent_timeout": 15.0,
+            "llm_model": "qwen2.5:14b",
+            "parent_chunk_size": 3000,
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert data["agent_max_iterations"] == 5
-        assert data["agent_timeout"] == 15.0
+        assert data["llm_model"] == "qwen2.5:14b"
+        assert data["parent_chunk_size"] == 3000
 
     @pytest.mark.asyncio
     async def test_queue_stats_no_redis(self, client):

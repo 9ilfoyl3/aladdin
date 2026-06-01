@@ -93,6 +93,10 @@ export default function InviteAccept() {
           )}
         </div>
         <form onSubmit={onSubmit} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>头像（可选）</Label>
+            <AvatarPicker value={avatar} onChange={setAvatar} shape="circle" />
+          </div>
           {isCreateTenant && (
             <div className="space-y-1.5">
               <Label htmlFor="tenant">租户名称</Label>
@@ -110,10 +114,6 @@ export default function InviteAccept() {
           <div className="space-y-1.5">
             <Label htmlFor="confirm">确认密码</Label>
             <PasswordInput id="confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
-          </div>
-          <div className="space-y-1.5">
-            <Label>头像（可选）</Label>
-            <AvatarPicker value={avatar} onChange={setAvatar} shape="circle" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="intro">简介（可选）</Label>

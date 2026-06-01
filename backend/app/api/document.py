@@ -14,10 +14,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.api.deps import authorization_guard, get_db_session
+from app.api.deps import get_db_session, require_authenticated, require_member
 from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_filename, validate_folder_name
-from app.auth.constants import PermissionEnum
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.models.manager import get_model_manager
@@ -68,7 +67,8 @@ async def _authorize_kb_access(
     decision = kb_authorization_decision(
         identity,
         kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
-        kb_visibility=kb.visibility, access=access, grants=grants,
+        kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
+        access=access, grants=grants,
     )
     if not decision.allow:
         if decision.http_status == 403:
@@ -296,7 +296,7 @@ async def list_documents(
     folder_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """获取知识库下的文档列表（支持按文件夹过滤 + 分页/滚动加载）"""
@@ -365,9 +365,7 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     folder_id: str | None = None,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """上传文档（multipart/form-data），支持指定文件夹"""
@@ -467,7 +465,7 @@ async def upload_document(
 @router.get("/api/documents/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     doc_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """获取文档详情（元数据；contextvar 兜底确保仅本租户可见 -> 跨租户 404）"""
@@ -494,9 +492,7 @@ async def get_document(
 async def retry_document(
     doc_id: str,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """重新识别文档（清除旧数据后重新处理）"""
@@ -567,9 +563,7 @@ async def retry_document(
 @router.delete("/api/documents/{doc_id}", status_code=204)
 async def delete_document(
     doc_id: str,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
@@ -645,9 +639,7 @@ class BatchRetryRequest(BaseModel):
 async def batch_retry_documents(
     body: BatchRetryRequest,
     request: Request,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """批量重试失败的文档（contextvar 兜底确保仅命中本租户文档）"""
@@ -724,9 +716,7 @@ class BatchDeleteRequest(BaseModel):
 @router.post("/api/documents/batch-delete", status_code=200)
 async def batch_delete_documents(
     body: BatchDeleteRequest,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """批量删除文档（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
@@ -883,9 +873,7 @@ class FolderUploadResponse(BaseModel):
 async def validate_folder_upload(
     kb_id: str,
     body: FolderUploadValidateRequest,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """校验文件夹上传：解析目录结构，区分支持和不支持的文件"""
@@ -954,9 +942,7 @@ async def upload_folder(
     files: list[UploadFile] = File(...),
     paths: Annotated[str, Form(...)] = "",
     parent_folder_id: Annotated[str | None, Form()] = None,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.KB_WRITE.value})
-    ),
+    identity: IdentityContext = Depends(require_member()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """批量上传文件夹
@@ -1148,7 +1134,7 @@ async def upload_folder(
 @router.get("/api/documents/{doc_id}/preview")
 async def preview_document_file(
     doc_id: str,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """预览文档文件缩略图（支持图片和 PDF 首页）"""
@@ -1195,7 +1181,7 @@ async def list_document_chunks(
     doc_id: str,
     page: int = 1,
     page_size: int = 20,
-    identity: IdentityContext = Depends(authorization_guard()),
+    identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """查看文档的切片列表（父块分页 + 当前页父块对应的子块内容用于高亮）"""

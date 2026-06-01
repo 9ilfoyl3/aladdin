@@ -1,4 +1,12 @@
-"""Verify the new admin endpoints that back the management UI pages."""
+"""Verify the fixed-role admin endpoints that back the management UI pages.
+
+固定角色模型（tenant-rbac-refactor）下角色 CRUD / 权限点字典 / 用户角色分配端点均已删除。
+本脚本只校验仍然存在的固定角色管理 UI 流程：
+  - GET /api/auth/me 返回正确身份（is_super_admin / role）
+  - 超管建租户 + 列租户（Tenants 页）
+  - 租管建用户固定为 member（Users 页），列表/重置口令/启停可用
+  - 超管下钻为租户新增管理员，得 role == admin
+"""
 from __future__ import annotations
 import sys, uuid, httpx
 
@@ -27,6 +35,11 @@ r = c.post("/api/auth/login", json={"username": "superadmin", "password": "Super
 ck("super admin login", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
 sa = r.json()["access_token"]
 
+# super admin identity: is_super_admin=True, role=None
+me = c.get("/api/auth/me", headers=auth(sa)).json()
+ck("super admin me is_super_admin", me.get("is_super_admin") is True, str(me))
+ck("super admin role is None", me.get("role") is None, str(me))
+
 # create tenant (Tenants page)
 r = c.post("/api/admin/tenants", headers=auth(sa),
            json={"name": f"法院X-{SFX}", "admin_username": f"adminx_{SFX}"})
@@ -45,45 +58,24 @@ c.post("/api/auth/change-password", headers=auth(atok),
 r = c.post("/api/auth/login", json={"username": f"adminx_{SFX}", "password": "AdminX#Pass2026", "tenant_id": tid})
 atok = r.json()["access_token"]
 
-# list permission dict (Roles page)
-r = c.get("/api/admin/permissions", headers=auth(atok))
-ck("permission dict", r.status_code == 200 and len(r.json()) >= 20, f"{r.status_code} n={len(r.json()) if r.status_code==200 else '-'}")
-ck("perm dict typed", r.status_code == 200 and all("code" in p and "type" in p for p in r.json()), "")
+# tenant admin identity: role == admin, not super
+me = c.get("/api/auth/me", headers=auth(atok)).json()
+ck("tenant admin role == admin", me.get("role") == "admin", str(me))
+ck("tenant admin not super admin", me.get("is_super_admin") is False, str(me))
 
-# list roles (Roles page) - builtin admin/user present
-r = c.get("/api/admin/roles", headers=auth(atok))
-ck("list roles", r.status_code == 200, r.text[:120])
-role_names = {x["name"] for x in r.json()} if r.status_code == 200 else set()
-ck("builtin roles present", {"admin", "user"} <= role_names, str(role_names))
-
-# create custom role (Roles page)
-r = c.post("/api/admin/roles", headers=auth(atok),
-           json={"name": f"readonly_{SFX}", "permission_codes": ["kb:read", "menu:knowledge"]})
-ck("create role", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-rid = r.json()["id"]
-
-# update role permissions (Roles page edit)
-r = c.put(f"/api/admin/roles/{rid}/permissions", headers=auth(atok),
-          json={"permission_codes": ["kb:read", "kb:create", "menu:knowledge"]})
-ck("update role perms", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-
-# create user (Users page)
+# create user (Users page) — 固定角色 member
 r = c.post("/api/admin/users", headers=auth(atok),
-           json={"username": f"ux_{SFX}", "role_names": ["user"]})
+           json={"username": f"ux_{SFX}"})
 ck("create user", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-uid = r.json()["id"]; ck("user temp pwd returned", bool(r.json().get("temp_password")), "")
+uid = r.json()["id"]
+ck("created user role == member", r.json().get("role") == "member", str(r.json().get("role")))
+ck("user temp pwd returned", bool(r.json().get("temp_password")), "")
 
-# list users (Users page) — now paginated PageResult
+# list users (Users page) — paginated PageResult
 r = c.get("/api/admin/users", headers=auth(atok))
 ck("list users", r.status_code == 200 and any(u["id"] == uid for u in r.json()["items"]), r.text[:120])
-
-# get user roles (Users page role dialog)
-r = c.get(f"/api/admin/users/{uid}/roles", headers=auth(atok))
-ck("get user roles", r.status_code == 200 and "role_ids" in r.json(), r.text[:120])
-
-# set user roles (assign custom role)
-r = c.put(f"/api/admin/users/{uid}/roles", headers=auth(atok), json={"role_ids": [rid]})
-ck("set user roles", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+row = next((u for u in r.json()["items"] if u["id"] == uid), {}) if r.status_code == 200 else {}
+ck("list user shows role member", row.get("role") == "member", str(row.get("role")))
 
 # reset password (Users page)
 r = c.post(f"/api/admin/users/{uid}/reset-password", headers=auth(atok))
@@ -94,18 +86,14 @@ r = c.put(f"/api/admin/users/{uid}/status", headers=auth(atok), json={"is_active
 ck("disable user", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
 c.put(f"/api/admin/users/{uid}/status", headers=auth(atok), json={"is_active": True})
 
-# delete custom role must reassign user first; reassign to builtin user then delete
-r = c.get("/api/admin/roles", headers=auth(atok))
-user_role_id = next(x["id"] for x in r.json() if x["name"] == "user")
-c.put(f"/api/admin/users/{uid}/roles", headers=auth(atok), json={"role_ids": [user_role_id]})
-r = c.delete(f"/api/admin/roles/{rid}", headers=auth(atok))
-ck("delete custom role", r.status_code == 204, f"{r.status_code} {r.text[:120]}")
+# 超管下钻为该租户新增管理员（得 role == admin）
+r = c.post(f"/api/admin/tenants/{tid}/admins", headers=auth(sa),
+           json={"username": f"adminx2_{SFX}"})
+ck("super add tenant admin", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+ck("added tenant admin role == admin", r.status_code == 201 and r.json().get("role") == "admin",
+   str(r.json().get("role") if r.status_code == 201 else "-"))
 
-# builtin role cannot be deleted
-r = c.delete(f"/api/admin/roles/{user_role_id}", headers=auth(atok))
-ck("builtin role delete blocked -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
-
-# tenant admin cannot access platform tenant mgmt is allowed? tenant:manage is platform-only.
+# tenant admin cannot access platform tenant mgmt (tenant 管理是平台级)
 r = c.get("/api/admin/tenants", headers=auth(atok))
 ck("tenant admin cannot list tenants -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
 

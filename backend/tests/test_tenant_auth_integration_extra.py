@@ -16,7 +16,6 @@ import tempfile
 import pytest
 
 os.environ.setdefault("JWT_SECRET", "test-secret-key-integration-extra-0123456789")
-os.environ.setdefault("AUTH_ENABLED", "true")
 os.environ.setdefault("SUPER_ADMIN_USERNAME", "root")
 os.environ.setdefault("SUPER_ADMIN_PASSWORD", "RootPass#123")
 

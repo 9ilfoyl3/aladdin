@@ -16,8 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.config import AgentConfig
 from app.api.agent_config import get_effective_preset_config
-from app.api.deps import authorization_guard
-from app.auth.constants import PermissionEnum
+from app.api.deps import require_authenticated
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import KbAccessEnum
 from app.auth.kb_scope import authorize_requested_kbs
@@ -857,9 +856,7 @@ async def _stream_response(
 @router.post("/api/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.QA_INVOKE.value})
-    ),
+    identity: IdentityContext = Depends(require_authenticated()),
 ):
     """Chat Completion 端点（OpenAI 兼容）
 

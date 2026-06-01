@@ -12,8 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import authorization_guard
-from app.auth.constants import PermissionEnum
+from app.api.deps import require_authenticated, require_tenant_admin
 from app.auth.identity import IdentityContext
 from app.schema.db import AgentPreset
 from app.storage.database import async_session
@@ -152,7 +151,7 @@ def _to_response(preset: AgentPreset) -> AgentPresetResponse:
 
 @router.get("/placeholders")
 async def list_placeholders(
-    _identity: IdentityContext = Depends(authorization_guard()),
+    _identity: IdentityContext = Depends(require_authenticated()),
 ):
     """返回 system_prompt 支持的占位符变量及默认模板
 
@@ -175,9 +174,7 @@ async def list_placeholders(
 @router.post("/rewrite-prompt")
 async def rewrite_prompt(
     data: PromptRewriteRequest,
-    _identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
-    ),
+    _identity: IdentityContext = Depends(require_tenant_admin()),
 ):
     """基于 Progressive RAG 结构，用默认模型把用户的角色/特性描述改写为完整系统提示词
 
@@ -254,7 +251,7 @@ async def rewrite_prompt(
 
 @router.get("", response_model=list[AgentPresetResponse])
 async def list_presets(
-    _identity: IdentityContext = Depends(authorization_guard()),
+    _identity: IdentityContext = Depends(require_authenticated()),
 ):
     """获取所有 Agent 预设列表"""
     # 确保内置预设存在
@@ -271,9 +268,7 @@ async def list_presets(
 @router.post("", response_model=AgentPresetResponse)
 async def create_preset(
     data: AgentPresetCreate,
-    _identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
-    ),
+    _identity: IdentityContext = Depends(require_tenant_admin()),
 ):
     """创建新的 Agent 预设"""
     preset = AgentPreset(
@@ -304,9 +299,7 @@ async def create_preset(
 async def update_preset(
     preset_id: str,
     data: AgentPresetUpdate,
-    _identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
-    ),
+    _identity: IdentityContext = Depends(require_tenant_admin()),
 ):
     """更新 Agent 预设"""
     async with async_session() as session:
@@ -345,9 +338,7 @@ async def update_preset(
 @router.delete("/{preset_id}")
 async def delete_preset(
     preset_id: str,
-    _identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.CONFIG_MANAGE.value}, allow_api_key=False)
-    ),
+    _identity: IdentityContext = Depends(require_tenant_admin()),
 ):
     """删除 Agent 预设"""
     async with async_session() as session:

@@ -35,7 +35,7 @@ def main():
         adm = c.post(f"{BASE}/api/auth/login", json={"username": f"adm_{sfx}", "password": "AdmPwd123"}).json()["access_token"]
         # 建用户带头像+简介
         u = c.post(f"{BASE}/api/admin/users", headers=auth(adm),
-                   json={"username": f"u_{sfx}", "role_names": [], "description": "用户创建简介", "avatar": PNG}).json()
+                   json={"username": f"u_{sfx}", "description": "用户创建简介", "avatar": PNG}).json()
         check("用户创建即带简介", u.get("description") == "用户创建简介", str(u.get("description")))
         check("用户创建即带头像", bool(u.get("avatar")))
         # 列表里能看到头像/简介
@@ -45,7 +45,7 @@ def main():
         check("用户列表回显简介", bool(row) and row.get("description") == "用户创建简介")
         # 非法头像 400
         r = c.post(f"{BASE}/api/admin/users", headers=auth(adm),
-                   json={"username": f"bad_{sfx}", "role_names": [], "avatar": "notdata"})
+                   json={"username": f"bad_{sfx}", "avatar": "notdata"})
         check("非法头像创建被拒(400)", r.status_code == 400, str(r.status_code))
     p=sum(1 for _,x in ok if x); print(f"\n==== {p}/{len(ok)} passed ====")
     raise SystemExit(0 if p==len(ok) else 1)

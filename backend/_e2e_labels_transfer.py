@@ -1,4 +1,4 @@
-"""验证：权限字典返回中文 label/type_label；转移知识库要求源用户先停用。"""
+"""验证：转移知识库要求源用户先停用。"""
 import uuid
 import httpx
 
@@ -37,16 +37,9 @@ def main():
                json={"old_password": atemp, "new_password": "AdmPwd123"})
         adm = c.post(f"{BASE}/api/auth/login", json={"username": f"adm_{sfx}", "password": "AdmPwd123"}).json()["access_token"]
 
-        # 权限字典含中文 label/type_label
-        pd = c.get(f"{BASE}/api/admin/permissions", headers=auth(adm)).json()
-        check("权限字典非空", len(pd) > 0, f"count={len(pd)}")
-        sample = next((p for p in pd if p["code"] == "menu:knowledge"), None)
-        check("menu:knowledge 有中文 label", bool(sample) and sample.get("label") == "菜单：知识库", str(sample))
-        check("含 type_label 中文", all(p.get("type_label") in ("功能权限", "菜单可见", "按钮可见") for p in pd))
-
         # 建两个用户用于转移
-        u1 = c.post(f"{BASE}/api/admin/users", headers=auth(adm), json={"username": f"src_{sfx}", "role_names": []}).json()
-        u2 = c.post(f"{BASE}/api/admin/users", headers=auth(adm), json={"username": f"dst_{sfx}", "role_names": []}).json()
+        u1 = c.post(f"{BASE}/api/admin/users", headers=auth(adm), json={"username": f"src_{sfx}"}).json()
+        u2 = c.post(f"{BASE}/api/admin/users", headers=auth(adm), json={"username": f"dst_{sfx}"}).json()
         src_id, dst_id = u1["id"], u2["id"]
 
         # 源用户在用（启用）时转移应被拒

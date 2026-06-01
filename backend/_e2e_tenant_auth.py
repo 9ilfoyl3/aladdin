@@ -4,12 +4,11 @@ Runs against a running backend (default http://localhost:8000). Exercises:
   - bootstrap state (super admin, builtin external tenant)
   - super admin login + forced password change gate
   - platform ops: tenant CRUD, create tenant admin
-  - tenant admin: change password, create users, custom roles, assign roles
-  - real-time RBAC (permission changes take effect next request)
+  - tenant admin: change password, create users (fixed-role member)
   - cross-tenant hard isolation (404)
   - default-deny (401), permission-deny (403)
   - API key three models (tenant / user / external-agent) + channel boundary
-  - KB visibility promotion + point-to-point sharing
+  - KB visibility promotion + point-to-point sharing (user multi-select)
   - external-agent proxy key + external user lazy creation + isolation
   - content-view boundary for super admin
 
@@ -67,9 +66,9 @@ def main() -> None:
     r = client.get("/api/knowledge-bases")
     check("protected route w/o creds -> 401", r.status_code == 401, f"{r.status_code} {r.text[:120]}")
 
-    # me/permissions without creds -> 401
-    r = client.get("/api/auth/me/permissions")
-    check("me/permissions w/o creds -> 401", r.status_code == 401, str(r.status_code))
+    # me without creds -> 401
+    r = client.get("/api/auth/me")
+    check("me w/o creds -> 401", r.status_code == 401, str(r.status_code))
 
     section("1. Super admin login + forced change password gate")
     r = client.post("/api/auth/login", json={"username": SUPER_USER, "password": SUPER_PWD})
@@ -126,7 +125,7 @@ def main() -> None:
     names = {t["id"] for t in r.json()}
     check("tenant list includes A and B", tenant_a_id in names and tenant_b_id in names, str(names))
 
-    section("3. Tenant admin A: change pwd, create user, RBAC")
+    section("3. Tenant admin A: change pwd, create user (fixed-role member)")
     # tenant admin A first login (forced change)
     r = client.post("/api/auth/login", json={"username": f"adminA_{SFX}", "password": admin_a_temp,
                                               "tenant_id": tenant_a_id})
@@ -142,22 +141,20 @@ def main() -> None:
                                              "tenant_id": tenant_a_id})
     a_admin_token = r.json()["access_token"]
 
-    # admin A permissions include user:manage, role:manage, menu:admin
-    r = client.get("/api/auth/me/permissions", headers=auth(a_admin_token))
-    check("admin A me/permissions 200", r.status_code == 200, str(r.status_code))
-    a_perms = {p["code"] for p in r.json()["permissions"]}
-    check("admin A has user:manage", "user:manage" in a_perms, str(sorted(a_perms)))
-    check("admin A has role:manage", "role:manage" in a_perms, "")
-    check("admin A perms typed (menu/btn present)",
-          any(p["type"] == "menu" for p in r.json()["permissions"]), "")
+    # admin A identity: role == admin (固定角色模型)
+    r = client.get("/api/auth/me", headers=auth(a_admin_token))
+    check("admin A me 200", r.status_code == 200, str(r.status_code))
+    check("admin A role == admin", r.json().get("role") == "admin", str(r.json()))
+    check("admin A not super admin", r.json().get("is_super_admin") is False, str(r.json()))
 
-    # admin A creates a normal user
+    # admin A creates a normal user (固定角色 member)
     r = client.post("/api/admin/users", headers=auth(a_admin_token),
-                    json={"username": f"userA1_{SFX}", "role_names": ["user"]})
+                    json={"username": f"userA1_{SFX}"})
     check("admin A create user 201", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
     user_a1 = r.json()
     user_a1_id = user_a1["id"]
     user_a1_temp = user_a1["temp_password"]
+    check("created user role == member", user_a1.get("role") == "member", str(user_a1))
 
     # normal user A1 login + forced change
     r = client.post("/api/auth/login", json={"username": f"userA1_{SFX}", "password": user_a1_temp,
@@ -172,50 +169,16 @@ def main() -> None:
                                              "tenant_id": tenant_a_id})
     a_user_token = r.json()["access_token"]
 
-    # normal user lacks admin perms -> tenant mgmt 403
-    r = client.get("/api/admin/roles", headers=auth(a_user_token))
-    check("normal user role list -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+    # normal user lacks admin role -> tenant admin op (list users) 403
+    r = client.get("/api/admin/users", headers=auth(a_user_token))
+    check("normal user admin op (list users) -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
 
-    # normal user perms: no user:manage, but has kb:create / qa:invoke
-    r = client.get("/api/auth/me/permissions", headers=auth(a_user_token))
-    u_perms = {p["code"] for p in r.json()["permissions"]}
-    check("normal user lacks user:manage", "user:manage" not in u_perms, str(sorted(u_perms)))
-    check("normal user has kb:create", "kb:create" in u_perms, "")
+    # normal user identity: role == member, not admin/super
+    r = client.get("/api/auth/me", headers=auth(a_user_token))
+    check("normal user role == member", r.json().get("role") == "member", str(r.json()))
+    check("normal user not super admin", r.json().get("is_super_admin") is False, str(r.json()))
 
-    section("4. Real-time RBAC: custom role + permission change takes effect next request")
-    # create custom role with only kb:read
-    r = client.post("/api/admin/roles", headers=auth(a_admin_token),
-                    json={"name": f"readonly_{SFX}", "permission_codes": ["kb:read", "menu:knowledge"]})
-    check("admin A create custom role 201", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
-    role_ro_id = r.json()["id"]
-
-    # assign custom role to user A1 (replaces roles -> loses kb:create)
-    r = client.put(f"/api/admin/users/{user_a1_id}/roles", headers=auth(a_admin_token),
-                   json={"role_ids": [role_ro_id]})
-    check("assign custom role 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-
-    # user A1 next request: kb:create gone, kb:read present (no re-login)
-    r = client.get("/api/auth/me/permissions", headers=auth(a_user_token))
-    u_perms2 = {p["code"] for p in r.json()["permissions"]}
-    check("RBAC change instant: kb:create removed", "kb:create" not in u_perms2, str(sorted(u_perms2)))
-    check("RBAC change instant: kb:read kept", "kb:read" in u_perms2, "")
-
-    # add kb:create back to the role -> instant effect
-    r = client.put(f"/api/admin/roles/{role_ro_id}/permissions", headers=auth(a_admin_token),
-                   json={"permission_codes": ["kb:read", "kb:create", "menu:knowledge"]})
-    check("update role perms 200", r.status_code == 200, str(r.status_code))
-    r = client.get("/api/auth/me/permissions", headers=auth(a_user_token))
-    u_perms3 = {p["code"] for p in r.json()["permissions"]}
-    check("RBAC re-add kb:create instant", "kb:create" in u_perms3, str(sorted(u_perms3)))
-
-    # restore user role for later KB tests
-    # find the builtin 'user' role id
-    r = client.get("/api/admin/roles", headers=auth(a_admin_token))
-    roles_a = {role["name"]: role["id"] for role in r.json()}
-    client.put(f"/api/admin/users/{user_a1_id}/roles", headers=auth(a_admin_token),
-               json={"role_ids": [roles_a["user"]]})
-
-    section("5. KB create + cross-tenant hard isolation")
+    section("4. KB create + cross-tenant hard isolation")
     # user A1 creates a private KB
     r = client.post("/api/knowledge-bases", headers=auth(a_user_token),
                     json={"name": f"A1-private-{SFX}"})
@@ -249,10 +212,10 @@ def main() -> None:
     r = client.get("/api/knowledge-bases", headers={**auth(b_admin_token), "X-Tenant-ID": tenant_a_id})
     check("X-Tenant-ID spoof by normal jwt -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
 
-    section("6. KB visibility promotion + point-to-point share (in-tenant)")
+    section("5. KB visibility promotion + point-to-point share (in-tenant)")
     # create a second user in tenant A
     r = client.post("/api/admin/users", headers=auth(a_admin_token),
-                    json={"username": f"userA2_{SFX}", "role_names": ["user"]})
+                    json={"username": f"userA2_{SFX}"})
     user_a2 = r.json()
     user_a2_id = user_a2["id"]
     r = client.post("/api/auth/login", json={"username": f"userA2_{SFX}", "password": user_a2["temp_password"],
@@ -268,10 +231,10 @@ def main() -> None:
     r = client.get(f"/api/knowledge-bases/{kb_a1_id}", headers=auth(a_user2_token))
     check("A2 cannot read A1 private KB -> 404", r.status_code == 404, f"{r.status_code} {r.text[:120]}")
 
-    # A1 shares KB to A2 with read
-    r = client.post(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
-                    json={"grantee_type": "user", "grantee_id": user_a2_id, "permission": "read"})
-    check("A1 share KB to A2 (read) 201", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
+    # A1 shares KB to A2 with read (PUT user 多选)
+    r = client.put(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
+                   json={"user_ids": [user_a2_id], "permission": "read"})
+    check("A1 share KB to A2 (read) 200", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
 
     # now A2 can read it
     r = client.get(f"/api/knowledge-bases/{kb_a1_id}", headers=auth(a_user2_token))
@@ -282,18 +245,18 @@ def main() -> None:
                    json={"description": "hacked by A2"})
     check("A2 read-only cannot write -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
 
-    # invalid grantee_type -> 400
-    r = client.post(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
-                    json={"grantee_type": "organization", "grantee_id": "x", "permission": "read"})
-    check("reserved grantee_type -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    # invalid permission -> 400
+    r = client.put(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
+                   json={"user_ids": [user_a2_id], "permission": "bogus"})
+    check("invalid permission -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
 
-    # cross-tenant share: A1 shares to tenant B's admin user -> 404
+    # cross-tenant share: A1 shares to tenant B's user -> 404
     # need a B user id; create one
     r = client.post("/api/admin/users", headers=auth(b_admin_token),
-                    json={"username": f"userB1_{SFX}", "role_names": ["user"]})
+                    json={"username": f"userB1_{SFX}"})
     user_b1_id = r.json()["id"]
-    r = client.post(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
-                    json={"grantee_type": "user", "grantee_id": user_b1_id, "permission": "read"})
+    r = client.put(f"/api/knowledge-bases/{kb_a1_id}/share", headers=auth(a_user_token),
+                   json={"user_ids": [user_b1_id], "permission": "read"})
     check("cross-tenant share -> 404", r.status_code == 404, f"{r.status_code} {r.text[:120]}")
 
     # A1 promotes KB to organization
@@ -308,7 +271,7 @@ def main() -> None:
     a2_kb_ids = {kb["id"] for kb in r.json()["items"]}
     check("public KB visible to same-tenant user", kb_a1_id in a2_kb_ids, str(a2_kb_ids))
 
-    section("7. API Key three models + channel boundary")
+    section("6. API Key three models + channel boundary")
     # tenant admin A creates a tenant-level key with all_public_kbs scope
     r = client.post("/api/api-keys", headers=auth(a_admin_token),
                     json={"name": "svcA", "scope": {"all_public_kbs": True, "explicit_kb_ids": []}})
@@ -317,8 +280,8 @@ def main() -> None:
     check("tenant key returned plaintext once", tenant_key.startswith("sk-"), tenant_key[:8])
 
     # use tenant-level key on /v1 chat? we lack LLM; instead test channel boundary:
-    # API key cannot do admin op -> 403
-    r = client.get("/api/admin/roles", headers=auth(tenant_key))
+    # API key cannot do admin op (list users = require_tenant_admin) -> 403
+    r = client.get("/api/admin/users", headers=auth(tenant_key))
     check("api key -> admin op 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
 
     # api key cannot manage api keys (administrative) -> 403
@@ -337,8 +300,8 @@ def main() -> None:
     check("create user-level key 200", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
     user_key = r.json()["key"]
 
-    # user-level key inherits user's perms but is still tenant-channel only -> admin 403
-    r = client.get("/api/admin/roles", headers=auth(user_key))
+    # user-level key inherits user's identity but is still tenant-channel only -> admin 403
+    r = client.get("/api/admin/users", headers=auth(user_key))
     check("user-level key admin op -> 403", r.status_code == 403, str(r.status_code))
 
     # list keys shows only prefix (no plaintext)
@@ -349,7 +312,7 @@ def main() -> None:
         check("listed keys expose prefix only",
               all("key" not in it for it in items) and all(it.get("prefix") for it in items), str(items[:1]))
 
-    section("8. External-agent proxy key (Super_Admin only) + external user isolation")
+    section("7. External-agent proxy key (Super_Admin only) + external user isolation")
     # normal tenant admin cannot create proxy key -> 403
     r = client.post("/api/api-keys/external-agent", headers=auth(a_admin_token), json={"name": "proxy"})
     check("tenant admin create proxy key -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
@@ -385,13 +348,13 @@ def main() -> None:
     r = client.get("/api/admin/tenants", headers=h_e1)
     check("external user admin op -> 403", r.status_code == 403, str(r.status_code))
 
-    section("9. Account management: disable user invalidates JWT")
+    section("8. Account management: disable user invalidates JWT")
     # disable user A2
     r = client.put(f"/api/admin/users/{user_a2_id}/status", headers=auth(a_admin_token),
                    json={"is_active": False})
     check("admin disable user A2 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
     # A2's existing token now invalid -> 401
-    r = client.get("/api/auth/me/permissions", headers=auth(a_user2_token))
+    r = client.get("/api/auth/me", headers=auth(a_user2_token))
     check("disabled user old JWT -> 401", r.status_code == 401, f"{r.status_code} {r.text[:120]}")
     # A2 cannot login while disabled
     r = client.post("/api/auth/login", json={"username": f"userA2_{SFX}", "password": "UserA2#Pass2026",
@@ -402,7 +365,7 @@ def main() -> None:
                    json={"is_active": True})
     check("admin re-enable user A2 200", r.status_code == 200, str(r.status_code))
 
-    section("10. Tenant disable blocks all access")
+    section("9. Tenant disable blocks all access")
     # disable tenant B
     r = client.put(f"/api/admin/tenants/{tenant_b_id}/status", headers=auth(super_token),
                    json={"is_active": False})
@@ -418,7 +381,7 @@ def main() -> None:
     client.put(f"/api/admin/tenants/{tenant_b_id}/status", headers=auth(super_token),
                json={"is_active": True})
 
-    section("11. Content-view boundary (super admin cannot read business content)")
+    section("10. Content-view boundary (super admin cannot read business content)")
     # super admin can read KB metadata (container) but list within external/platform scope.
     # Try reading a tenant A KB metadata as super admin (platform can read container metadata)
     r = client.get(f"/api/knowledge-bases/{kb_a1_id}", headers=auth(super_token))

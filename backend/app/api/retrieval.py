@@ -32,9 +32,8 @@ from app.storage.database import async_session
 from app.storage.milvus import MilvusClient
 
 from fastapi import Depends
-from app.api.deps import authorization_guard
+from app.api.deps import require_authenticated
 from app.api.errors import PermissionDeniedError
-from app.auth.constants import PermissionEnum
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import KbAccessEnum
 from app.auth.kb_scope import authorize_requested_kbs
@@ -128,9 +127,7 @@ def _get_milvus() -> MilvusClient:
 @router.post("/test", response_model=RetrievalTestResponse)
 async def retrieval_test(
     body: RetrievalTestRequest,
-    identity: IdentityContext = Depends(
-        authorization_guard(required_permissions={PermissionEnum.RECALL_INVOKE.value})
-    ),
+    identity: IdentityContext = Depends(require_authenticated()),
 ) -> RetrievalTestResponse:
     """纯检索测试：direct（稠密）/ hybrid（三路混合 + 链路追踪）
 

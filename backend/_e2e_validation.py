@@ -1,4 +1,10 @@
-"""Test input validation + privilege-escalation guard on the user/tenant system."""
+"""Test input validation + fixed-role privilege guard on the user/tenant system.
+
+固定角色模型（tenant-rbac-refactor）下角色 CRUD / 权限点字典已删除，越权升级面收敛为：
+租管经 POST /api/admin/users 建号恒为 member —— UserCreate 无角色字段，租管在 API 层
+根本无法把用户设为 admin（设立 admin 仅经平台流程）。本脚本保留用户名/口令校验，
+并以「建号恒 member」+「角色端点已删（404）」校验固定角色的越权防线。
+"""
 from __future__ import annotations
 import sys, uuid, httpx
 
@@ -59,39 +65,20 @@ r = c.post("/api/auth/change-password", headers=auth(atok), json={"old_password"
 ck("valid pwd change -> 200", r.status_code == 200, f"{r.status_code} {r.text[:100]}")
 atok = c.post("/api/auth/login", json={"username": f"adminv_{SFX}", "password": "AdminV#Pass2026", "tenant_id": tid}).json()["access_token"]
 
-print("== privilege-escalation guard (role perms) ==")
-# tenant admin tries to create a role with platform perm tenant:manage -> 403
-r = c.post("/api/admin/roles", headers=auth(atok),
-           json={"name": f"evil_{SFX}", "permission_codes": ["tenant:manage"]})
-ck("role with tenant:manage -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
-# admin has all tenant perms, so creating role with config:manage is allowed (admin owns it)
-r = c.post("/api/admin/roles", headers=auth(atok),
-           json={"name": f"cfg_{SFX}", "permission_codes": ["config:manage", "kb:read"]})
-ck("role with owned perms -> 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-cfg_role = r.json().get("id")
-
-# Now create a limited user, give them role:manage only, and confirm they cannot grant config:manage they don't hold
-# create a custom role 'rolemgr' with role:manage + menu:admin
-r = c.post("/api/admin/roles", headers=auth(atok),
-           json={"name": f"rolemgr_{SFX}", "permission_codes": ["role:manage", "menu:admin"]})
-ck("create rolemgr role -> 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-rolemgr_id = r.json()["id"]
-# create user with that role
+print("== fixed-role privilege guard ==")
+# 租管建号固定 member：UserCreate 无角色字段，无法在 API 层造 admin（越权升级面已封）
 r = c.post("/api/admin/users", headers=auth(atok),
-           json={"username": f"rmgr_{SFX}", "role_names": [], "password": "RoleMgr#2026"})
-ck("create rolemgr user -> 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-rmgr_uid = r.json()["id"]
-c.put(f"/api/admin/users/{rmgr_uid}/roles", headers=auth(atok), json={"role_ids": [rolemgr_id]})
-# that user logs in (password set directly, no forced change)
-rmgr_tok = c.post("/api/auth/login", json={"username": f"rmgr_{SFX}", "password": "RoleMgr#2026", "tenant_id": tid}).json()["access_token"]
-# rmgr has role:manage but NOT config:manage -> creating role with config:manage must be 403
-r = c.post("/api/admin/roles", headers=auth(rmgr_tok),
-           json={"name": f"esc_{SFX}", "permission_codes": ["config:manage"]})
-ck("escalation: grant perm not owned -> 403", r.status_code == 403, f"{r.status_code} {r.text[:120]}")
-# rmgr CAN create a role with perms it owns (role:manage, menu:admin)
-r = c.post("/api/admin/roles", headers=auth(rmgr_tok),
-           json={"name": f"ok_{SFX}", "permission_codes": ["menu:admin"]})
-ck("non-escalation: grant owned perm -> 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+           json={"username": f"member1_{SFX}", "password": "Member#2026"})
+ck("admin create user -> 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+ck("created user role == member (不可越权造 admin)",
+   r.status_code == 201 and r.json().get("role") == "member",
+   str(r.json().get("role") if r.status_code == 201 else "-"))
+
+# 角色管理端点已删除：任何人访问 -> 404（记录移除事实）
+r = c.get("/api/admin/roles", headers=auth(atok))
+ck("role CRUD endpoint removed (GET /admin/roles -> 404)", r.status_code == 404, f"{r.status_code} {r.text[:100]}")
+r = c.get("/api/admin/permissions", headers=auth(atok))
+ck("permission dict endpoint removed (GET /admin/permissions -> 404)", r.status_code == 404, f"{r.status_code} {r.text[:100]}")
 
 print("\n" + "=" * 50)
 print(f"RESULT: {P} passed, {F} failed")

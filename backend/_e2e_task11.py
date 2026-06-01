@@ -1,12 +1,12 @@
 """端到端验证 TASK 11 的需求清单（可复跑回归脚本）。
 
 覆盖：
-  1. 超管菜单 A 方案（前端逻辑，此处验证 me/permissions 与 is_super_admin 标记）
-  2. 租户管理员不能分配/移交 admin 角色（建用户带 admin -> 403；改角色加 admin -> 403）
+  1. 超管菜单 A 方案（前端逻辑，此处验证 me 的 role/is_super_admin 标记）
+  2. 租户管理员不能创建 admin 用户（UserCreate 无角色字段，建号恒为 member）
   3. 超管在租户下钻可新增租户管理员（POST /admin/tenants/{id}/admins）
-  4. 用户列表显示角色（role_names 非空）
-  5. 管理员不能操作自己（停用/重置/改角色自身 -> 403）
-  6. 创建用户不选角色兜底 user
+  4. 用户列表显示角色（固定角色 role 单值）
+  5. 管理员不能操作自己（停用/重置自身 -> 403）
+  6. 创建用户固定为 member
   7. 邀请链接列表随时可复制（列表返回 token）
   8. 临时口令首登改密前可再次查看（建号/重置返回 temp_password；改密后 None）
   9. 审计日志补全（actor_username / actor_tenant_id 非空）
@@ -61,8 +61,8 @@ def main() -> None:
     with httpx.Client(trust_env=False, timeout=30) as c:
         # —— 超管登录（处理首启强制改密）——
         sa_tok = super_admin_login(c)
-        me = c.get(f"{BASE}/api/auth/me/permissions", headers=auth(sa_tok)).json()
-        check("超管登录 & me/permissions is_super_admin", me.get("is_super_admin") is True,
+        me = c.get(f"{BASE}/api/auth/me", headers=auth(sa_tok)).json()
+        check("超管登录 & me is_super_admin", me.get("is_super_admin") is True,
               str(me.get("is_super_admin")))
 
         # —— 创建租户（返回初始管理员临时口令 = 需求8）——
@@ -85,8 +85,8 @@ def main() -> None:
         admin_user = next((u for u in tusers if u["username"] == admin_username), None)
         check("初始管理员在列表内", admin_user is not None)
         if admin_user:
-            check("用户列表含角色名 role_names(需求4)", "admin" in admin_user.get("role_names", []),
-                  str(admin_user.get("role_names")))
+            check("用户列表含角色 role(需求4)", admin_user.get("role") == "admin",
+                  str(admin_user.get("role")))
             check("初始管理员临时口令可再次查看(需求8)",
                   admin_user.get("temp_password") == admin_temp, str(admin_user.get("temp_password")))
 
@@ -96,7 +96,7 @@ def main() -> None:
                    json={"username": admin2_username})
         check("超管新增租户管理员 201(需求3)", r.status_code == 201, f"status={r.status_code} body={r.text[:200]}")
         admin2 = r.json() if r.status_code == 201 else {}
-        check("新增管理员带 admin 角色", "admin" in admin2.get("role_names", []), str(admin2.get("role_names")))
+        check("新增管理员带 admin 角色", admin2.get("role") == "admin", str(admin2.get("role")))
         check("新增管理员返回临时口令", bool(admin2.get("temp_password")))
 
         # —— 该租户管理员登录（首登需改密）——
@@ -114,7 +114,7 @@ def main() -> None:
         # 改密后旧 token 失效，重新登录
         a1 = login(c, admin_username, new_pwd)
         a1_tok = a1["access_token"]
-        a1_me = c.get(f"{BASE}/api/auth/me/permissions", headers=auth(a1_tok)).json()
+        a1_me = c.get(f"{BASE}/api/auth/me", headers=auth(a1_tok)).json()
         a1_uid = a1_me["user_id"]
 
         # —— 改密后临时口令应被清除(需求8) ——
@@ -125,30 +125,25 @@ def main() -> None:
               self_row is not None and self_row.get("temp_password") is None,
               str(self_row.get("temp_password") if self_row else "N/A"))
 
-        # —— 需求6：创建用户不选角色兜底 user ——
+        # —— 需求6：创建用户固定为 member ——
         u_username = f"user_{suffix}"
         r = c.post(f"{BASE}/api/admin/users", headers=auth(a1_tok),
-                   json={"username": u_username, "role_names": []})
-        check("建用户不选角色 201(需求6)", r.status_code == 201, f"status={r.status_code} body={r.text[:200]}")
+                   json={"username": u_username})
+        check("建用户 201(需求6)", r.status_code == 201, f"status={r.status_code} body={r.text[:200]}")
         new_user = r.json() if r.status_code == 201 else {}
-        check("不选角色兜底为 user(需求6)", new_user.get("role_names") == ["user"], str(new_user.get("role_names")))
+        check("建用户固定为 member(需求6)", new_user.get("role") == "member", str(new_user.get("role")))
         check("建用户返回临时口令(需求8)", bool(new_user.get("temp_password")))
         new_uid = new_user.get("id")
 
-        # —— 需求2：租户管理员不能分配 admin 角色 ——
+        # —— 需求2：租户管理员无法创建 admin 用户 ——
+        # UserCreate 不含角色字段，租管经本端点无法把用户设为 admin（设立 admin 仅经平台流程）。
+        # 即使建号请求多带无关字段，落库仍恒为 member。
         u2_username = f"user2_{suffix}"
         r = c.post(f"{BASE}/api/admin/users", headers=auth(a1_tok),
-                   json={"username": u2_username, "role_names": ["admin"]})
-        check("租管建用户带 admin 被拒(403)(需求2)", r.status_code == 403, f"status={r.status_code} body={r.text[:150]}")
-
-        # 取 admin 角色 id 用于改角色测试
-        roles = c.get(f"{BASE}/api/admin/roles", headers=auth(a1_tok)).json()
-        admin_role = next((ro for ro in roles if ro["name"] == "admin"), None)
-        user_role = next((ro for ro in roles if ro["name"] == "user"), None)
-        if admin_role and new_uid:
-            r = c.put(f"{BASE}/api/admin/users/{new_uid}/roles", headers=auth(a1_tok),
-                      json={"role_ids": [admin_role["id"]]})
-            check("租管给用户改派 admin 被拒(403)(需求2)", r.status_code == 403, f"status={r.status_code}")
+                   json={"username": u2_username})
+        check("租管建用户恒为 member(不可造 admin)(需求2)",
+              r.status_code == 201 and r.json().get("role") == "member",
+              f"status={r.status_code} role={r.json().get('role') if r.status_code==201 else '-'}")
 
         # —— 需求5：管理员不能操作自己 ——
         r = c.put(f"{BASE}/api/admin/users/{a1_uid}/status", headers=auth(a1_tok),
@@ -156,10 +151,6 @@ def main() -> None:
         check("管理员停用自己被拒(403)(需求5)", r.status_code == 403, f"status={r.status_code}")
         r = c.post(f"{BASE}/api/admin/users/{a1_uid}/reset-password", headers=auth(a1_tok))
         check("管理员重置自己口令被拒(403)(需求5)", r.status_code == 403, f"status={r.status_code}")
-        if user_role:
-            r = c.put(f"{BASE}/api/admin/users/{a1_uid}/roles", headers=auth(a1_tok),
-                      json={"role_ids": [user_role["id"]]})
-            check("管理员改自己角色被拒(403)(需求5)", r.status_code == 403, f"status={r.status_code}")
 
         # —— 需求7：邀请链接列表随时可复制（返回 token）——
         r = c.post(f"{BASE}/api/admin/invitations", headers=auth(a1_tok),

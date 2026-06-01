@@ -44,6 +44,12 @@ export interface PageResult<T> {
   has_more: boolean
 }
 
+// 知识库共享入参（user 多选 + 权限）
+export interface ShareRequest {
+  user_ids: string[]
+  permission: string
+}
+
 // 知识库相关接口
 export const knowledgeBaseApi = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -63,6 +69,27 @@ export const knowledgeBaseApi = {
     }),
   delete: (id: string) =>
     request<void>(`/knowledge-bases/${id}`, { method: 'DELETE' }),
+  // 共享给指定用户（owner/admin 可调用）；user_ids 批量、permission=read|write
+  share: (kbId: string, data: { user_ids: string[]; permission: string }) =>
+    request<unknown>(`/knowledge-bases/${kbId}/share`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  // 撤销某个用户的共享授权
+  revokeShare: (kbId: string, userId: string) =>
+    request<void>(`/knowledge-bases/${kbId}/share/user/${userId}`, { method: 'DELETE' }),
+  // 变更可见性（private | organization）；owner 可调用。
+  // organization 时可选 orgPermission（read|write）控制组织成员是否可写内容。
+  setVisibility: (kbId: string, visibility: string, orgPermission?: string) =>
+    request<unknown>(`/knowledge-bases/${kbId}/visibility`, {
+      method: 'PUT',
+      body: JSON.stringify({ visibility, org_permission: orgPermission ?? null }),
+    }),
+  // 查看某库已共享用户（仅 owner）
+  shares: (kbId: string) =>
+    request<{ user_id: string; username: string; avatar: string | null; permission: string }[]>(
+      `/knowledge-bases/${kbId}/shares`
+    ),
 }
 
 // 文档相关接口
@@ -495,16 +522,12 @@ export interface LoginResponse {
   is_super_admin: boolean
 }
 
-export interface PermissionItem {
-  code: string
-  type: string // api | menu | btn
-}
-
-export interface MePermissionsResponse {
+// 当前登录者的身份摘要（替代旧的 /auth/me/permissions）
+export interface MeResponse {
   user_id: string
   tenant_id: string | null
   is_super_admin: boolean
-  permissions: PermissionItem[]
+  role: 'admin' | 'member' | null
 }
 
 export interface MeProfile {
@@ -513,7 +536,8 @@ export interface MeProfile {
   tenant_id: string | null
   tenant_name: string | null
   is_super_admin: boolean
-  role_names: string[]
+  role: string | null
+  role_label: string
   description: string | null
   avatar: string | null
 }
@@ -529,7 +553,12 @@ export const authApi = {
       method: 'POST',
       body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
     }),
-  myPermissions: () => request<MePermissionsResponse>('/auth/me/permissions'),
+  me: () => request<MeResponse>('/auth/me'),
+  // 同租户可选用户（用户名模糊搜索，多选用）：任意登录成员可调
+  selectableUsers: (q?: string) =>
+    request<{ id: string; username: string; avatar: string | null }[]>(
+      `/auth/users/selectable${q ? `?q=${encodeURIComponent(q)}` : ''}`
+    ),
   // 当前登录者资料（左下角展示 + 个人资料页）
   myProfile: () => request<MeProfile>('/auth/me/profile'),
   updateMyProfile: (data: { description?: string | null; avatar?: string | null }) =>
@@ -572,7 +601,7 @@ export interface AdminUserItem {
   username: string
   is_active: boolean
   must_change_password: boolean
-  role_names: string[]
+  role: string | null
   temp_password: string | null
   description: string | null
   avatar: string | null
@@ -586,6 +615,7 @@ export interface AuditLogItem {
   actor_username: string | null
   actor_tenant_id: string | null
   actor_is_super_admin: boolean
+  actor_role: string | null
   action: string
   target_type: string | null
   target_id: string | null
@@ -601,7 +631,6 @@ export interface InvitationItem {
   token: string | null
   scope: string
   tenant_id: string | null
-  role_names: string[] | null
   max_uses: number | null
   used_count: number
   expires_at: string
@@ -617,21 +646,6 @@ export interface InvitationCreateResult {
   tenant_id: string | null
   expires_at: string
   max_uses: number | null
-}
-
-export interface RoleItem {
-  id: string
-  tenant_id: string
-  name: string
-  is_builtin: boolean
-  permission_codes: string[]
-}
-
-export interface PermissionDictItem {
-  code: string
-  type: string // api | menu | btn
-  label: string // 中文展示名
-  type_label: string // 类型中文名
 }
 
 export const adminApi = {
@@ -668,10 +682,10 @@ export const adminApi = {
     if (params?.q) qs.set('q', params.q)
     return request<PageResult<AdminUserItem>>(`/admin/users?${qs.toString()}`)
   },
-  createUser: (username: string, roleNames: string[], password?: string, description?: string | null, avatar?: string | null) =>
+  createUser: (username: string, password?: string, description?: string | null, avatar?: string | null) =>
     request<AdminUserCreateResult>('/admin/users', {
       method: 'POST',
-      body: JSON.stringify({ username, role_names: roleNames, password: password ?? null, description: description ?? null, avatar: avatar ?? null }),
+      body: JSON.stringify({ username, password: password ?? null, description: description ?? null, avatar: avatar ?? null }),
     }),
   setUserStatus: (userId: string, isActive: boolean) =>
     request<AdminUserItem>(`/admin/users/${userId}/status`, {
@@ -685,29 +699,6 @@ export const adminApi = {
       method: 'POST',
       body: JSON.stringify({ target_user_id: targetUserId }),
     }),
-  getUserRoles: (userId: string) =>
-    request<{ user_id: string; role_ids: string[] }>(`/admin/users/${userId}/roles`),
-  setUserRoles: (userId: string, roleIds: string[]) =>
-    request<{ detail: string; role_ids: string[] }>(`/admin/users/${userId}/roles`, {
-      method: 'PUT',
-      body: JSON.stringify({ role_ids: roleIds }),
-    }),
-
-  // —— 角色与权限点（role:manage）——
-  listRoles: () => request<RoleItem[]>('/admin/roles'),
-  permissionDict: () => request<PermissionDictItem[]>('/admin/permissions'),
-  createRole: (name: string, permissionCodes: string[], description?: string) =>
-    request<RoleItem>('/admin/roles', {
-      method: 'POST',
-      body: JSON.stringify({ name, permission_codes: permissionCodes, description: description ?? null }),
-    }),
-  setRolePermissions: (roleId: string, permissionCodes: string[]) =>
-    request<RoleItem>(`/admin/roles/${roleId}/permissions`, {
-      method: 'PUT',
-      body: JSON.stringify({ permission_codes: permissionCodes }),
-    }),
-  deleteRole: (roleId: string) =>
-    request<void>(`/admin/roles/${roleId}`, { method: 'DELETE' }),
 
   // —— 审计日志（user:manage 可读；租管限本租户，超管全局）——
   auditLogs: (params?: { page?: number; page_size?: number; action?: string; actor?: string }) => {
@@ -726,7 +717,7 @@ export const adminApi = {
     qs.set('page_size', String(params?.page_size ?? 20))
     return request<PageResult<InvitationItem>>(`/admin/invitations?${qs.toString()}`)
   },
-  createInvitation: (data: { scope: string; expires_in_hours: number; max_uses?: number | null; role_names?: string[] }) =>
+  createInvitation: (data: { scope: string; expires_in_hours: number; max_uses?: number | null }) =>
     request<InvitationCreateResult>('/admin/invitations', {
       method: 'POST',
       body: JSON.stringify(data),

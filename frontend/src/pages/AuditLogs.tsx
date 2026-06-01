@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ScrollText, Search } from 'lucide-react'
 import { adminApi } from '@/lib/api'
+import { roleLabel } from '@/lib/labels'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -20,6 +21,7 @@ const ACTION_LABEL: Record<string, string> = {
   'kb.set_visibility': '改KB可见性', 'kb.share': '共享KB', 'kb.revoke_share': '撤销共享',
   'invitation.create': '创建邀请', 'invitation.revoke': '吊销邀请', 'invitation.accept': '接受邀请',
   'auth.login_success': '登录成功', 'auth.login_fail': '登录失败', 'auth.change_password': '修改密码',
+  'user.update_profile': '更新资料', 'tenant.update_profile': '更新租户资料',
 }
 
 // 审计日志页面（user:manage 可读；超管全局、租管限本租户）。只读。
@@ -50,7 +52,7 @@ function AuditLogs() {
       </div>
 
       {isLoading ? (
-        <TableSkeleton rows={8} columns={5} />
+        <TableSkeleton rows={8} columns={6} />
       ) : logs.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
           <ScrollText className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -63,6 +65,7 @@ function AuditLogs() {
               <TableRow>
                 <TableHead>时间</TableHead>
                 <TableHead>操作者</TableHead>
+                <TableHead>角色</TableHead>
                 <TableHead>动作</TableHead>
                 <TableHead>对象</TableHead>
                 <TableHead>结果</TableHead>
@@ -73,8 +76,21 @@ function AuditLogs() {
                 <TableRow key={log.id}>
                   <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{fmt(log.created_at)}</TableCell>
                   <TableCell>
-                    {log.actor_username || '-'}
-                    {log.actor_is_super_admin && <Badge variant="outline" className="ml-1.5 text-xs">超管</Badge>}
+                    <div className="flex items-center gap-2">
+                      {/* 头像占位：审计表不存头像，用操作者用户名首字母占位（不发起网络查询） */}
+                      <div className="h-6 w-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium shrink-0">
+                        {(log.actor_username?.charAt(0) || '?').toUpperCase()}
+                      </div>
+                      <span className="truncate">{log.actor_username || '-'}</span>
+                      {log.actor_is_super_admin && <Badge variant="outline" className="text-xs">超管</Badge>}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {log.actor_role
+                      ? roleLabel(log.actor_role)
+                      : log.actor_is_super_admin
+                        ? '超级管理员'
+                        : '—'}
                   </TableCell>
                   <TableCell>{ACTION_LABEL[log.action] || log.action}</TableCell>
                   <TableCell className="text-sm">

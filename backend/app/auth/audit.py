@@ -56,6 +56,9 @@ def add_audit(
         actor_username=actor_username or (actor.username if actor else None),
         actor_tenant_id=(actor.tenant_id if actor else None),
         actor_is_super_admin=bool(actor.is_super_admin) if actor else False,
+        # 操作者写入时刻的固定角色快照（admin/member/None）。审计是不可变事实，
+        # 故落快照而非展示时 join 当前用户。
+        actor_role=(actor.role.value if actor and actor.role is not None else None),
         action=action.value,
         target_type=target_type,
         target_id=target_id,

@@ -62,7 +62,7 @@ export default function Profile() {
 
   const identityText = profile.is_super_admin
     ? '超级管理员'
-    : (profile.role_names.length > 0 ? profile.role_names.map(roleLabel).join('、') : '普通用户')
+    : (profile.role_label || (profile.role ? roleLabel(profile.role) : '普通成员'))
 
   return (
     <div className="max-w-xl">

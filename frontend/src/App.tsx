@@ -17,7 +17,6 @@ import ChangePassword from './pages/ChangePassword'
 import Profile from './pages/Profile'
 import Tenants from './pages/Tenants'
 import Users from './pages/Users'
-import Roles from './pages/Roles'
 import AuditLogs from './pages/AuditLogs'
 import Invitations from './pages/Invitations'
 import InviteAccept from './pages/InviteAccept'
@@ -76,7 +75,6 @@ function App() {
         <Route path="api-keys" element={<ApiKeys />} />
         <Route path="tenants" element={<Tenants />} />
         <Route path="users" element={<Users />} />
-        <Route path="roles" element={<Roles />} />
         <Route path="invitations" element={<Invitations />} />
         <Route path="audit-logs" element={<AuditLogs />} />
         <Route path="settings" element={<Settings />} />
