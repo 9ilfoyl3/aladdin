@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Key, Copy, Check } from 'lucide-react'
 import { apiKeyApi } from '@/lib/api'
+import { copyToClipboard } from '@/lib/clipboard'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -93,7 +94,7 @@ function ApiKeys() {
   // 复制 Key
   function copyKey() {
     if (newKey) {
-      navigator.clipboard.writeText(newKey)
+      copyToClipboard(newKey)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }

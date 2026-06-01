@@ -1,3 +1,4 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound, Pencil, Upload } from 'lucide-react'
@@ -174,7 +175,7 @@ function Tenants() {
 
   function copyPwd() {
     if (created?.admin_temp_password) {
-      navigator.clipboard.writeText(created.admin_temp_password)
+      copyToClipboard(created.admin_temp_password)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -182,7 +183,7 @@ function Tenants() {
 
   function copyTemp() {
     if (tempResult) {
-      navigator.clipboard.writeText(tempResult.pwd)
+      copyToClipboard(tempResult.pwd)
       setTempCopied(true)
       setTimeout(() => setTempCopied(false), 2000)
     }

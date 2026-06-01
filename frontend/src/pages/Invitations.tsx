@@ -1,3 +1,4 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Mail, Trash2, Copy, Check, Users as UsersIcon } from 'lucide-react'
@@ -74,7 +75,7 @@ function Invitations() {
 
   function copyLink() {
     if (created) {
-      navigator.clipboard.writeText(inviteLink(created.token))
+      copyToClipboard(inviteLink(created.token))
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -85,7 +86,7 @@ function Invitations() {
       toast.error('该邀请无可复制链接')
       return
     }
-    navigator.clipboard.writeText(inviteLink(inv.token))
+    copyToClipboard(inviteLink(inv.token))
     setCopiedId(inv.id)
     setTimeout(() => setCopiedId(null), 2000)
     toast.success('链接已复制')

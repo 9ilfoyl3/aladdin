@@ -1,3 +1,4 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Users as UsersIcon, Power, KeyRound, Copy, Check, ArrowRightLeft, Search, Eye } from 'lucide-react'
@@ -105,7 +106,7 @@ function Users() {
 
   function copyPwd() {
     if (tempResult) {
-      navigator.clipboard.writeText(tempResult.pwd)
+      copyToClipboard(tempResult.pwd)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }

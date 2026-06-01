@@ -1,3 +1,4 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -861,7 +862,7 @@ function Documents() {
                     </ContextMenuItem>
                     <ContextMenuItem
                       onClick={() => {
-                        navigator.clipboard.writeText(doc.filename)
+                        copyToClipboard(doc.filename)
                         toast('已复制文件名')
                       }}
                     >
