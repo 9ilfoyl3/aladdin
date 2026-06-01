@@ -40,6 +40,13 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+# 部署/服务器配置目录内的 .env 含真实密钥，显式再忽略一次（防误提交）
+服务器配置文件/.env
+deploy-*/.env
+deploy-server/.env
+# 部署导出产物（镜像 tar 包，体积大，不入库）
+deploy-*/*.tar
+deploy-*/*.tar.gz
 
 # Data & Uploads
 backend/data/uploads/

@@ -1,0 +1,201 @@
+# Artoo 生产部署 docker-compose
+# 镜像名称通过 .env 中的 IMAGE_* 变量配置，支持不同架构和镜像库
+
+services:
+  # ============ 基础设施 ============
+
+  etcd:
+    container_name: arag-etcd
+    image: ${IMAGE_ETCD:-quay.io/coreos/etcd:v3.5.25}
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  minio:
+    container_name: arag-minio
+    image: ${IMAGE_MINIO:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus:
+    container_name: arag-milvus
+    image: ${IMAGE_MILVUS:-milvusdb/milvus:v2.5.4}
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    expose:
+      - "19530"
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    container_name: arag-postgres
+    image: ${IMAGE_POSTGRES:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: artoo
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============ 应用服务 ============
+
+  redis:
+    container_name: arag-redis
+    image: ${IMAGE_REDIS:-redis:7-alpine}
+    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  backend:
+    container_name: arag-backend
+    image: ${IMAGE_BACKEND:-artoo-backend:latest}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - EMBED_API_KEY=${EMBED_API_KEY:-}
+      - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - REDIS_URL=redis://redis:6379/0
+      # ===== 认证与授权（tenant-rbac-refactor）=====
+      # 新版镜像鉴权始终强制：JWT_SECRET 与 SUPER_ADMIN_* 为启动期硬依赖，缺失则 fail-fast。
+      - JWT_SECRET=${JWT_SECRET:-}
+      - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-720}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
+      - REGISTRATION_MODE=${REGISTRATION_MODE:-invite_only}
+      - CONTENT_VIEW_BOUNDARY_OPEN=${CONTENT_VIEW_BOUNDARY_OPEN:-false}
+    volumes:
+      - upload_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    container_name: arag-worker
+    image: ${IMAGE_BACKEND:-artoo-backend:latest}
+    command: ["python", "-m", "app.worker_main"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - EMBED_API_KEY=${EMBED_API_KEY:-}
+      - EMBED_SPARSE_ENABLED=${EMBED_SPARSE_ENABLED:-true}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+      - REDIS_URL=redis://redis:6379/0
+      # 认证（tenant-rbac-refactor）：Worker 同样经 init_db -> bootstrap，需与 backend 一致，
+      # 缺 SUPER_ADMIN_* 会在引导阶段 fail-fast。
+      - JWT_SECRET=${JWT_SECRET:-}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
+      - PIPELINE_MAX_CONCURRENT=${PIPELINE_MAX_CONCURRENT:-2}
+      - PIPELINE_MAX_RETRIES=${PIPELINE_MAX_RETRIES:-3}
+      - PIPELINE_EMBED_BATCH_SIZE=${PIPELINE_EMBED_BATCH_SIZE:-32}
+      - PIPELINE_EMBED_CONCURRENCY=${PIPELINE_EMBED_CONCURRENCY:-4}
+      - PIPELINE_EMBED_MAX_CONNECTIONS=${PIPELINE_EMBED_MAX_CONNECTIONS:-20}
+      - PIPELINE_TASK_TIMEOUT_MINUTES=${PIPELINE_TASK_TIMEOUT_MINUTES:-30}
+      - PIPELINE_CIRCUIT_BREAKER_THRESHOLD=${PIPELINE_CIRCUIT_BREAKER_THRESHOLD:-5}
+      - PIPELINE_HEALTH_CHECK_INTERVAL=${PIPELINE_HEALTH_CHECK_INTERVAL:-30}
+    volumes:
+      - upload_data:/app/data
+      - ${MODEL_DIR:-./models}:/root/.cache/huggingface/hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    container_name: arag-frontend
+    image: ${IMAGE_FRONTEND:-artoo-frontend:latest}
+    ports:
+      - "${FRONTEND_PORT:-8888}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  postgres_data:
+  upload_data:
+  redis_data:
+  
+networks:
+  default:
+    name: arag-network
+    external: true
+
