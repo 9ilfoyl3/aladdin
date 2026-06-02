@@ -288,21 +288,50 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
     if health is False:
         return EmbedTestResponse(success=False, message="服务未就绪，请检查服务状态")
 
-    # 自建服务 /health 已通过：不发推理请求，避免占用推理队列
+    # 自建服务 /health 已通过：追加一次最小推理请求验证端点路径和鉴权正确性
+    # （仅 /health 通过不能保证配置无误：/health 不鉴权、不校验路径）
     if health is True:
-        if body.config_type == "embedding" and body.sparse_enabled:
-            from app.models.embedding.remote import RemoteEmbedder
-            embedder = RemoteEmbedder(
-                base_url=body.base_url,
-                model=body.model_name,
-                api_key=body.api_key or "",
-                timeout=min(body.timeout, 15.0),
-                sparse_enabled=body.sparse_enabled,
-            )
-            sparse_ok = await embedder.check_sparse_support()
-            suffix = "；Sparse 端点可用 ✓" if sparse_ok else "；Sparse 端点不可用（将降级为 BM25 兜底）"
-            return EmbedTestResponse(success=True, message="连接成功，服务在线" + suffix)
-        return EmbedTestResponse(success=True, message="连接成功，服务在线")
+        try:
+            if body.config_type == "embedding":
+                from app.models.embedding.remote import RemoteEmbedder
+                embedder = RemoteEmbedder(
+                    base_url=body.base_url,
+                    model=body.model_name,
+                    api_key=body.api_key or "",
+                    timeout=min(body.timeout, 15.0),
+                    sparse_enabled=body.sparse_enabled,
+                )
+                vectors = await embedder.embed(["连接测试"])
+                dim = len(vectors[0]) if vectors and vectors[0] else 0
+                msg = f"连接成功，向量维度 {dim}" if dim else "连接成功，服务在线"
+                if body.sparse_enabled:
+                    sparse_ok = await embedder.check_sparse_support()
+                    msg += "；Sparse 端点可用 ✓" if sparse_ok else "；Sparse 端点不可用（将降级为 BM25 兜底）"
+                return EmbedTestResponse(success=True, message=msg)
+            else:
+                from app.models.rerank.remote import RemoteReranker
+                reranker = RemoteReranker(
+                    base_url=body.base_url,
+                    model=body.model_name,
+                    api_key=body.api_key or "",
+                    timeout=min(body.timeout, 15.0),
+                )
+                await reranker.rerank("连接测试", ["这是一段用于连通性测试的候选文本"], top_k=1)
+                return EmbedTestResponse(success=True, message="连接成功，服务在线")
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            detail = e.response.text[:200] if e.response.text else ""
+            if code in (401, 403):
+                return EmbedTestResponse(success=False, message=f"鉴权失败 (HTTP {code})，请检查 API Key")
+            if code == 404:
+                return EmbedTestResponse(success=False, message=f"端点不存在 (HTTP 404)，请检查服务地址格式（Infinity 不带 /v1）。{detail}")
+            return EmbedTestResponse(success=False, message=f"服务返回错误 (HTTP {code})。{detail}")
+        except httpx.ConnectError:
+            return EmbedTestResponse(success=False, message="无法连接到推理端点，请检查地址")
+        except httpx.TimeoutException:
+            return EmbedTestResponse(success=False, message="推理请求超时")
+        except Exception as e:
+            return EmbedTestResponse(success=False, message=f"推理验证失败: {str(e)}")
 
     # health is None：无 /health 路由（云端网关），发最小推理请求验证
     try:
