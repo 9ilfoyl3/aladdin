@@ -68,6 +68,35 @@ async def _migrate_db() -> None:
         # 当前模型已移除该字段，插入时不再赋值，会触发 NOT NULL 约束错误。
         # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。
         "ALTER TABLE knowledge_bases ALTER COLUMN retrieval_mode DROP NOT NULL",
+        # ===== tenant-rbac-refactor：为旧库补齐租户隔离 / 归属 / 可见性列 =====
+        # create_all 只新建缺失的表，不会为已存在的表补列；下列 ALTER 让升级前建立的
+        # 旧库（已有业务数据）平滑获得新列。带 NOT NULL 的列给 DEFAULT，已有行自动回填。
+        # 受租户隔离的资源表统一补 tenant_id（旧数据归属未知，留 NULL，由后续治理回填）。
+        "ALTER TABLE knowledge_bases ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE knowledge_bases ADD COLUMN owner_user_id VARCHAR",
+        "ALTER TABLE knowledge_bases ADD COLUMN visibility VARCHAR NOT NULL DEFAULT 'private'",
+        "ALTER TABLE knowledge_bases ADD COLUMN org_permission VARCHAR NOT NULL DEFAULT 'read'",
+        "ALTER TABLE folders ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE documents ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE chunks ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE chat_sessions ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE chat_messages ADD COLUMN tenant_id VARCHAR",
+        # API Key 三模型字段（tenant_level / user_level / external_agent）
+        "ALTER TABLE api_keys ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE api_keys ADD COLUMN key_type VARCHAR NOT NULL DEFAULT 'tenant_level'",
+        "ALTER TABLE api_keys ADD COLUMN bound_user_id VARCHAR",
+        "ALTER TABLE api_keys ADD COLUMN authorized_scope JSON",
+        "ALTER TABLE api_keys ADD COLUMN key_source VARCHAR",
+        # 索引（与模型 index=True 对齐；租户过滤在每次查询都会用到，缺索引影响性能）
+        "CREATE INDEX IF NOT EXISTS ix_knowledge_bases_tenant_id ON knowledge_bases (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_knowledge_bases_owner_user_id ON knowledge_bases (owner_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_folders_tenant_id ON folders (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_documents_tenant_id ON documents (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_chunks_tenant_id ON chunks (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_sessions_tenant_id ON chat_sessions (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_messages_tenant_id ON chat_messages (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_api_keys_tenant_id ON api_keys (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_api_keys_bound_user_id ON api_keys (bound_user_id)",
     ]
     for sql in migrations:
         try:
