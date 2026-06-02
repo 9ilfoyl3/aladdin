@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
+import ProfileDialog from '@/components/ProfileDialog'
 
 // 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
 // - content：内容菜单，member/admin 均可见；
@@ -54,6 +55,7 @@ function Layout() {
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const confirm = useConfirm()
   const { isSuperAdmin, isAdmin, logout, profile } = useAuth()
 
@@ -82,7 +84,7 @@ function Layout() {
   // （租户管理 / 审计日志）与账号自助页（改密）。直接命中知识库/对话等页面时，
   // 重定向回"租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
   // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
-  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password', '/profile'])
+  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password'])
   if (isSuperAdmin && !SUPER_ADMIN_ALLOWED_PATHS.has(location.pathname)) {
     return <Navigate to="/tenants" replace />
   }
@@ -226,7 +228,7 @@ function Layout() {
                 <div className="fixed inset-0 z-10" onClick={() => setAccountMenuOpen(false)} />
                 <div className="absolute bottom-full left-3 right-3 mb-1 z-20 rounded-lg border border-sidebar-border bg-sidebar shadow-lg p-1 space-y-0.5">
                   <button
-                    onClick={() => { setAccountMenuOpen(false); navigate('/profile') }}
+                    onClick={() => { setAccountMenuOpen(false); setProfileOpen(true) }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
                   >
                     <UserCircle className="h-4 w-4" />
@@ -337,6 +339,9 @@ function Layout() {
       <main className={cn('flex-1 overflow-auto bg-background', !isChat && 'p-6')}>
         <Outlet />
       </main>
+
+      {/* 个人资料弹窗 */}
+      <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
     </div>
   )
 }
