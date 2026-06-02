@@ -6,6 +6,7 @@ import App from './App'
 import { AuthProvider } from '@/lib/auth-context'
 import { SessionProvider } from '@/lib/session-context'
 import { ConfirmProvider } from '@/lib/confirm-context'
+import { ThemeProvider } from '@/lib/theme-context'
 import { Toaster } from '@/components/ui/sonner'
 import './index.css'
 
@@ -26,8 +27,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <AuthProvider>
           <SessionProvider>
             <ConfirmProvider>
-              <App />
-              <Toaster position="top-center" />
+              <ThemeProvider>
+                <App />
+                <Toaster position="top-center" />
+              </ThemeProvider>
             </ConfirmProvider>
           </SessionProvider>
         </AuthProvider>

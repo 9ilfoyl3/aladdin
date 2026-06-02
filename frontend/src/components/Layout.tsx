@@ -27,6 +27,7 @@ import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
 import ProfileDialog from '@/components/ProfileDialog'
+import SettingsDialog from '@/components/SettingsDialog'
 
 // 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
 // - content：内容菜单，member/admin 均可见；
@@ -45,7 +46,6 @@ const navItems = [
   { to: '/users', label: '用户管理', icon: UsersIcon, group: 'manage' },
   { to: '/invitations', label: '邀请链接', icon: Mail, group: 'manage' },
   { to: '/audit-logs', label: '审计日志', icon: ScrollText, group: 'manage' },
-  { to: '/settings', label: '系统配置', icon: Settings, group: 'manage' },
 ] as const
 
 // 布局组件：侧边栏 + 主内容区
@@ -56,6 +56,7 @@ function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const confirm = useConfirm()
   const { isSuperAdmin, isAdmin, logout, profile } = useAuth()
 
@@ -221,7 +222,7 @@ function Layout() {
 
           {/* 底部：当前登录者（紧凑一栏：头像+用户名+身份）。点击展开账号操作。 */}
           <div className="border-t border-sidebar-border px-3 py-2 relative">
-            {/* 展开的操作菜单（个人资料 / 修改密码 / 退出登录） */}
+            {/* 展开的操作菜单（个人资料 / 系统设置 / 修改密码 / 退出登录） */}
             {accountMenuOpen && (
               <>
                 {/* 点击空白处关闭 */}
@@ -233,6 +234,13 @@ function Layout() {
                   >
                     <UserCircle className="h-4 w-4" />
                     <span>个人资料</span>
+                  </button>
+                  <button
+                    onClick={() => { setAccountMenuOpen(false); setSettingsOpen(true) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors cursor-pointer"
+                  >
+                    <Settings className="h-4 w-4" />
+                    <span>系统设置</span>
                   </button>
                   <button
                     onClick={() => { setAccountMenuOpen(false); navigate('/change-password') }}
@@ -342,6 +350,9 @@ function Layout() {
 
       {/* 个人资料弹窗 */}
       <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
+
+      {/* 系统设置弹窗 */}
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} canManageChunk={isAdmin} />
     </div>
   )
 }

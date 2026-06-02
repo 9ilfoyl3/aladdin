@@ -5,7 +5,6 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import Documents from './pages/Documents'
 import Chat from './pages/Chat'
 import Retrieval from './pages/Retrieval'
-import Settings from './pages/Settings'
 import ApiKeys from './pages/ApiKeys'
 import Models from './pages/Models'
 import EmbedConfig from './pages/EmbedConfig'
@@ -75,7 +74,6 @@ function App() {
         <Route path="users" element={<Users />} />
         <Route path="invitations" element={<Invitations />} />
         <Route path="audit-logs" element={<AuditLogs />} />
-        <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
   )
