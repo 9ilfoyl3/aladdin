@@ -288,10 +288,58 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
     if health is False:
         return EmbedTestResponse(success=False, message="服务未就绪，请检查服务状态")
 
-    # 自建服务 /health 已通过：不发推理请求，避免占用推理队列
+    # 自建服务 /health 已通过 —— 额外探测实际推理端点的「路径 + 鉴权」是否正确。
+    # 策略：发一个带 Auth 但 body 为空的 POST 到推理端点。
+    # - 路径错 → 404（端点不存在）
+    # - Key 错/缺 → 401（鉴权失败）
+    # - 路径对 + Key 对 → 400/422（参数不全,预期行为,证明端点可达且鉴权通过）
+    # 不会占用推理队列（请求在参数校验阶段就被拒绝,不入队）。
     if health is True:
+        from app.models.embedding.remote import RemoteEmbedder
+        probe_base = body.base_url.rstrip("/")
+        # 推导实际推理端点 URL（与 RemoteEmbedder 逻辑一致）
+        if body.config_type == "rerank":
+            if probe_base.endswith("/v1"):
+                probe_url = f"{probe_base}/reranks"
+            elif "/" not in probe_base.split("://", 1)[-1].lstrip("/"):
+                probe_url = f"{probe_base}/rerank"
+            else:
+                probe_url = probe_base
+        else:
+            if probe_base.endswith("/v1"):
+                probe_url = f"{probe_base}/embeddings"
+            elif "/" not in probe_base.split("://", 1)[-1].lstrip("/"):
+                probe_url = f"{probe_base}/embeddings"
+            else:
+                probe_url = probe_base
+
+        headers = {"Content-Type": "application/json"}
+        if body.api_key:
+            headers["Authorization"] = f"Bearer {body.api_key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                # 发空 JSON body — 触发快速 400/422，不进推理队列
+                resp = await client.post(probe_url, headers=headers, json={})
+            if resp.status_code == 401:
+                return EmbedTestResponse(success=False, message="鉴权失败 (HTTP 401)，请检查 API Key")
+            if resp.status_code == 403:
+                return EmbedTestResponse(success=False, message="鉴权失败 (HTTP 403)，请检查 API Key")
+            if resp.status_code == 404:
+                return EmbedTestResponse(
+                    success=False,
+                    message="推理端点不存在 (HTTP 404)，请检查服务地址格式（Infinity 模式不带 /v1）",
+                )
+            # 400/422/200 都说明端点可达 + 鉴权通过
+        except httpx.ConnectError:
+            return EmbedTestResponse(success=False, message="无法连接到推理端点，请检查地址")
+        except httpx.TimeoutException:
+            return EmbedTestResponse(success=False, message="推理端点超时，请检查地址")
+        except Exception:
+            pass  # 其他异常不阻断，继续走正常流程
+
+        # 端点可达 + 鉴权通过，补充 sparse 检测
         if body.config_type == "embedding" and body.sparse_enabled:
-            from app.models.embedding.remote import RemoteEmbedder
             embedder = RemoteEmbedder(
                 base_url=body.base_url,
                 model=body.model_name,
