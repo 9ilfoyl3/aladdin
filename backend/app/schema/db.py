@@ -248,7 +248,20 @@ class PlatformConfigRow(Base):
 
 
 class AgentPreset(Base):
-    """Agent 预设配置表"""
+    """Agent 预设配置表
+
+    归属与可见性（agent-preset-sharing）：
+    - tenant_id：所属租户。内置预设为 None（平台内置、跨租户可见）。
+    - owner_user_id：创建者（acting_subject_id）。内置预设为 None（无归属）。
+    - is_shared：是否开放给本租户全体成员可见可用。私有（默认 False）仅创建者可见。
+      内置预设恒 True（全租户可见）。
+    管理权（改/删）仅创建者本人；内置预设任何人不可改删。
+
+    不继承 TenantScopedMixin：可见性为「内置(tenant_id IS NULL) ∪ 本租户自有 ∪
+    本租户已开放」三段并集，含 tenant_id IS NULL 分支，方案 B 的 loader criteria
+    （仅注入 tenant_id == 当前租户）会误过滤内置预设，故改由 API 显式过滤
+    （与 RetrievalConfigRow 同理）。
+    """
     __tablename__ = "agent_presets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -256,6 +269,12 @@ class AgentPreset(Base):
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     config_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 所属租户；内置预设为 None（跨租户可见）
+    tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    # 创建者（acting_subject_id）；内置预设为 None（平台内置、无归属）
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    # 是否开放给本租户全体成员可见可用；私有（False）仅创建者可见。内置预设恒 True。
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

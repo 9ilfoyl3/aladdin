@@ -101,6 +101,15 @@ async def _migrate_db() -> None:
         "CREATE INDEX IF NOT EXISTS ix_chat_messages_tenant_id ON chat_messages (tenant_id)",
         "CREATE INDEX IF NOT EXISTS ix_api_keys_tenant_id ON api_keys (tenant_id)",
         "CREATE INDEX IF NOT EXISTS ix_api_keys_bound_user_id ON api_keys (bound_user_id)",
+        # ===== agent-preset-sharing：智能体预设归属与开放可见性 =====
+        # 创建者归属 + 是否开放给本租户。内置预设 tenant_id/owner_user_id 为 NULL、
+        # is_shared=TRUE（由 _ensure_builtin_presets 校正）。已存在的用户预设
+        # owner_user_id 留 NULL（无归属→不可见于任何用户，按"不考虑存量兼容"重建即可）。
+        "ALTER TABLE agent_presets ADD COLUMN tenant_id VARCHAR",
+        "ALTER TABLE agent_presets ADD COLUMN owner_user_id VARCHAR",
+        "ALTER TABLE agent_presets ADD COLUMN is_shared BOOLEAN NOT NULL DEFAULT FALSE",
+        "CREATE INDEX IF NOT EXISTS ix_agent_presets_tenant_id ON agent_presets (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_agent_presets_owner_user_id ON agent_presets (owner_user_id)",
     ]
     for sql in migrations:
         try:

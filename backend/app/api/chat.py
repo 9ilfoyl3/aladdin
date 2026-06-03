@@ -928,8 +928,10 @@ async def chat_completions(
         async with async_session() as _authz_session:
             await authorize_requested_kbs(_authz_session, identity, requested_kb_ids, KbAccessEnum.READ)
 
-    # 加载生效的 Agent 预设（指定 > 默认 > 内置兜底）
-    preset_cfg = await get_effective_preset_config(request.agent_preset_id)
+    # 加载生效的 Agent 预设（指定 > 默认 > 内置兜底）。
+    # 传入 identity：显式指定的预设须在调用者可见范围内（内置 ∪ 自有 ∪ 本租户已开放），
+    # 否则忽略回退默认，防止凭 id 使用他人私有预设。
+    preset_cfg = await get_effective_preset_config(request.agent_preset_id, identity)
 
     # 确定检索模式：显式 retrieval_mode > 预设的 agent_mode > 默认 agent
     # 预设统一承载"快速问答(hybrid 单轮) / 智能推理(agent 多步)"的模式选择
