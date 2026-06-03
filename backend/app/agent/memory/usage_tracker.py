@@ -1,7 +1,7 @@
 """API Usage 追踪器 - 结合 API Usage 与 BPE Delta 估算
 
-照搬 WeKnora `internal/agent/token/` 中 usage 追踪的思路：token 计数的权威来源
-是 LLM API 返回的 usage 字段（prompt_tokens / completion_tokens / total_tokens）。
+token 计数的权威来源是 LLM API 返回的 usage 字段（prompt_tokens /
+completion_tokens / total_tokens）。
 本追踪器记录上一次 API 调用返回的 usage 以及当时发送的消息数量，从而在下一轮
 估算当前上下文 token 数时，只对「新增消息」做 BPE 估算（delta 估算），避免每轮
 都对全部历史消息做全量 BPE 估算。

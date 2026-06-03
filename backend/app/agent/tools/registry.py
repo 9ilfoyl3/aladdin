@@ -2,8 +2,6 @@
 
 管理所有已注册的工具，提供 OpenAI function calling 格式的工具定义，
 以及按名称查找和执行工具的能力。
-
-参考: WeKnora/internal/agent/tools/registry.go
 - 执行后自动截断超长输出（TruncateToolOutput）
 - 失败时追加 error hint 引导 LLM 换策略
 """
@@ -54,7 +52,6 @@ class ToolRegistry:
         返回前按工具名称（function.name）字母序稳定排序，保证相同工具集合
         多次调用产生字节级相同的 JSON 序列化结果，最大化 LLM API 的
         prompt prefix caching 命中率。
-        参考 WeKnora: internal/agent/tools/registry.go。
         """
         definitions = []
         for tool in self._tools.values():
@@ -93,7 +90,6 @@ class ToolRegistry:
         result = await tool.execute(args)
 
         # 截断超长工具输出，防止上下文窗口溢出
-        # 参考 WeKnora: registry.go ExecuteTool() 中的 TruncateToolOutput
         if result.output and len(result.output) > self._max_tool_output_chars:
             result = ToolResult(
                 success=result.success,

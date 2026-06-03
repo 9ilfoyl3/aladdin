@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.agent.config import AgentConfig
 from app.api.agent_config import get_effective_preset_config
 from app.api.deps import require_authenticated
+from app.api.query_understanding import understand_query
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import KbAccessEnum
 from app.auth.kb_scope import authorize_requested_kbs
@@ -619,10 +620,21 @@ async def _stream_response(
     session_id: str | None = None,
     preset_cfg: dict | None = None,
     tenant_id: str | None = None,
+    retrieval_query: str | None = None,
+    skip_retrieval: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """生成 SSE 流式响应，包含 Agent 进度事件"""
+    """生成 SSE 流式响应，包含 Agent 进度事件
+
+    Args:
+        query: 用户原始问题，用于答案生成与消息保存。
+        retrieval_query: 经查询理解改写后、用于检索的查询（None 时回退到 query）。
+            仅单轮检索链路（direct/hybrid）使用；agent 模式自行处理指代。
+        skip_retrieval: 查询理解判定为闲聊/纯历史追问时为 True，跳过检索直接作答。
+    """
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     preset_cfg = preset_cfg or {}
+    if retrieval_query is None:
+        retrieval_query = query
 
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
@@ -633,7 +645,10 @@ async def _stream_response(
         # 多知识库联合检索
         try:
             filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
-            chunks, degraded = await _retrieve_multi_kb(query, kb_ids, filter_obj)
+            if skip_retrieval:
+                chunks = []
+            else:
+                chunks, degraded = await _retrieve_multi_kb(retrieval_query, kb_ids, filter_obj)
         except Exception as e:
             logger.error("多知识库联合检索失败: %s", e)
             chunks = []
@@ -783,11 +798,15 @@ async def _stream_response(
 
     elif kb_id:
         # 非 agent 模式：直接检索，无进度事件
-        try:
-            chunks, degraded = await _retrieve_chunks(query, kb_id, mode, llm, expr=expr)
-        except Exception as e:
-            logger.error("检索失败: %s", e)
+        if skip_retrieval:
+            # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
             chunks = []
+        else:
+            try:
+                chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr)
+            except Exception as e:
+                logger.error("检索失败: %s", e)
+                chunks = []
 
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
@@ -930,12 +949,23 @@ async def chat_completions(
             logger.warning("加载会话历史失败: %s", e)
             history = None
 
+    # 判断是否使用多知识库联合检索
+    use_multi_kb = bool(request.kb_ids)
+
+    # 查询理解（仅单轮检索链路 direct/hybrid 需要）：
+    # 这类链路无 ReAct 自我修正机会，必须在检索前一次性消解指代、判别闲聊，
+    # 否则「它/这个」会直接进检索、闲聊也会触发无关召回。
+    # agent 模式由其系统提示词内的 Turn Intent / Context Resolution 自行处理，不在此重复。
+    retrieval_query = user_query
+    skip_retrieval = False
+    if mode != "agent" and (request.knowledge_base_id or use_multi_kb):
+        understanding = await understand_query(llm, user_query, history)
+        retrieval_query = understanding.rewrite_query
+        skip_retrieval = not understanding.needs_retrieval
+
     # 构造过滤条件
     filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
     expr = filter_obj.to_milvus_expr()
-
-    # 判断是否使用多知识库联合检索
-    use_multi_kb = bool(request.kb_ids)
 
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
@@ -944,21 +974,24 @@ async def chat_completions(
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval),
             media_type="text/event-stream",
         )
 
     # 非流式响应
-    if use_multi_kb:
+    if skip_retrieval:
+        # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
+        chunks = []
+    elif use_multi_kb:
         # 多知识库联合检索
         try:
-            chunks, degraded = await _retrieve_multi_kb(user_query, request.kb_ids, filter_obj)
+            chunks, degraded = await _retrieve_multi_kb(retrieval_query, request.kb_ids, filter_obj)
         except Exception as e:
             logger.error("多知识库联合检索失败: %s", e)
             raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
     elif request.knowledge_base_id:
         try:
-            chunks, degraded = await _retrieve_chunks(user_query, request.knowledge_base_id, mode, llm, expr=expr)
+            chunks, degraded = await _retrieve_chunks(retrieval_query, request.knowledge_base_id, mode, llm, expr=expr)
         except Exception as e:
             logger.error("检索失败: %s", e)
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")

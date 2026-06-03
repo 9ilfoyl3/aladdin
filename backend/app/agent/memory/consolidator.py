@@ -1,8 +1,7 @@
 """Memory Consolidation - LLM 摘要合并器
 
-照搬 WeKnora `internal/agent/memory/consolidator.go` 的实现，作为三层递进式
-上下文管理的中间层（介于 Token 估算与分组截断压缩之间）：当上下文 token 数
-超过 max_context_tokens * threshold（默认 50%）时，用 LLM 将早期历史消息摘要
+作为三层递进式上下文管理的中间层（介于 Token 估算与分组截断压缩之间）：当上下文
+token 数超过 max_context_tokens * threshold（默认 50%）时，用 LLM 将早期历史消息摘要
 为一条 [Memory Summary] system 消息，在保留关键信息的同时大幅减少 token 占用。
 
 合并后的消息列表结构为：
@@ -31,8 +30,7 @@ from app.models.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-# 触发摘要合并的上下文窗口占用比例：超过 max_tokens * threshold 时触发，
-# 照搬 WeKnora DefaultConsolidationThreshold。
+# 触发摘要合并的上下文窗口占用比例：超过 max_tokens * threshold 时触发。
 DEFAULT_CONSOLIDATION_THRESHOLD = 0.5
 
 # LLM 摘要调用的最大尝试次数，超过后降级为纯文本归档（raw archive）。
@@ -59,7 +57,6 @@ _PROMPT_TRUNCATE_TOOL = 1000
 _ARCHIVE_TRUNCATE = 500
 
 # 摘要系统提示词：指示 LLM 做简洁、保真的对话摘要。
-# 照搬 WeKnora consolidationSystemPrompt。
 CONSOLIDATION_SYSTEM_PROMPT = (
     "You are a conversation summarizer. "
     "Your task is to create a concise but comprehensive summary "
@@ -133,7 +130,7 @@ class MemoryConsolidator:
     async def consolidate(self, messages: list[dict]) -> list[dict]:
         """将早期历史消息摘要为一条 system 消息并返回压缩后的消息列表
 
-        分区与保留规则（照搬 WeKnora Consolidate）：
+        分区与保留规则：
         - system_msg：messages[0]，始终保留。
         - tail：从最后一条 user 消息到列表末尾（当前轮），始终完整保留。
         - history：system 与 tail 之间的中间部分。从尾部按 token budget 计算
@@ -241,7 +238,7 @@ class MemoryConsolidator:
         消息条数（从尾部计）。budget 在 target_tokens 基础上扣除 system_msg、
         tail 以及为 summary 消息预留的 _SUMMARY_RESERVE_TOKENS(500)。
 
-        分组规则（照搬 WeKnora findKeepBoundary）：遇到 role == "tool" 的消息时，
+        分组规则：遇到 role == "tool" 的消息时，
         向前合并其连续的 tool 消息以及紧邻的 assistant 消息为一组，组内 token
         作为整体计算，保证 tool_call/tool_result 配对不被拆分。
 

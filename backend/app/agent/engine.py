@@ -3,8 +3,6 @@
 实现 Reasoning + Acting 循环：LLM 自主决策调用工具、分析结果、
 决定是否继续检索或提交最终答案。引擎本身无状态，每次 execute()
 创建新的 AgentState。
-
-参考: WeKnora/internal/agent/engine.go
 """
 
 from __future__ import annotations
@@ -73,8 +71,6 @@ def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
     遍历消息列表，找到 role="tool" 的消息，通过前面 assistant 消息中的
     tool_calls 确定工具名称。如果是 KB 工具且不是最后一组工具调用的结果，
     则替换内容为脱敏标记。
-
-    参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
 
     Args:
         messages: 消息列表（OpenAI 格式）
@@ -230,17 +226,17 @@ class AgentEngine:
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         # 追加历史上下文（redact 历史 KB 工具结果，强制每轮重新检索）
-        # 参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
         if llm_context:
             redacted_context = _redact_history_kb_results(llm_context)
             messages.extend(redacted_context)
-        
-
-        # Query Rewrite: 当有历史上下文时，消解指代词
-        if llm_context:
-            query = await self._rewrite_query(query, llm_context)
 
         # 追加当前用户查询
+        #
+        # 不做前置 Query Rewrite：从不改写 query。指代消解交给带工具的 ReAct
+        # 模型在生成检索参数时自行完成——它能看到完整对话历史，比前置改写更准确，且不会
+        # 把闲聊/确认类输入（"好的"、"谢谢"）脑补成上一轮的问题从而误触发检索。
+        # （单轮检索链路的前置改写在 api/query_understanding.py，仅用于检索、不替换
+        # 答案生成所用的 query，与此处的 Agent 链路不是同一回事。）
         messages.append({"role": "user", "content": query})
 
         # 获取工具定义
@@ -293,7 +289,7 @@ class AgentEngine:
             )
 
             # 1. Think: 调用 LLM（含重试）
-            # 三层递进式上下文管理（参考 WeKnora observe.go manageContextWindow）：
+            # 三层递进式上下文管理：
             # ① UsageTracker 估算当前 token 数（API Usage + BPE Delta）
             # ② MemoryConsolidator 在超过 consolidation 阈值（默认 50%）时用 LLM 摘要早期历史
             # ③ compress_context 在超过 80% 阈值时分组截断兜底
@@ -396,7 +392,7 @@ class AgentEngine:
                 if verdict.reason == "final_answer":
                     state.final_answer = verdict.content
                 elif verdict.reason == "natural_stop":
-                    # 参考 WeKnora: LLM 应该通过 final_answer 工具提交答案
+                    # LLM 应该通过 final_answer 工具提交答案
                     # 如果 LLM 直接停止（natural_stop），追加消息要求它调用 final_answer
                     # 这样下一轮 LLM 会通过工具提交，实现流式 answer 输出
                     if iteration < self._config.max_iterations - 1:
@@ -499,7 +495,6 @@ class AgentEngine:
     ) -> ChatResponse:
         """流式调用 LLM，实时发射 THOUGHT 事件，含瞬态错误重试
 
-        参考 WeKnora streamThinkingToEventBus：
         - 流式接收 LLM 响应，逐 token 发射 THOUGHT 事件
         - 累积 tool_calls，流结束后构建完整 ChatResponse 返回
         - 如果最终无 tool_calls 且 finish_reason="stop"，说明内容是最终答案
@@ -566,7 +561,6 @@ class AgentEngine:
     ) -> ChatResponse:
         """流式调用 LLM 并实时发射事件到 EventBus
 
-        参考 WeKnora streamLLMToEventBus + streamThinkingToEventBus：
         1. 迭代 StreamChunk，content 实时发射 THOUGHT 事件
         2. 累积 tool_calls（来自最终 chunk）
         3. 流结束后构建 ChatResponse 返回
@@ -597,7 +591,7 @@ class AgentEngine:
                 ))
 
             # 流式 final_answer 工具的 arguments → 实时发射 FINAL_ANSWER 事件
-            # 参考 WeKnora: think.go 中 ResponseTypeAnswer + source="final_answer_tool"
+            # 当 tool_name 是 final_answer 时，将 arguments 增量作为 answer 类型流式发射
             if chunk.content and chunk.response_type == "answer":
                 full_content += chunk.content
                 await self._event_bus.emit(AgentEvent(
@@ -917,7 +911,7 @@ class AgentEngine:
             ))
             return
 
-        # 尝试调用 LLM 流式生成答案（参考 WeKnora finalize.go）
+        # 尝试调用 LLM 流式生成答案
         try:
             from app.agent.prompts.progressive_rag import render_system_prompt
 
@@ -932,7 +926,7 @@ class AgentEngine:
                 {"role": "user", "content": self._last_query},
             ]
 
-            # 追加所有工具结果作为上下文（参考 WeKnora finalize.go）
+            # 追加所有工具结果作为上下文
             for step in state.steps:
                 for tc_record in step.tool_calls:
                     if tc_record.result and tc_record.result.success and tc_record.result.output:
@@ -941,7 +935,7 @@ class AgentEngine:
                             "content": f"Tool {tc_record.name} returned: {tc_record.result.output}",
                         })
 
-            # 追加最终答案生成 prompt（参考 WeKnora finalize.go）
+            # 追加最终答案生成 prompt
             synthesis_messages.append({
                 "role": "user",
                 "content": (
@@ -988,49 +982,6 @@ class AgentEngine:
             ))
 
         state.is_complete = True
-
-    async def _rewrite_query(self, query: str, llm_context: list[dict]) -> str:
-        """Query Rewrite: 消解指代词，将查询改写为独立可理解的形式
-
-        当历史上下文非空时，调用 LLM 将当前 query 中的指代词
-        （它/这个/上面提到的/那个）替换为具体实体。
-
-        Args:
-            query: 原始用户查询
-            llm_context: 历史对话消息列表
-
-        Returns:
-            改写后的查询（失败时返回原始查询）
-        """
-        try:
-            # 取最近 2 条消息作为历史摘要
-            last_msgs = llm_context[-4:] if len(llm_context) > 4 else llm_context
-            history_text = "\n".join(
-                f"{m['role']}: {m['content'][:200]}" for m in last_msgs
-            )
-
-            rewrite_prompt = (
-                f"将以下问题改写为独立可理解的查询（消解指代词）：\n"
-                f"历史：{history_text}\n"
-                f"当前问题：{query}\n"
-                f"改写后："
-            )
-
-            rewritten = await self._llm.generate(
-                [{"role": "user", "content": rewrite_prompt}]
-            )
-
-            if rewritten and rewritten.strip():
-                logger.info(
-                    "[Agent] Query rewritten: %r -> %r",
-                    query[:50],
-                    rewritten.strip()[:50],
-                )
-                return rewritten.strip()
-        except Exception as e:
-            logger.warning("[Agent] Query rewrite failed, using original: %s", e)
-
-        return query
 
     async def _query_kb_names(self, kb_ids: list[str]) -> list[str]:
         """从数据库查询知识库名称列表
