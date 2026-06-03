@@ -68,12 +68,26 @@ export interface ShareRequest {
   permission: string
 }
 
+// 知识库列表查询参数（分页 + 关系筛选 + 排序 + 名称搜索）
+export interface KnowledgeBaseListParams {
+  page?: number
+  page_size?: number
+  relation?: 'mine' | 'shared' | 'org' | 'others'
+  sort?: 'recommended' | 'updated' | 'created' | 'name' | 'docs'
+  q?: string
+}
+
 // 知识库相关接口
 export const knowledgeBaseApi = {
-  list: (params?: { page?: number; page_size?: number }) =>
-    request<PageResult<unknown>>(
-      `/knowledge-bases?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
-    ),
+  list: (params?: KnowledgeBaseListParams) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.relation) qs.set('relation', params.relation)
+    if (params?.sort) qs.set('sort', params.sort)
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim())
+    return request<PageResult<unknown>>(`/knowledge-bases?${qs.toString()}`)
+  },
   get: (id: string) => request<unknown>(`/knowledge-bases/${id}`),
   create: (data: unknown) =>
     request<unknown>('/knowledge-bases', {

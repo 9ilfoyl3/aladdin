@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock } from 'lucide-react'
+import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X } from 'lucide-react'
 import { authApi, knowledgeBaseApi } from '@/lib/api'
-import type { PageResult } from '@/lib/api'
+import type { PageResult, KnowledgeBaseListParams } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
@@ -13,6 +13,13 @@ import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 import { toast } from 'sonner'
@@ -42,6 +49,28 @@ interface FormData {
 // 可见性三档：私有 / 组织·只读 / 组织·读写
 type VisibilityChoice = 'private' | 'org_read' | 'org_write'
 
+// 关系筛选档位（与后端 relation 参数对应）。others=他人私有，仅管理员可见。
+type RelationFilter = 'all' | 'mine' | 'shared' | 'org' | 'others'
+// 排序档位（与后端 sort 参数对应）
+type SortKey = NonNullable<KnowledgeBaseListParams['sort']>
+
+// 关系筛选分段（管理员额外可见「他人私有」）
+const RELATION_TABS: { key: RelationFilter; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'mine', label: '我的' },
+  { key: 'shared', label: '共享给我' },
+  { key: 'org', label: '组织公共' },
+]
+
+// 排序选项
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'recommended', label: '推荐' },
+  { key: 'updated', label: '最近更新' },
+  { key: 'created', label: '最近创建' },
+  { key: 'name', label: '名称' },
+  { key: 'docs', label: '文档数' },
+]
+
 // 知识库管理页面
 function KnowledgeBase() {
   const queryClient = useQueryClient()
@@ -50,6 +79,24 @@ function KnowledgeBase() {
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<KnowledgeBaseItem | null>(null)
   const [form, setForm] = useState<FormData>({ name: '', description: '', visibility: 'private' })
+
+  // 列表筛选/排序/搜索状态
+  const [relation, setRelation] = useState<RelationFilter>('all')
+  const [sort, setSort] = useState<SortKey>('recommended')
+  const [searchInput, setSearchInput] = useState('') // 输入框即时值
+  const [search, setSearch] = useState('')            // 防抖后用于请求的值
+
+  // 搜索防抖（300ms）：避免每次按键都打请求
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  // 管理员可额外筛选「他人私有 · 只读」
+  const relationTabs = isAdmin
+    ? [...RELATION_TABS, { key: 'others' as RelationFilter, label: '他人私有' }]
+    : RELATION_TABS
+  const sortLabel = SORT_OPTIONS.find((o) => o.key === sort)?.label ?? '推荐'
 
   // 共享对话框：把一个 KB 分享给同租户多个用户（仅 owner 可发起）
   const [shareKb, setShareKb] = useState<KnowledgeBaseItem | null>(null)
@@ -103,7 +150,7 @@ function KnowledgeBase() {
     return '私有'
   }
 
-  // 获取知识库列表（分页 + 滚动加载）
+  // 获取知识库列表（分页 + 滚动加载，按筛选/排序/搜索）
   const PAGE_SIZE = 20
   const {
     data,
@@ -112,17 +159,22 @@ function KnowledgeBase() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['knowledge-bases', 'infinite'],
+    queryKey: ['knowledge-bases', 'infinite', relation, sort, search],
     queryFn: ({ pageParam }) =>
-      knowledgeBaseApi.list({ page: pageParam, page_size: PAGE_SIZE }) as Promise<
-        PageResult<KnowledgeBaseItem>
-      >,
+      knowledgeBaseApi.list({
+        page: pageParam,
+        page_size: PAGE_SIZE,
+        relation: relation === 'all' ? undefined : relation,
+        sort,
+        q: search || undefined,
+      }) as Promise<PageResult<KnowledgeBaseItem>>,
     initialPageParam: 1,
     getNextPageParam: (lastPage) =>
       lastPage.has_more ? lastPage.page + 1 : undefined,
   })
 
   const knowledgeBases = data?.pages.flatMap((p) => p.items) ?? []
+  const totalCount = data?.pages[0]?.total ?? 0
 
   const sentinelRef = useInfiniteScroll(fetchNextPage, {
     hasMore: !!hasNextPage,
@@ -320,7 +372,7 @@ function KnowledgeBase() {
   return (
     <div>
       {/* 页面头部 */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">知识库</h1>
           <p className="text-muted-foreground text-sm mt-1">管理您的知识库，上传文档并配置检索策略</p>
@@ -331,20 +383,106 @@ function KnowledgeBase() {
         </Button>
       </div>
 
+      {/* 工具栏：关系分段筛选 + 搜索 + 排序 */}
+      <div className="flex items-center justify-between gap-3 mb-6 flex-wrap">
+        {/* 关系分段控件 */}
+        <div className="flex items-center gap-3">
+          <div className="inline-flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
+            {relationTabs.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setRelation(tab.key)}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors cursor-pointer ${
+                  relation === tab.key
+                    ? 'bg-background text-foreground shadow-sm font-medium'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          {!isLoading && (
+            <span className="text-xs text-muted-foreground">共 {totalCount} 个</span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* 搜索框 */}
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+            <Input
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="搜索知识库"
+              className="pl-8 pr-8 h-9 w-48"
+            />
+            {searchInput && (
+              <button
+                onClick={() => setSearchInput('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                title="清除"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* 排序下拉 */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-9 gap-1.5">
+                <ArrowUpDown className="h-3.5 w-3.5" />
+                {sortLabel}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-36">
+              <DropdownMenuRadioGroup value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+                {SORT_OPTIONS.map((opt) => (
+                  <DropdownMenuRadioItem key={opt.key} value={opt.key} className="cursor-pointer">
+                    {opt.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
       {/* 知识库列表 */}
       {isLoading ? (
         <CardGridSkeleton count={6} />
       ) : knowledgeBases.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20">
-          <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
-            <Database className="h-8 w-8 text-muted-foreground/60" />
+        // 区分「真的没有库」与「筛选/搜索无结果」两种空态
+        relation !== 'all' || search ? (
+          <div className="flex flex-col items-center justify-center py-20">
+            <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
+              <Search className="h-8 w-8 text-muted-foreground/60" />
+            </div>
+            <p className="text-muted-foreground mb-1">没有符合条件的知识库</p>
+            <p className="text-sm text-muted-foreground/70 mb-4">试试切换筛选条件或清空搜索</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => { setRelation('all'); setSearchInput('') }}
+            >
+              <X className="h-4 w-4" />
+              清除筛选
+            </Button>
           </div>
-          <p className="text-muted-foreground mb-4">还没有知识库，创建一个开始吧</p>
-          <Button onClick={openCreate} variant="outline" className="gap-2">
-            <Plus className="h-4 w-4" />
-            新建知识库
-          </Button>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-20">
+            <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
+              <Database className="h-8 w-8 text-muted-foreground/60" />
+            </div>
+            <p className="text-muted-foreground mb-4">还没有知识库，创建一个开始吧</p>
+            <Button onClick={openCreate} variant="outline" className="gap-2">
+              <Plus className="h-4 w-4" />
+              新建知识库
+            </Button>
+          </div>
+        )
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 animate-in fade-in-0 duration-500">
           {knowledgeBases.map((kb) => {

@@ -183,42 +183,101 @@ async def _authorize_kb(
 # ============================================================
 
 
+def _kb_relation(
+    kb: KnowledgeBase, subject_id: str | None, is_admin: bool
+) -> str:
+    """计算当前身份与某 KB 的关系（用于筛选/排序展现优先级）。
+
+    与前端 relationBadge 的判定优先级保持一致：
+    mine（我的）> org（组织公共）> others（他人私有·管理员只读）/ shared（共享给我）。
+    """
+    if subject_id is not None and kb.owner_user_id == subject_id:
+        return "mine"
+    if kb.visibility == KbVisibilityEnum.ORGANIZATION.value:
+        return "org"
+    if is_admin:
+        return "others"
+    return "shared"
+
+
+# 默认「推荐」排序的关系优先级：我的 > 共享给我 > 组织公共 > 他人私有
+_RELATION_RANK = {"mine": 0, "shared": 1, "org": 2, "others": 3}
+_VALID_RELATIONS = {"mine", "shared", "org", "others"}
+_VALID_SORTS = {"recommended", "updated", "created", "name", "docs"}
+
+
 @router.get("", response_model=PageResult[KnowledgeBaseResponse])
 async def list_knowledge_bases(
     page: int = 1,
     page_size: int = 20,
+    relation: str | None = None,
+    sort: str = "recommended",
+    q: str | None = None,
     identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """列出当前身份可读范围内的知识库（自有私有库 ∪ 同租户公共库 ∪ 被共享库）。"""
+    """列出当前身份可读范围内的知识库（自有私有库 ∪ 同租户公共库 ∪ 被共享库）。
+
+    支持按关系筛选（relation）、排序（sort）与名称搜索（q）。可见范围本就全量装配进内存，
+    在其上做筛选/排序/分页可保证跨页结果正确（纯前端排序只能作用于已加载页，故收口到后端）。
+    """
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
     offset = (page - 1) * page_size
+    sort = sort if sort in _VALID_SORTS else "recommended"
+    relation_filter = relation if relation in _VALID_RELATIONS else None
 
     allowed_ids = await assemble_allowed_kb_ids(db, identity)
     if not allowed_ids:
         return PageResult[KnowledgeBaseResponse](items=[], total=0, page=page, page_size=page_size, has_more=False)
 
-    allowed_list = list(allowed_ids)
-    total = await db.scalar(
-        select(func.count(KnowledgeBase.id)).where(KnowledgeBase.id.in_(allowed_list))
-    ) or 0
-    result = await db.execute(
-        select(KnowledgeBase)
-        .where(KnowledgeBase.id.in_(allowed_list))
-        .order_by(KnowledgeBase.created_at.desc())
-        .offset(offset).limit(page_size)
+    # 全量装载可见范围内的 KB 实体：关系判定 + 排序 + 名称搜索都需要逐行信息
+    rows = await db.execute(
+        select(KnowledgeBase).where(KnowledgeBase.id.in_(list(allowed_ids)))
     )
-    kbs = result.scalars().all()
+    all_kbs = list(rows.scalars().all())
 
-    kb_ids = [kb.id for kb in kbs]
+    subject = identity.acting_subject_id
+    is_admin = identity.is_tenant_admin or identity.is_super_admin
+
+    # 名称模糊搜索
+    if q and q.strip():
+        kw = q.strip().lower()
+        all_kbs = [kb for kb in all_kbs if kw in (kb.name or "").lower()]
+
+    # 关系筛选
+    if relation_filter is not None:
+        all_kbs = [kb for kb in all_kbs if _kb_relation(kb, subject, is_admin) == relation_filter]
+
+    # 文档数：一次分组查询覆盖全部已筛选 KB，供排序与展示复用（跨页排序需全量计数）
+    filtered_ids = [kb.id for kb in all_kbs]
     count_map: dict[str, int] = {}
-    if kb_ids:
+    if filtered_ids:
         cr = await db.execute(
             select(Document.kb_id, func.count(Document.id))
-            .where(Document.kb_id.in_(kb_ids)).group_by(Document.kb_id)
+            .where(Document.kb_id.in_(filtered_ids)).group_by(Document.kb_id)
         )
         count_map = {row[0]: row[1] for row in cr.all()}
+
+    # 排序
+    if sort == "name":
+        all_kbs.sort(key=lambda kb: (kb.name or "").lower())
+    elif sort == "created":
+        all_kbs.sort(key=lambda kb: kb.created_at, reverse=True)
+    elif sort == "updated":
+        all_kbs.sort(key=lambda kb: kb.updated_at or kb.created_at, reverse=True)
+    elif sort == "docs":
+        all_kbs.sort(key=lambda kb: count_map.get(kb.id, 0), reverse=True)
+    else:  # recommended：关系优先级 → 最近更新
+        all_kbs.sort(
+            key=lambda kb: (
+                _RELATION_RANK.get(_kb_relation(kb, subject, is_admin), 99),
+                -(kb.updated_at or kb.created_at).timestamp(),
+            )
+        )
+
+    total = len(all_kbs)
+    kbs = all_kbs[offset:offset + page_size]
 
     # 批量补充展示信息：owner 用户名（共享库显示「谁分享的」）+ 租户名（公共库显示来源组织）
     owner_ids = {kb.owner_user_id for kb in kbs if kb.owner_user_id}
@@ -233,7 +292,6 @@ async def list_knowledge_bases(
         tenant_name_map = {tid: tname for tid, tname in tr.all()}
 
     # 仅为「我的」库统计点对点共享人数（私有库显示「分享给 N 人」）；他人库不暴露其共享名单
-    subject = identity.acting_subject_id
     own_kb_ids = [kb.id for kb in kbs if subject is not None and kb.owner_user_id == subject]
     share_count_map: dict[str, int] = {}
     if own_kb_ids:
