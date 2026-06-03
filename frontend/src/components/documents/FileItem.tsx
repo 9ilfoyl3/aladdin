@@ -192,16 +192,14 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
           </div>
         )}
 
-        {/* 处理中：底部进度条 + 居中「解析中 N%」标签，明确区分于排队/完成 */}
+        {/* 处理中：底部进度条 + 旋转图标，简洁直观 */}
         {doc.status === 'processing' && (
           <>
-            <div className="absolute bottom-1 inset-x-1 flex justify-center">
-              <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
-                解析中 {Math.round(doc.progress || 0)}%
-              </Badge>
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+              <Loader2 className="h-4 w-4 text-primary/70 animate-spin" />
             </div>
             <div className="absolute bottom-0 inset-x-0">
-              <div className="h-1 bg-muted/60 rounded-b overflow-hidden">
+              <div className="h-1.5 bg-muted/60 rounded-b overflow-hidden">
                 <div
                   className="h-full bg-primary transition-all duration-500 ease-out"
                   style={{ width: `${doc.progress || 0}%` }}
