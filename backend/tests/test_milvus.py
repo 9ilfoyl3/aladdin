@@ -119,7 +119,17 @@ class TestMilvusClient:
         client._create_collection_sync = MagicMock()
 
         await client.create_collection("test_kb")
-        client._create_collection_sync.assert_called_once_with("test_kb")
+        # 不传 ef_construction/m 时透传 None（同步实现内部回落默认 128/16）
+        client._create_collection_sync.assert_called_once_with("test_kb", None, None)
+
+    @pytest.mark.asyncio
+    async def test_create_collection_with_index_params(self):
+        """测试 create_collection 透传 ef_construction/m"""
+        client = MilvusClient()
+        client._create_collection_sync = MagicMock()
+
+        await client.create_collection("test_kb", ef_construction=200, m=32)
+        client._create_collection_sync.assert_called_once_with("test_kb", 200, 32)
 
     @pytest.mark.asyncio
     async def test_insert(self):
@@ -161,7 +171,7 @@ class TestMilvusClient:
         vector = [0.1] * 1024
         result = await client.search_dense("test_kb", vector, top_k=5)
         assert result == expected
-        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, None)
+        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, None, 128, 0)
 
     @pytest.mark.asyncio
     async def test_search_dense_with_expr(self):
@@ -174,7 +184,7 @@ class TestMilvusClient:
         expr = 'file_type in ["pdf"]'
         result = await client.search_dense("test_kb", vector, top_k=5, expr=expr)
         assert result == expected
-        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, expr)
+        client._search_dense_sync.assert_called_once_with("test_kb", vector, 5, expr, 128, 0)
 
     @pytest.mark.asyncio
     async def test_search_sparse(self):
@@ -186,7 +196,7 @@ class TestMilvusClient:
         sparse_vec = {1: 0.5, 100: 0.3, 500: 0.2}
         result = await client.search_sparse("test_kb", sparse_vec, top_k=3)
         assert result == expected
-        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, None)
+        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, None, 0)
 
     @pytest.mark.asyncio
     async def test_search_sparse_with_expr(self):
@@ -199,7 +209,7 @@ class TestMilvusClient:
         expr = 'doc_id in ["doc-123"]'
         result = await client.search_sparse("test_kb", sparse_vec, top_k=3, expr=expr)
         assert result == expected
-        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, expr)
+        client._search_sparse_sync.assert_called_once_with("test_kb", sparse_vec, 3, expr, 0)
 
     @pytest.mark.asyncio
     async def test_check_schema_version_async(self):

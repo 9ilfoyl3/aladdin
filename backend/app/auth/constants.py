@@ -134,6 +134,10 @@ class AuditActionEnum(str, Enum):
     INVITATION_CREATE = "invitation.create"
     INVITATION_REVOKE = "invitation.revoke"
     INVITATION_ACCEPT = "invitation.accept"
+    # —— 系统/平台配置（kb-retrieval-optimization） ——
+    SYSTEM_CONFIG_UPDATE = "system.config_update"      # 检索/分块（及 LLM/OCR）配置更新
+    SYSTEM_CONFIG_RESET = "system.config_reset"        # 检索/分块配置恢复默认
+    PLATFORM_CONFIG_UPDATE = "platform.config_update"  # 平台级配置（Load_Cache_TTL）更新
     # —— 认证 ——
     LOGIN_SUCCESS = "auth.login_success"
     LOGIN_FAIL = "auth.login_fail"

@@ -56,7 +56,7 @@ from app.schema.api import (
 )
 from app.schema.db import LLMConfig, ChatSession, ChatMessageRecord
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import MilvusClient, get_milvus_client
 
 from sqlalchemy import select
 
@@ -66,6 +66,26 @@ router = APIRouter()
 
 # 历史上下文最大轮数（每轮 = 1 user + 1 assistant）
 MAX_HISTORY_ROUNDS = 10
+
+
+async def _verify_session_owner(session_id: str, identity: IdentityContext) -> None:
+    """校验 session_id 归属当前行事主体本人，否则 404（存在性非泄露）。
+
+    会话/消息是个人对话历史。问答端点接收前端传入的 session_id 用于加载历史上下文
+    与续写消息；若不校验归属，任何同租户用户都能凭他人 session_id 读取其历史（泄露进
+    本次回答上下文）并向其会话注入消息。此处与 session API 的 owner 收敛保持一致。
+
+    - 跨租户由 contextvar 兜底过滤为不可见 -> get 返回 None -> 404。
+    - owner 不匹配（含同租户他人、无主历史会话）-> 404。
+    - tenant_level 机器身份（acting_subject_id 为 None）不绑定自然人 -> 一律 404。
+    """
+    from app.api.errors import CrossTenantError
+
+    subject = identity.acting_subject_id
+    async with async_session() as session:
+        cs = await session.get(ChatSession, session_id)
+    if cs is None or subject is None or cs.owner_user_id != subject:
+        raise CrossTenantError()
 
 
 async def _load_session_history(session_id: str) -> list[dict]:
@@ -357,8 +377,7 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
 
 def _get_milvus_client() -> MilvusClient:
     """获取 Milvus 客户端实例"""
-    settings = get_settings()
-    return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+    return get_milvus_client()
 
 
 def _build_hybrid_retriever() -> HybridRetriever:
@@ -873,6 +892,11 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail="消息列表中缺少 user 角色消息")
 
     tenant_id = identity.tenant_id
+
+    # 会话归属校验：若指定了 session_id，必须为本人会话，否则 404。
+    # 防止凭他人 session_id 读取其历史（泄露进本次回答上下文）或向其会话注入消息。
+    if request.session_id:
+        await _verify_session_owner(request.session_id, identity)
 
     # 检索范围授权：触达 Milvus 前先校验所有被指定 KB 处于身份可读范围
     # （跨租户/不可读 -> 404；跨库问答 MultiKBRetriever 逻辑不变，仅前置裁剪）。

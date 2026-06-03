@@ -461,7 +461,17 @@ class DocumentPipeline:
 
                 # 确保 collection 存在
                 if not await self.milvus.has_collection(kb_id):
-                    await self.milvus.create_collection(kb_id)
+                    # 新建 collection 时按**该知识库所属租户**的检索配置 HNSW 建索引参数生效
+                    # （存量 collection 不受影响，不触发重建）。kb_tenant_id 已在本阶段开头
+                    # 反查得到；取不到租户 → get_effective(None) 全默认（128/16）。
+                    from app.retrieval.config import get_retrieval_config_store
+
+                    cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+                    await self.milvus.create_collection(
+                        kb_id,
+                        ef_construction=cfg.hnsw_ef_construction,
+                        m=cfg.hnsw_m,
+                    )
 
                 # 写入前先清理本文档可能残留的旧向量（幂等，治本去孤儿）。
                 # 覆盖三类重处理场景：手动 retry、批量 retry、机制 A 崩溃重投。
@@ -564,8 +574,9 @@ class DocumentPipeline:
     ):
         """选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
 
-        从系统配置读取 chunk 参数（parent_chunk_size, child_chunk_size, chunk_overlap）
-        传递给 Chunker 实例。
+        分块参数（parent_chunk_size, child_chunk_size, chunk_overlap）按**该知识库所属
+        租户**从 RetrievalConfig 读取并传递给 Chunker 实例（Worker 无请求级租户上下文，
+        以 KnowledgeBase.tenant_id 为权威来源反查；取不到租户回落全默认）。
 
         Args:
             session: 数据库会话
@@ -576,19 +587,27 @@ class DocumentPipeline:
         Returns:
             BaseChunker 实例
         """
-        settings = get_settings()
-        chunk_kwargs = {
-            "parent_size": settings.parent_chunk_size,
-            "child_size": settings.child_chunk_size,
-            "overlap": settings.chunk_overlap,
-        }
-
-        # 查询知识库 config 中是否指定了 chunker_type
-        chunker_type = None
+        # 先取该知识库行：一次查询同时拿到 tenant_id（按租户读分块参数）与 config（chunker_type）。
         result = await session.execute(
             select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
         )
         kb = result.scalar_one_or_none()
+
+        # 按该知识库所属租户读取分块参数：Worker 是独立进程、无请求级租户上下文，
+        # 以 KnowledgeBase.tenant_id 为权威来源反查租户；取不到租户（kb 为 None 或
+        # tenant_id 为 None）→ get_effective(None) 全默认（2500/450/70），与现状一致。
+        from app.retrieval.config import get_retrieval_config_store
+
+        kb_tenant_id = kb.tenant_id if kb else None
+        cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+        chunk_kwargs = {
+            "parent_size": cfg.parent_chunk_size,
+            "child_size": cfg.child_chunk_size,
+            "overlap": cfg.chunk_overlap,
+        }
+
+        # 查询知识库 config 中是否指定了 chunker_type
+        chunker_type = None
         if kb and kb.config and isinstance(kb.config, dict):
             chunker_type = kb.config.get("chunker_type")
 

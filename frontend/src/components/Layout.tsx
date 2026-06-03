@@ -82,8 +82,9 @@ function Layout() {
   } = useSession()
 
   // 内容与菜单一致性守卫：超管为纯平台管理身份，仅允许访问其菜单内的页面
-  // （租户管理 / 审计日志）与账号自助页（改密）。直接命中知识库/对话等页面时，
-  // 重定向回"租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
+  // （租户管理 / 审计日志）与账号自助页（改密）。系统设置/个人资料已改为账号
+  // 菜单弹窗（非路由），不在此列。直接命中知识库/对话等页面时，重定向回
+  // "租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
   // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
   const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password'])
   if (isSuperAdmin && !SUPER_ADMIN_ALLOWED_PATHS.has(location.pathname)) {
@@ -351,8 +352,13 @@ function Layout() {
       {/* 个人资料弹窗 */}
       <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
 
-      {/* 系统设置弹窗 */}
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} canManageChunk={isAdmin} />
+      {/* 系统设置弹窗（账号菜单打开，配自身租户；超管可管平台配置） */}
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        canManageChunk={isAdmin}
+        isSuperAdmin={isSuperAdmin}
+      />
     </div>
   )
 }

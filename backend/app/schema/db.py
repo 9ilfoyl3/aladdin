@@ -184,6 +184,69 @@ class EmbedConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class RetrievalConfigRow(Base):
+    """检索参数租户级配置表（每租户一行，主键 = tenant_id）。
+
+    承载分块档 + 五档检索参数共 17 个参数，取代硬编码在 hybrid.py / milvus.py 的
+    检索参数与散落在 Settings 的分块参数。租户级（每租户一行），对该租户名下所有
+    知识库生效。
+
+    不继承 TenantScopedMixin：本表读写已由 RetrievalConfigStore 显式按主键
+    tenant_id 定位（Store 按 tenant_id 分键缓存，绕过 get_settings 的 @lru_cache，
+    支持即时热生效），主键即租户键，无需再叠加方案 B 的 loader criteria 兜底过滤
+    （否则会干扰"超管为指定租户读配置"——platform 态不注入过滤反而正确）。
+    ORM 类名用 ...Row 后缀，与 app.retrieval.config.RetrievalConfig（Pydantic）消歧。
+
+    所有参数列 nullable=True：缺失语义由 RetrievalConfig.effective_from_raw 在读时
+    逐字段兜底为 Safe_Default（Req 2.2）。建表经现有 init_db 的
+    Base.metadata.create_all 自动创建，无需迁移脚本。
+    """
+    __tablename__ = "retrieval_configs"
+
+    # 租户级：以 tenant_id 为主键，每租户一行；Store 用 session.get(..., tenant_id) 定位
+    tenant_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    # 分块档 Chunk_Tier（本期纳入，默认对齐 Settings：2500/450/70，读时由 effective_from_raw 兜底）
+    parent_chunk_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    child_chunk_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    chunk_overlap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 召回档 Recall_Tier
+    recall_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rerank_candidate_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 融合档 Fusion_Tier
+    rrf_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    composite_rerank_weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    composite_base_weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    composite_source_weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # 精排档 Rerank_Tier
+    rerank_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rerank_top_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    threshold_degradation_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # 去重档 Dedup_Tier
+    mmr_lambda: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mmr_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # 索引档 Index_Tier
+    hnsw_ef: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hnsw_ef_construction: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hnsw_m: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PlatformConfigRow(Base):
+    """平台级全局配置表（单行，固定主键 'global'）。本期承载 Load_Cache_TTL。
+
+    跨租户共享、仅超管可改。读写经 PlatformConfigStore（绕过 get_settings 的
+    @lru_cache，支持即时热生效）。缺失由 PlatformConfig.effective_from_raw 读时兜底
+    （load_cache_ttl 默认 30 秒）。建表经 create_all 自动创建，无迁移脚本。
+    """
+    __tablename__ = "platform_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="global")
+    load_cache_ttl: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # collection 加载缓存有效期（秒）
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class AgentPreset(Base):
     """Agent 预设配置表"""
     __tablename__ = "agent_presets"
@@ -202,6 +265,11 @@ class ChatSession(Base, TenantScopedMixin):
     __tablename__ = "chat_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # tenant-auth：会话归属用户（per-user 隔离）。取 acting_subject_id——
+    # 注册用户/用户级 Key=user_id，外部用户=external_user_id；机器级 tenant_level Key 为 None。
+    # 会话/消息是个人对话历史，须仅本人可见：tenant_id 之外再按 owner 收敛，
+    # 否则同租户用户之间会互相看到对方的对话历史。
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     model_config_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)

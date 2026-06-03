@@ -3,6 +3,10 @@
 会话/消息为受隔离资源（TenantScopedMixin）：Guard 设置的 contextvar 三态会让本模块
 自开 async_session 的 SELECT 自动按租户过滤；创建时盖章 tenant_id；消息正文受
 Content_View_Boundary 约束（Super_Admin 默认不可读）。
+
+此外，会话/消息是**个人对话历史**，仅创建者本人可见可管理：在租户隔离之上再按
+``owner_user_id == identity.acting_subject_id`` 收敛。仅靠 tenant_id 隔离会让同租户
+的用户互相看到、打开、改名、删除对方的对话历史（本次修复的核心权限缺陷）。
 """
 
 import uuid
@@ -68,13 +72,24 @@ def _ensure_not_super_admin_content(identity: IdentityContext) -> None:
         raise PermissionDeniedError("超级管理员默认不可查看业务内容正文")
 
 
-async def _get_owned_session(session, session_id: str) -> ChatSession:
-    """取会话（contextvar 兜底确保仅本租户可见 -> 跨租户/不存在统一 404）。"""
+async def _get_owned_session(
+    session, session_id: str, identity: IdentityContext
+) -> ChatSession:
+    """取会话并校验本人归属。
+
+    - contextvar 兜底先保证仅本租户可见（跨租户/不存在 -> 404）。
+    - 再校验 owner_user_id == 当前行事主体（acting_subject_id）：会话是个人对话历史，
+      非本人（含同租户他人、无主历史会话）一律视为不存在，返回相同 404（不泄露存在性）。
+    - tenant_level 机器身份（acting_subject_id 为 None）不绑定自然人，不可见任何会话。
+    """
     result = await session.execute(
         select(ChatSession).where(ChatSession.id == session_id)
     )
     cs = result.scalar_one_or_none()
     if cs is None:
+        raise CrossTenantError()
+    subject = identity.acting_subject_id
+    if subject is None or cs.owner_user_id != subject:
         raise CrossTenantError()
     return cs
 
@@ -88,7 +103,11 @@ async def _get_owned_session(session, session_id: str) -> ChatSession:
 async def list_sessions(
     identity: IdentityContext = Depends(require_authenticated()),
 ) -> list[SessionItem]:
-    """获取会话列表（按更新时间倒序，仅本租户；空会话过滤）"""
+    """获取会话列表（按更新时间倒序，仅本租户内本人会话；空会话过滤）"""
+    subject = identity.acting_subject_id
+    if subject is None:
+        # 机器级身份（tenant_level Key）不绑定自然人，没有个人对话历史
+        return []
     async with async_session() as session:
         msg_count_subq = (
             select(
@@ -99,10 +118,11 @@ async def list_sessions(
             .subquery()
         )
         # inner join 仅返回至少有一条消息的会话（过滤空会话）。
-        # ChatSession 经 contextvar 兜底已限定本租户。
+        # ChatSession 经 contextvar 兜底已限定本租户；再按 owner 收敛为仅本人会话。
         result = await session.execute(
             select(ChatSession, msg_count_subq.c.msg_count)
             .join(msg_count_subq, ChatSession.id == msg_count_subq.c.session_id)
+            .where(ChatSession.owner_user_id == subject)
             .order_by(ChatSession.updated_at.desc())
         )
         items = []
@@ -122,13 +142,14 @@ async def create_session(
     req: SessionCreate,
     identity: IdentityContext = Depends(require_authenticated()),
 ) -> SessionItem:
-    """创建新会话（盖章 tenant_id）"""
+    """创建新会话（盖章 tenant_id 与 owner_user_id）"""
     new_session = ChatSession(
         id=str(uuid.uuid4()),
         title=req.title,
         kb_id=req.kb_id,
         model_config_id=req.model_config_id,
         tenant_id=identity.tenant_id,
+        owner_user_id=identity.acting_subject_id,
     )
     async with async_session() as session:
         session.add(new_session)
@@ -149,7 +170,7 @@ async def update_session(
 ) -> SessionItem:
     """更新会话（重命名）"""
     async with async_session() as session:
-        chat_session = await _get_owned_session(session, session_id)
+        chat_session = await _get_owned_session(session, session_id, identity)
         if req.title is not None:
             chat_session.title = req.title
         await session.commit()
@@ -173,9 +194,9 @@ async def delete_session(
     session_id: str,
     identity: IdentityContext = Depends(require_authenticated()),
 ):
-    """删除会话及其所有消息（仅本租户）"""
+    """删除会话及其所有消息（仅本人）"""
     async with async_session() as session:
-        chat_session = await _get_owned_session(session, session_id)
+        chat_session = await _get_owned_session(session, session_id, identity)
         await session.delete(chat_session)
         await session.commit()
     return {"detail": "已删除"}
@@ -189,8 +210,8 @@ async def get_session_messages(
     """获取会话的所有消息（消息正文受内容边界约束）"""
     _ensure_not_super_admin_content(identity)
     async with async_session() as session:
-        # 验证会话存在且本租户可见
-        await _get_owned_session(session, session_id)
+        # 验证会话存在且为本人所有
+        await _get_owned_session(session, session_id, identity)
         result = await session.execute(
             select(ChatMessageRecord)
             .where(ChatMessageRecord.session_id == session_id)
@@ -212,10 +233,10 @@ async def clear_session_messages(
     session_id: str,
     identity: IdentityContext = Depends(require_authenticated()),
 ):
-    """清空会话消息（保留会话本身，仅本租户）"""
+    """清空会话消息（保留会话本身，仅本人）"""
     async with async_session() as session:
-        # 先确认会话本租户可见，再按 session_id 删除其消息
-        await _get_owned_session(session, session_id)
+        # 先确认会话为本人所有，再按 session_id 删除其消息
+        await _get_owned_session(session, session_id, identity)
         await session.execute(
             delete(ChatMessageRecord).where(ChatMessageRecord.session_id == session_id)
         )

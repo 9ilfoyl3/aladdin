@@ -32,12 +32,15 @@ class FakeMilvusClient:
         self.last_top_k: int | None = None
 
     async def search_dense(
-        self, kb_id: str, vector: list[float], top_k: int = 10, expr: str | None = None
+        self, kb_id: str, vector: list[float], top_k: int = 10,
+        expr: str | None = None, ef: int | None = None, load_cache_ttl: int = 0,
     ) -> list[dict]:
         self.last_kb_id = kb_id
         self.last_vector = vector
         self.last_top_k = top_k
         self.last_expr = expr
+        self.last_ef = ef
+        self.last_load_cache_ttl = load_cache_ttl
         return self._results
 
 

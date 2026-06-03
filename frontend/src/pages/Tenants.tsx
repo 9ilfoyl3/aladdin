@@ -1,7 +1,7 @@
 import { copyToClipboard } from '@/lib/clipboard'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound, Pencil, Upload } from 'lucide-react'
+import { Plus, Building2, Power, Copy, Check, Users as UsersIcon, KeyRound, Pencil, Upload, SlidersHorizontal } from 'lucide-react'
 import { adminApi, type TenantItem, type TenantCreateResult, type AdminUserItem } from '@/lib/api'
 import { validateTenantName, validateUsername } from '@/lib/validation'
 import { roleLabel } from '@/lib/labels'
@@ -14,6 +14,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { AvatarPicker } from '@/components/AvatarPicker'
+import SettingsDialog from '@/components/SettingsDialog'
 import { toast } from 'sonner'
 
 // 租户管理页面（平台级，仅 Super_Admin / tenant:manage）：
@@ -40,6 +41,8 @@ function Tenants() {
   const [editName, setEditName] = useState('')
   const [editDesc, setEditDesc] = useState('')
   const [editAvatar, setEditAvatar] = useState<string | null>(null)
+  // 配置某租户的切片/检索参数：打开设置弹窗并携带该租户 id（注入 X-Tenant-ID）
+  const [configTenant, setConfigTenant] = useState<TenantItem | null>(null)
 
   const { data: tenants = [], isLoading } = useQuery({
     queryKey: ['admin-tenants'],
@@ -246,6 +249,15 @@ function Tenants() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setConfigTenant(t)}
+                        title="配置该租户的分块与检索参数"
+                      >
+                        <SlidersHorizontal className="h-4 w-4" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -536,6 +548,17 @@ function Tenants() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 配置某租户的切片 / 检索参数（超管经此入口携带 X-Tenant-ID 配指定租户）。
+          canManageChunk 置真以展示切片+检索分项；isSuperAdmin 置假以隐藏平台配置
+          （平台 TTL 为全局，由超管自身账号菜单的设置入口管理，不随具体租户走）。 */}
+      <SettingsDialog
+        open={!!configTenant}
+        onOpenChange={(o) => { if (!o) setConfigTenant(null) }}
+        canManageChunk={true}
+        isSuperAdmin={false}
+        tenantId={configTenant?.id}
+      />
     </div>
   )
 }

@@ -32,10 +32,9 @@ from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.auth.kb_scope import assemble_allowed_kb_ids
 from app.auth.validators import validate_org_permission
-from app.config import get_settings
 from app.schema.api import PageResult
 from app.schema.db import Document, KnowledgeBase, KnowledgeBaseGrant, Tenant, User
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import MilvusClient, get_milvus_client
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +114,7 @@ class VisibilityRequest(BaseModel):
 
 
 def _get_milvus() -> MilvusClient:
-    settings = get_settings()
-    return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+    return get_milvus_client()
 
 
 def _to_resp(

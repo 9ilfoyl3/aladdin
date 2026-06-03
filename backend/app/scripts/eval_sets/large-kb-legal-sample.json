@@ -1,0 +1,36 @@
+{
+  "name": "large-kb-legal-sample",
+  "kb_id": "<替换为真实知识库ID>",
+  "queries": [
+    {
+      "query": "劳动合同解除的经济补偿如何计算",
+      "expected_doc_ids": [],
+      "expected_keywords": ["经济补偿", "月工资"],
+      "note": "大库高频法律咨询：劳动关系解除补偿口径"
+    },
+    {
+      "query": "公司股东出资不实需要承担什么责任",
+      "expected_doc_ids": [],
+      "expected_keywords": ["出资", "连带责任", "补足"],
+      "note": "公司法：股东出资责任"
+    },
+    {
+      "query": "民间借贷的利率上限是多少，超过部分受法律保护吗",
+      "expected_doc_ids": [],
+      "expected_keywords": ["利率", "四倍", "LPR"],
+      "note": "民间借贷司法解释：利率红线"
+    },
+    {
+      "query": "离婚时夫妻共同财产如何分割",
+      "expected_doc_ids": [],
+      "expected_keywords": ["共同财产", "分割", "照顾"],
+      "note": "婚姻家庭：财产分割原则"
+    },
+    {
+      "query": "交通事故责任认定后保险公司赔偿范围包括哪些",
+      "expected_doc_ids": [],
+      "expected_keywords": ["交强险", "商业三者险", "赔偿"],
+      "note": "侵权与保险：机动车事故赔偿范围"
+    }
+  ]
+}

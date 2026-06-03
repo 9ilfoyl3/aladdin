@@ -58,6 +58,14 @@ async def client():
     _orig_async_session = dbmod.async_session
     dbmod.async_session = _test_session_factory
 
+    # 分块/检索参数本期迁入租户级 RetrievalConfigStore（DB）。把其进程单例指向测试库，
+    # 使系统配置端点的分块字段读写落到测试库（否则连真实 PG 失败 → 降级全默认）。
+    import app.retrieval.config as config_module
+    from app.retrieval.config import RetrievalConfigStore
+
+    _orig_store = config_module._store
+    config_module._store = RetrievalConfigStore(_test_session_factory)
+
     # 进程隔离地注入一个固定的租户管理员身份：本测试聚焦知识库/文档/系统配置的**功能正确性**，
     # 与鉴权无关（清理 E 后已无 auth_enabled 旁路），故 monkeypatch _resolve_identity 让所有
     # 守卫放行；身份带 tenant_id 以便建库盖章。鉴权本身正确性由 tenant-auth 套件覆盖。
@@ -89,6 +97,7 @@ async def client():
     # 清理
     deps._resolve_identity = _orig_resolve
     dbmod.async_session = _orig_async_session
+    config_module._store = _orig_store
     app.dependency_overrides.clear()
     async with _test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -301,15 +310,20 @@ class TestSystemAPI:
 
     @pytest.mark.asyncio
     async def test_update_config(self, client):
-        """更新系统配置（更新 LLM 模型与分块参数，返回脱敏配置）"""
+        """更新系统配置（更新 LLM 模型与分块参数，返回脱敏配置）。
+
+        分块参数本期迁入租户级 retrieval 分档，经 ``retrieval`` 提交；顶层 parent_chunk_size
+        仍兼容平铺，其值取自该租户 retrieval 有效值。
+        """
         resp = await client.put("/api/system/config", json={
             "llm_model": "qwen2.5:14b",
-            "parent_chunk_size": 3000,
+            "retrieval": {"parent_chunk_size": 3000},
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["llm_model"] == "qwen2.5:14b"
         assert data["parent_chunk_size"] == 3000
+        assert data["retrieval"]["parent_chunk_size"] == 3000
 
     @pytest.mark.asyncio
     async def test_queue_stats_no_redis(self, client):

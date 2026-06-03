@@ -114,9 +114,14 @@ def test_config_face_requires_auth(env):
     assert client.get("/api/system/config").status_code == 401
     # 健康检查公开
     assert client.get("/api/system/health").status_code == 200
-    # 超管可访问；密钥脱敏（含 *** 或为空）
+    # 配置（分块/检索）本期改为租户级：超管不带 X-Tenant-ID 须指定目标租户 -> 400
     sa = _super_token(client)
-    r = client.get("/api/system/config", headers=_bearer(sa))
+    assert client.get("/api/system/config", headers=_bearer(sa)).status_code == 400
+    # 超管经 X-Tenant-ID 指定目标租户可访问；密钥脱敏（含 *** 或为空）
+    r = client.get(
+        "/api/system/config",
+        headers={**_bearer(sa), "X-Tenant-ID": "t-any"},
+    )
     assert r.status_code == 200
     key_display = r.json().get("llm_api_key", "")
     assert "***" in key_display or key_display == ""

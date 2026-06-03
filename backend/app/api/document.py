@@ -26,7 +26,7 @@ from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
 from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import MilvusClient, get_milvus_client
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +206,7 @@ class ChunkResponse(BaseModel):
 
 def _get_milvus() -> MilvusClient:
     """获取 Milvus 客户端"""
-    settings = get_settings()
-    return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+    return get_milvus_client()
 
 
 async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:

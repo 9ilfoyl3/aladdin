@@ -33,12 +33,14 @@ class FakeMilvusClient:
         self.last_top_k: Optional[int] = None
 
     async def search_sparse(
-        self, kb_id: str, sparse_vector: dict[int, float], top_k: int = 10, expr: str | None = None
+        self, kb_id: str, sparse_vector: dict[int, float], top_k: int = 10,
+        expr: str | None = None, load_cache_ttl: int = 0,
     ) -> list[dict]:
         self.last_kb_id = kb_id
         self.last_sparse_vector = sparse_vector
         self.last_top_k = top_k
         self.last_expr = expr
+        self.last_load_cache_ttl = load_cache_ttl
         return self._results
 
 

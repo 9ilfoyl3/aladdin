@@ -10,12 +10,16 @@ async function request<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${BASE_URL}${endpoint}`
+  // 先展开其余选项（method/body 等），headers 放最后合并，避免 options.headers
+  // 覆盖掉这里注入的 Content-Type / Authorization；同时把调用方自定义头
+  // （如 X-Tenant-ID）经 authHeaders 透传并保留。
+  const { headers: extraHeaders, ...rest } = options
   const response = await fetch(url, {
+    ...rest,
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(options.headers as Record<string, string> | undefined),
+      ...authHeaders(extraHeaders as Record<string, string> | undefined),
     },
-    ...options,
   })
 
   if (!response.ok) {
@@ -24,7 +28,21 @@ async function request<T>(
       handleUnauthorized()
     }
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || `请求失败: ${response.status}`)
+    const detail = error.detail
+    // 422 范围校验失败：detail 是数组 [{field, value, allowed_range}, ...]，友好拼接
+    if (Array.isArray(detail)) {
+      const msg = detail
+        .map((d) =>
+          d && typeof d === 'object' && 'field' in d
+            ? `${d.field}=${d.value} 超出允许范围 ${d.allowed_range}`
+            : typeof d === 'string'
+              ? d
+              : JSON.stringify(d)
+        )
+        .join('；')
+      throw new Error(msg || `请求失败: ${response.status}`)
+    }
+    throw new Error(typeof detail === 'string' ? detail : `请求失败: ${response.status}`)
   }
 
   // 204 No Content 无响应体
@@ -259,11 +277,39 @@ export const apiKeyApi = {
 }
 
 // 系统配置接口
+//
+// 租户级配置（/system/config 及 reset）支持可选 tenantId：
+// - 普通租户管理员：不传 tenantId，后端据 JWT 身份定位自身租户；
+// - 超级管理员：必须传 tenantId（经租户管理列表进入），注入 X-Tenant-ID 指定目标租户，
+//   否则后端返回 400。
+// 平台配置（/system/platform-config）为超管专属，承载 Load_Cache_TTL。
+const tenantHeader = (tenantId?: string): RequestInit =>
+  tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
+
+export interface PlatformConfig {
+  load_cache_ttl: number
+}
+
 export const systemApi = {
   health: () => request<unknown>('/system/health'),
-  getConfig: () => request<unknown>('/system/config'),
-  updateConfig: (data: unknown) =>
+  getConfig: (tenantId?: string) =>
+    request<unknown>('/system/config', tenantHeader(tenantId)),
+  updateConfig: (data: unknown, tenantId?: string) =>
     request<unknown>('/system/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+      ...tenantHeader(tenantId),
+    }),
+  // 恢复检索参数默认值（后端：POST /api/system/config/retrieval/reset）
+  resetRetrievalConfig: (tenantId?: string) =>
+    request<unknown>('/system/config/retrieval/reset', {
+      method: 'POST',
+      ...tenantHeader(tenantId),
+    }),
+  // 平台配置（超管专属）：collection 加载缓存 TTL
+  getPlatformConfig: () => request<PlatformConfig>('/system/platform-config'),
+  updatePlatformConfig: (data: PlatformConfig) =>
+    request<PlatformConfig>('/system/platform-config', {
       method: 'PUT',
       body: JSON.stringify(data),
     }),

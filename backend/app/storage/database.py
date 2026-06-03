@@ -64,6 +64,10 @@ async def _migrate_db() -> None:
         # 对话消息表新增知识库追踪字段
         "ALTER TABLE chat_messages ADD COLUMN kb_id VARCHAR",
         "ALTER TABLE chat_messages ADD COLUMN kb_ids JSON",
+        # 会话表新增归属用户列：会话/消息为个人对话历史，须按 owner 收敛（per-user 隔离）。
+        # 已存在的历史会话 owner_user_id 留空（NULL），将不再出现在任何用户的列表中
+        # （无主会话对所有人不可见），避免修复前的跨用户泄露在旧数据上残留。
+        "ALTER TABLE chat_sessions ADD COLUMN owner_user_id VARCHAR",
         # 清理历史遗留列：旧版本 knowledge_bases 表带 retrieval_mode NOT NULL 列，
         # 当前模型已移除该字段，插入时不再赋值，会触发 NOT NULL 约束错误。
         # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。

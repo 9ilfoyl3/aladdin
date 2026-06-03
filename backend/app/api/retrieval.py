@@ -29,7 +29,7 @@ from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.vector import VectorRetriever
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import MilvusClient, get_milvus_client
 
 from fastapi import Depends
 from app.api.deps import require_authenticated
@@ -120,8 +120,7 @@ class RetrievalTestResponse(BaseModel):
 
 def _get_milvus() -> MilvusClient:
     """获取 Milvus 客户端"""
-    settings = get_settings()
-    return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+    return get_milvus_client()
 
 
 @router.post("/test", response_model=RetrievalTestResponse)

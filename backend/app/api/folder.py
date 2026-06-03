@@ -19,8 +19,7 @@ from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.schema.api import PageResult
 from app.schema.db import Document, Folder, KnowledgeBase, KnowledgeBaseGrant
-from app.storage.milvus import MilvusClient
-from app.config import get_settings
+from app.storage.milvus import get_milvus_client
 
 logger = logging.getLogger(__name__)
 
@@ -429,8 +428,7 @@ async def _folder_cleanup_background(
     # 使用 doc_id 表达式删除 Milvus 向量（无需预先收集 chunk_ids，更快更可靠）
     if doc_ids:
         try:
-            settings = get_settings()
-            milvus = MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+            milvus = get_milvus_client()
             if await milvus.has_collection(kb_id):
                 await milvus.delete_by_doc_ids(kb_id, doc_ids)
             logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 个文档", len(doc_ids))

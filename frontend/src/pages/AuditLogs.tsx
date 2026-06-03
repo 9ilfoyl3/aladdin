@@ -22,6 +22,9 @@ const ACTION_LABEL: Record<string, string> = {
   'invitation.create': '创建邀请', 'invitation.revoke': '吊销邀请', 'invitation.accept': '接受邀请',
   'auth.login_success': '登录成功', 'auth.login_fail': '登录失败', 'auth.change_password': '修改密码',
   'user.update_profile': '更新资料', 'tenant.update_profile': '更新租户资料',
+  'system.config_update': '更新检索/分块配置',
+  'system.config_reset': '恢复检索/分块默认',
+  'platform.config_update': '更新平台配置',
 }
 
 // 审计日志页面（user:manage 可读；超管全局、租管限本租户）。只读。
