@@ -475,6 +475,12 @@ export interface AgentPresetItem {
   is_default: boolean
   created_at: string
   updated_at: string
+  // 归属与可见性（agent-preset-sharing）
+  is_shared: boolean
+  is_builtin: boolean
+  is_owner: boolean
+  owner_user_id: string | null
+  owner_username: string | null
 }
 
 export const agentPresetApi = {
@@ -488,7 +494,7 @@ export const agentPresetApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean }) =>
+  create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean; is_shared?: boolean }) =>
     request<unknown>('/agent-presets', {
       method: 'POST',
       body: JSON.stringify(data),

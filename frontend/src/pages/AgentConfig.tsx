@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Sparkles, Eraser, Wand2, Loader2 } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Sparkles, Eraser, Wand2, Loader2, Share2, Lock, Globe } from 'lucide-react'
 import { agentPresetApi } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/comp
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import PromptEditor, { type PromptEditorHandle } from '@/components/agent/PromptEditor'
 import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
+import { toast } from 'sonner'
 
 interface AgentPresetItem {
   id: string
@@ -28,6 +29,12 @@ interface AgentPresetItem {
   is_default: boolean
   created_at: string
   updated_at: string
+  // 归属与可见性（agent-preset-sharing）
+  is_shared: boolean
+  is_builtin: boolean
+  is_owner: boolean
+  owner_user_id: string | null
+  owner_username: string | null
 }
 
 interface FormData {
@@ -39,6 +46,7 @@ interface FormData {
   thinking_enabled: boolean
   allowed_tools: string[]
   system_prompt: string
+  is_shared: boolean
 }
 
 const emptyForm: FormData = {
@@ -50,6 +58,7 @@ const emptyForm: FormData = {
   thinking_enabled: true,
   allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'final_answer'],
   system_prompt: '',
+  is_shared: false,
 }
 
 const ALL_TOOLS = [
@@ -87,6 +96,7 @@ function AgentConfig() {
     mutationFn: (data: FormData) => agentPresetApi.create({
       name: data.name,
       description: data.description || undefined,
+      is_shared: data.is_shared,
       config_json: {
         agent_mode: data.agent_mode,
         max_iterations: parseInt(data.max_iterations) || 20,
@@ -106,6 +116,7 @@ function AgentConfig() {
     mutationFn: ({ id, data }: { id: string; data: FormData }) => agentPresetApi.update(id, {
       name: data.name,
       description: data.description || undefined,
+      is_shared: data.is_shared,
       config_json: {
         agent_mode: data.agent_mode,
         max_iterations: parseInt(data.max_iterations) || 20,
@@ -126,6 +137,17 @@ function AgentConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['agent-presets'] })
     },
+  })
+
+  // 快捷开放/关闭：直接切换 is_shared，无需进编辑弹窗（参考知识库卡片上的可见性 chip）
+  const shareToggleMutation = useMutation({
+    mutationFn: ({ id, is_shared }: { id: string; is_shared: boolean }) =>
+      agentPresetApi.update(id, { is_shared }),
+    onSuccess: (_d, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['agent-presets'] })
+      toast.success(vars.is_shared ? '已开放给本租户' : '已设为私有')
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : '操作失败'),
   })
 
   // 删除预设（统一确认交互）
@@ -167,6 +189,7 @@ function AgentConfig() {
       thinking_enabled: item.config_json?.thinking_enabled ?? true,
       allowed_tools: item.config_json?.allowed_tools ?? emptyForm.allowed_tools,
       system_prompt: item.config_json?.system_prompt ?? '',
+      is_shared: item.is_shared,
     })
     setShowDialog(true)
   }
@@ -229,7 +252,7 @@ function AgentConfig() {
           {presets.map((preset) => (
             <div
               key={preset.id}
-              className="group relative rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-lg hover:border-primary/20 hover:-translate-y-0.5"
+              className="group relative flex flex-col rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-lg hover:border-primary/20 hover:-translate-y-0.5"
             >
               {preset.is_default && (
                 <div className="absolute top-4 right-4">
@@ -239,15 +262,23 @@ function AgentConfig() {
               <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
                 <Bot className="h-5 w-5 text-primary" />
               </div>
-              <div className="flex items-center gap-2 mb-2">
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
                 <h3 className="font-semibold text-base">{preset.name}</h3>
                 {preset.is_default && (
                   <Badge variant="secondary" className="text-xs">默认</Badge>
                 )}
+                {preset.is_builtin ? (
+                  <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />内置</Badge>
+                ) : preset.is_shared ? (
+                  <Badge variant="outline" className="text-xs gap-1 text-primary border-primary/30"><Share2 className="h-3 w-3" />已开放</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-xs gap-1 text-muted-foreground"><Lock className="h-3 w-3" />私有</Badge>
+                )}
               </div>
-              {preset.description && (
-                <p className="text-sm text-muted-foreground mb-3">{preset.description}</p>
-              )}
+              {/* 描述：固定两行高度，保证多卡片对齐 */}
+              <p className="text-sm text-muted-foreground mb-3 line-clamp-2 min-h-10">
+                {preset.description || '暂无描述'}
+              </p>
               <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
                 <p className="flex items-center gap-1.5">
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -262,20 +293,55 @@ function AgentConfig() {
                   <span>深度思考: {preset.config_json?.thinking_enabled ? '开启' : '关闭'}</span>
                 </p>
               </div>
-              <div className="flex items-center gap-1 pt-3 border-t border-border/60">
-                <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 cursor-pointer" onClick={() => openEdit(preset)}>
-                  <Pencil className="h-3.5 w-3.5" />
-                  编辑
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
-                  onClick={() => handleDelete(preset)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  删除
-                </Button>
+
+              {/* 底部操作区：mt-auto 贴底，保证所有卡片底栏对齐 */}
+              <div className="mt-auto pt-3 border-t border-border/60">
+                {preset.is_owner ? (
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {/* 开放/关闭快捷切换（参考知识库可见性 chip，点击即切，无需进编辑） */}
+                    <button
+                      onClick={() => shareToggleMutation.mutate({ id: preset.id, is_shared: !preset.is_shared })}
+                      disabled={shareToggleMutation.isPending}
+                      className={`text-xs px-2 py-1 rounded-md border inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                        preset.is_shared
+                          ? 'border-primary/30 text-primary bg-primary/5 hover:bg-primary/10'
+                          : 'border-border text-muted-foreground bg-background hover:bg-muted'
+                      }`}
+                      title={preset.is_shared ? '点击关闭开放（设为私有）' : '点击开放给本租户全体成员使用'}
+                    >
+                      {preset.is_shared ? <Share2 className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
+                      {preset.is_shared ? '已开放' : '开放'}
+                    </button>
+                    <div className="flex-1" />
+                    <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 cursor-pointer" onClick={() => openEdit(preset)}>
+                      <Pencil className="h-3.5 w-3.5" />
+                      编辑
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
+                      onClick={() => handleDelete(preset)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      删除
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground px-1 h-8">
+                    {preset.is_builtin ? (
+                      <>
+                        <Globe className="h-3.5 w-3.5" />
+                        <span>平台内置预设</span>
+                      </>
+                    ) : (
+                      <>
+                        <Share2 className="h-3.5 w-3.5" />
+                        <span>来自 {preset.owner_username || '其他成员'}</span>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -372,6 +438,21 @@ function AgentConfig() {
                 id="thinking_enabled"
                 checked={form.thinking_enabled}
                 onCheckedChange={(checked) => setForm({ ...form, thinking_enabled: checked })}
+              />
+            </div>
+            {/* 开放给本租户：开启后本租户全体成员可见可用（仅创建者可改/删） */}
+            <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <Share2 className="h-4 w-4 text-muted-foreground" />
+                <div>
+                  <Label htmlFor="is_shared" className="text-sm cursor-pointer">开放给本租户</Label>
+                  <p className="text-xs text-muted-foreground">开启后，本租户所有成员可在问答中选择使用该智能体（仅你本人可修改或删除）</p>
+                </div>
+              </div>
+              <Switch
+                id="is_shared"
+                checked={form.is_shared}
+                onCheckedChange={(checked) => setForm({ ...form, is_shared: checked })}
               />
             </div>
             <div>

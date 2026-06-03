@@ -36,9 +36,9 @@ import SettingsDialog from '@/components/SettingsDialog'
 // 审计日志归 manage（admin 可见），但 Super_Admin 经下方 SUPER_ADMIN_MENUS 单独放行。
 const navItems = [
   { to: '/knowledge-bases', label: '知识库', icon: Database, group: 'content' },
-  { to: '/retrieval', label: '检索测试', icon: Search, group: 'content' },
+  { to: '/agent-config', label: '智能体', icon: Bot, group: 'content' },
+  { to: '/retrieval', label: '检索测试', icon: Search, group: 'manage' },
   { to: '/models', label: '模型管理', icon: Cpu, group: 'manage' },
-  { to: '/agent-config', label: '智能体', icon: Bot, group: 'manage' },
   { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'manage' },
   { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'manage' },
   { to: '/api-keys', label: 'API Key', icon: Key, group: 'manage' },

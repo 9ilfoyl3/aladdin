@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import require_authenticated, require_tenant_admin
+from app.api.deps import require_authenticated, require_member, require_tenant_admin
 from app.auth.identity import IdentityContext
 from app.schema.db import AgentPreset
 from app.storage.database import async_session
@@ -30,6 +30,8 @@ class AgentPresetCreate(BaseModel):
     description: str | None = Field(None, max_length=500)
     config_json: dict = Field(default_factory=dict)
     is_default: bool = False
+    # 是否开放给本租户全体成员可见可用（默认私有，仅创建者可见）
+    is_shared: bool = False
 
 
 class AgentPresetUpdate(BaseModel):
@@ -38,6 +40,8 @@ class AgentPresetUpdate(BaseModel):
     description: str | None = Field(None, max_length=500)
     config_json: dict | None = None
     is_default: bool | None = None
+    # 开放/收回开关（None 表示不变更）
+    is_shared: bool | None = None
 
 
 class AgentPresetResponse(BaseModel):
@@ -49,6 +53,12 @@ class AgentPresetResponse(BaseModel):
     is_default: bool
     created_at: str
     updated_at: str
+    # 归属与可见性（agent-preset-sharing）
+    is_shared: bool = False          # 是否开放给本租户全体成员
+    is_builtin: bool = False         # 是否平台内置预设（任何人不可改删）
+    is_owner: bool = False           # 当前请求者是否为创建者（决定前端是否显示改/删/开放开关）
+    owner_user_id: str | None = None
+    owner_username: str | None = None  # 创建者用户名（供"来自 xxx"展示；内置预设为 None）
 
 
 class PromptRewriteRequest(BaseModel):
@@ -58,6 +68,16 @@ class PromptRewriteRequest(BaseModel):
 
 
 # ============ 内置预设 ============
+# 内置预设：平台级、跨租户全员可见可用、任何人不可改删。
+# owner_user_id=None + tenant_id=None + is_shared=True 标识其内置身份。
+
+_BUILTIN_PRESET_IDS = {"preset-quick-qa", "preset-smart-reasoning"}
+
+
+def _is_builtin(preset: AgentPreset) -> bool:
+    """是否平台内置预设（任何人不可改删）。"""
+    return preset.id in _BUILTIN_PRESET_IDS
+
 
 _BUILTIN_PRESETS = [
     {
@@ -71,6 +91,10 @@ _BUILTIN_PRESETS = [
             "temperature": 0.3,
         },
         "is_default": False,
+        # 内置：跨租户全员可见、无归属、不可改删
+        "tenant_id": None,
+        "owner_user_id": None,
+        "is_shared": True,
     },
     {
         "id": "preset-smart-reasoning",
@@ -83,15 +107,25 @@ _BUILTIN_PRESETS = [
             "temperature": 0.7,
         },
         "is_default": True,
+        "tenant_id": None,
+        "owner_user_id": None,
+        "is_shared": True,
     },
 ]
 
 
-async def get_effective_preset_config(preset_id: str | None) -> dict:
+async def get_effective_preset_config(
+    preset_id: str | None, identity: IdentityContext | None = None
+) -> dict:
     """获取生效的 Agent 预设配置（config_json）
 
     指定 preset_id 时返回该预设；否则返回默认预设（is_default=True）。
     都找不到时返回智能推理内置预设的配置作为兜底。
+
+    可见性收敛（agent-preset-sharing）：当传入 identity 且显式指定了 preset_id 时，
+    校验该预设在请求者可见范围内（内置 ∪ 自有 ∪ 本租户已开放），不可见则忽略该
+    preset_id 回退默认预设——防止凭 id 使用他人私有预设。identity 为 None（如内部
+    无身份调用 / 标题生成）时不做可见性校验，保持兼容。
 
     Returns:
         预设的 config_json 字典，至少包含 agent_mode / max_iterations /
@@ -106,6 +140,9 @@ async def get_effective_preset_config(preset_id: str | None) -> dict:
                 select(AgentPreset).where(AgentPreset.id == preset_id)
             )
             preset = result.scalar_one_or_none()
+            # 指定了 preset 但不可见 → 视为未指定，回退默认（不泄露/不越权使用他人私有预设）
+            if preset is not None and identity is not None and not _is_visible(preset, identity):
+                preset = None
         if preset is None:
             result = await session.execute(
                 select(AgentPreset).where(AgentPreset.is_default == True)  # noqa: E712
@@ -119,8 +156,28 @@ async def get_effective_preset_config(preset_id: str | None) -> dict:
     return dict(_BUILTIN_PRESETS[1]["config_json"])
 
 
+def _is_visible(preset: AgentPreset, identity: IdentityContext) -> bool:
+    """判断某预设对当前身份是否可见可用。
+
+    可见 = 内置预设（tenant_id 为 None）∪ 本租户内自有（owner==我）∪ 本租户内已开放
+    （is_shared 且同租户）。管理员无特权——看不到他人未开放的私有预设。
+    """
+    # 内置预设：跨租户全员可见
+    if _is_builtin(preset) or preset.tenant_id is None:
+        return True
+    # 仅本租户范围内
+    if preset.tenant_id != identity.tenant_id:
+        return False
+    subject = identity.acting_subject_id
+    # 自有
+    if preset.owner_user_id is not None and subject is not None and preset.owner_user_id == subject:
+        return True
+    # 本租户已开放
+    return bool(preset.is_shared)
+
+
 async def _ensure_builtin_presets() -> None:
-    """确保内置预设存在（不存在时自动创建）"""
+    """确保内置预设存在（不存在时自动创建；已存在则校正其内置归属字段）。"""
     async with async_session() as session:
         for preset_data in _BUILTIN_PRESETS:
             result = await session.execute(
@@ -131,11 +188,33 @@ async def _ensure_builtin_presets() -> None:
                 preset = AgentPreset(**preset_data)
                 session.add(preset)
                 logger.info("创建内置 Agent 预设: %s", preset_data["name"])
+            else:
+                # 校正内置归属（兼容升级前已存在、缺归属字段的旧内置行）
+                existing.tenant_id = None
+                existing.owner_user_id = None
+                existing.is_shared = True
         await session.commit()
 
 
-def _to_response(preset: AgentPreset) -> AgentPresetResponse:
-    """ORM 模型转响应"""
+def _to_response(
+    preset: AgentPreset,
+    identity: IdentityContext | None = None,
+    owner_username: str | None = None,
+) -> AgentPresetResponse:
+    """ORM 模型转响应。
+
+    identity 提供时计算 is_owner（前端据此显示改/删/开放开关）；内置预设 is_builtin=True。
+    owner_username 由调用方批量解析后传入（供"来自 xxx"展示），内置预设无归属为 None。
+    """
+    builtin = _is_builtin(preset)
+    is_owner = False
+    if identity is not None and not builtin:
+        subject = identity.acting_subject_id
+        is_owner = (
+            preset.owner_user_id is not None
+            and subject is not None
+            and preset.owner_user_id == subject
+        )
     return AgentPresetResponse(
         id=preset.id,
         name=preset.name,
@@ -144,6 +223,11 @@ def _to_response(preset: AgentPreset) -> AgentPresetResponse:
         is_default=preset.is_default,
         created_at=preset.created_at.isoformat() if preset.created_at else "",
         updated_at=preset.updated_at.isoformat() if preset.updated_at else "",
+        is_shared=bool(preset.is_shared),
+        is_builtin=builtin,
+        is_owner=is_owner,
+        owner_user_id=preset.owner_user_id,
+        owner_username=None if builtin else owner_username,
     )
 
 
@@ -251,9 +335,13 @@ async def rewrite_prompt(
 
 @router.get("", response_model=list[AgentPresetResponse])
 async def list_presets(
-    _identity: IdentityContext = Depends(require_authenticated()),
+    identity: IdentityContext = Depends(require_member()),
 ):
-    """获取所有 Agent 预设列表"""
+    """获取当前身份可见的 Agent 预设列表（成员及以上可访问）。
+
+    可见范围（agent-preset-sharing）：内置预设 ∪ 本租户内自有 ∪ 本租户内已开放。
+    管理员无特权——看不到他人未开放的私有预设。
+    """
     # 确保内置预设存在
     await _ensure_builtin_presets()
 
@@ -261,29 +349,57 @@ async def list_presets(
         result = await session.execute(
             select(AgentPreset).order_by(AgentPreset.created_at)
         )
-        presets = result.scalars().all()
-    return [_to_response(p) for p in presets]
+        all_presets = result.scalars().all()
+
+        visible = [p for p in all_presets if _is_visible(p, identity)]
+
+        # 批量解析创建者用户名（供前端"来自 xxx"展示；内置预设无归属跳过）
+        owner_ids = {
+            p.owner_user_id for p in visible
+            if p.owner_user_id is not None and not _is_builtin(p)
+        }
+        username_map: dict[str, str] = {}
+        if owner_ids:
+            from app.schema.db import User
+            rows = await session.execute(
+                select(User.id, User.username).where(User.id.in_(list(owner_ids)))
+            )
+            username_map = {uid: uname for uid, uname in rows.all()}
+
+    return [
+        _to_response(p, identity, username_map.get(p.owner_user_id or ""))
+        for p in visible
+    ]
 
 
 @router.post("", response_model=AgentPresetResponse)
 async def create_preset(
     data: AgentPresetCreate,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    identity: IdentityContext = Depends(require_member()),
 ):
-    """创建新的 Agent 预设"""
+    """创建新的 Agent 预设（成员及以上）。
+
+    归属盖章：tenant_id=当前租户、owner_user_id=行事主体。可选 is_shared 开放给本租户。
+    """
     preset = AgentPreset(
         id=str(uuid.uuid4()),
         name=data.name,
         description=data.description,
         config_json=data.config_json,
         is_default=data.is_default,
+        tenant_id=identity.tenant_id,
+        owner_user_id=identity.acting_subject_id,
+        is_shared=bool(data.is_shared),
     )
 
     async with async_session() as session:
-        # 如果设为默认，取消其他默认
+        # 如果设为默认，取消本人其他默认（默认归属于创建者自身，不影响他人）
         if data.is_default:
             result = await session.execute(
-                select(AgentPreset).where(AgentPreset.is_default == True)  # noqa: E712
+                select(AgentPreset).where(
+                    AgentPreset.is_default == True,  # noqa: E712
+                    AgentPreset.owner_user_id == identity.acting_subject_id,
+                )
             )
             for existing in result.scalars().all():
                 existing.is_default = False
@@ -292,23 +408,38 @@ async def create_preset(
         await session.commit()
         await session.refresh(preset)
 
-    return _to_response(preset)
+    return _to_response(preset, identity)
+
+
+def _ensure_owner_or_404(preset: AgentPreset | None, identity: IdentityContext) -> AgentPreset:
+    """管理权校验：仅创建者本人可改/删；内置预设禁改删。
+
+    - 不存在 / 不可见 → 404（不泄露存在性）。
+    - 内置预设 → 403（任何人不可改删）。
+    - 可见但非创建者（含管理员、被开放的使用者）→ 403。
+    """
+    if preset is None or not _is_visible(preset, identity):
+        raise HTTPException(status_code=404, detail="预设不存在")
+    if _is_builtin(preset):
+        raise HTTPException(status_code=403, detail="内置预设不可修改或删除")
+    subject = identity.acting_subject_id
+    if not (preset.owner_user_id is not None and subject is not None and preset.owner_user_id == subject):
+        raise HTTPException(status_code=403, detail="只有创建者本人可以修改或删除该预设")
+    return preset
 
 
 @router.put("/{preset_id}", response_model=AgentPresetResponse)
 async def update_preset(
     preset_id: str,
     data: AgentPresetUpdate,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    identity: IdentityContext = Depends(require_member()),
 ):
-    """更新 Agent 预设"""
+    """更新 Agent 预设（仅创建者本人；内置预设不可改）。"""
     async with async_session() as session:
         result = await session.execute(
             select(AgentPreset).where(AgentPreset.id == preset_id)
         )
-        preset = result.scalar_one_or_none()
-        if not preset:
-            raise HTTPException(status_code=404, detail="预设不存在")
+        preset = _ensure_owner_or_404(result.scalar_one_or_none(), identity)
 
         if data.name is not None:
             preset.name = data.name
@@ -316,13 +447,16 @@ async def update_preset(
             preset.description = data.description
         if data.config_json is not None:
             preset.config_json = data.config_json
+        if data.is_shared is not None:
+            preset.is_shared = data.is_shared
         if data.is_default is not None:
             if data.is_default:
-                # 取消其他默认
+                # 取消本人其他默认（默认归属于创建者自身）
                 others = await session.execute(
                     select(AgentPreset).where(
                         AgentPreset.is_default == True,  # noqa: E712
                         AgentPreset.id != preset_id,
+                        AgentPreset.owner_user_id == identity.acting_subject_id,
                     )
                 )
                 for other in others.scalars().all():
@@ -332,22 +466,20 @@ async def update_preset(
         await session.commit()
         await session.refresh(preset)
 
-    return _to_response(preset)
+    return _to_response(preset, identity)
 
 
 @router.delete("/{preset_id}")
 async def delete_preset(
     preset_id: str,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    identity: IdentityContext = Depends(require_member()),
 ):
-    """删除 Agent 预设"""
+    """删除 Agent 预设（仅创建者本人；内置预设不可删）。"""
     async with async_session() as session:
         result = await session.execute(
             select(AgentPreset).where(AgentPreset.id == preset_id)
         )
-        preset = result.scalar_one_or_none()
-        if not preset:
-            raise HTTPException(status_code=404, detail="预设不存在")
+        preset = _ensure_owner_or_404(result.scalar_one_or_none(), identity)
 
         await session.delete(preset)
         await session.commit()
