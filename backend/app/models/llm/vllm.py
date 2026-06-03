@@ -9,6 +9,7 @@ from typing import AsyncIterator
 
 import httpx
 
+from app.models.llm.json_field_extractor import JSONFieldExtractor
 from app.models.provider import (
     ChatResponse,
     LLMProvider,
@@ -329,47 +330,23 @@ class VllmLLM(LLMProvider):
                             if func_data.get("arguments"):
                                 entry["arguments"] += func_data["arguments"]
 
-                                # 参考 WeKnora: 当 tool_name 是 final_answer 时，
-                                # 将 arguments 增量作为 answer 类型的 StreamChunk 流式发射
-                                # 这样前端可以实时渲染 final_answer 的内容
+                                # 当 tool_name 是 final_answer 时，用 JSONFieldExtractor
+                                # 从增量 arguments 中安全提取 answer 字段，逐 token 作为
+                                # answer 类型流式发射。状态机正确处理跨 chunk 的转义序列，
+                                # 不会吐出残留的反斜杠/半个 \uXXXX（旧手写 replace 链的乱码根因）。
                                 if entry["function_name"] == "final_answer":
-                                    # final_answer 的 arguments 格式: {"answer": "...内容..."}
-                                    # 我们需要从累积的 arguments 中实时提取 answer 值的增量
-                                    # 策略：追踪已发射的长度，只发射新增部分
-                                    args_so_far = entry["arguments"]
-                                    # 尝试找到 answer 值的起始位置
-                                    # 查找 "answer": " 或 "answer":" 后的内容
-                                    answer_start = -1
-                                    for marker in ['"answer": "', '"answer":"']:
-                                        pos = args_so_far.find(marker)
-                                        if pos != -1:
-                                            answer_start = pos + len(marker)
-                                            break
-                                    
-                                    if answer_start > 0:
-                                        # 提取从 answer_start 到末尾的内容（去掉可能的结尾 "} ）
-                                        raw_value = args_so_far[answer_start:]
-                                        # 去掉结尾的 "} 或 "}
-                                        if raw_value.endswith('"}'):
-                                            raw_value = raw_value[:-2]
-                                        elif raw_value.endswith('"'):
-                                            raw_value = raw_value[:-1]
-                                        
-                                        # 处理转义
-                                        raw_value = raw_value.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
-                                        
-                                        # 计算本次增量（相对于上次已发射的长度）
-                                        prev_len = entry.get("_answer_emitted_len", 0)
-                                        if len(raw_value) > prev_len:
-                                            answer_delta = raw_value[prev_len:]
-                                            entry["_answer_emitted_len"] = len(raw_value)
-                                            if answer_delta:
-                                                yield StreamChunk(
-                                                    content=answer_delta,
-                                                    tool_calls=None,
-                                                    finish_reason="",
-                                                    response_type="answer",
-                                                )
+                                    extractor = entry.get("_answer_extractor")
+                                    if extractor is None:
+                                        extractor = JSONFieldExtractor("answer")
+                                        entry["_answer_extractor"] = extractor
+                                    answer_delta = extractor.feed(func_data["arguments"])
+                                    if answer_delta:
+                                        yield StreamChunk(
+                                            content=answer_delta,
+                                            tool_calls=None,
+                                            finish_reason="",
+                                            response_type="answer",
+                                        )
                                     continue
 
                         # 发送 tool_call 类型的 StreamChunk（通知有工具调用进行中）

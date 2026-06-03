@@ -453,6 +453,185 @@ class TestAgentEngineSimple:
         assert tr_idx < fa_idx
 
     @pytest.mark.asyncio
+    async def test_final_answer_streamed_not_reemitted(self):
+        """契约：final_answer 已逐 token 流式发射（vLLM）时，终止只补 done，不重复发正文。
+
+        模拟 vLLM：final_answer 的 answer 字段作为 response_type="answer" 流式发出，
+        引擎据 answer_streamed=True 判断无需补发正文，避免答案出现两次。
+        """
+        mock_llm = AsyncMock()
+        # _response_to_chunks 会把 final_answer 内容作为 answer 类型 chunk 发出
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [make_final_answer_response("流式答案")]
+        )
+
+        engine, event_bus, registry = create_engine(mock_llm)
+        fa_events: list[AgentEvent] = []
+
+        async def collect(event: AgentEvent):
+            if event.type == EventType.FINAL_ANSWER:
+                fa_events.append(event)
+
+        event_bus.on(EventType.FINAL_ANSWER, collect)
+        state = await engine.execute("s1", "问题")
+
+        assert state.final_answer == "流式答案"
+        # 流式分片（content="流式答案"）+ done 标记（content=""），不应出现重复整段补发
+        streamed = [e for e in fa_events if e.data.get("content") and not e.done]
+        done_markers = [e for e in fa_events if e.done]
+        assert "".join(e.data["content"] for e in streamed) == "流式答案"
+        assert len(done_markers) == 1
+        # 不应存在「非流式整段补发」——即非 done 事件里出现完整答案的额外副本
+        full_copies = [e for e in streamed if e.data.get("content") == "流式答案"]
+        assert len(full_copies) <= 1
+
+    @pytest.mark.asyncio
+    async def test_natural_stop_streams_as_thought_only(self):
+        """契约：natural_stop 时 content 仅作为 THOUGHT 流式发射，终止只发 done。
+
+        不再补发 answer 正文（由前端把最后一段 thought 转为 answer），避免思考面板
+        与正文面板重复显示同一段内容。<think> 块在落库答案中被剥离。
+        """
+        mock_llm = AsyncMock()
+        mock_llm.stream_with_tools = mock_stream_with_tools_from_responses(
+            [make_text_response("<think>内部推理</think>这是最终回答", finish_reason="stop")]
+        )
+
+        engine, event_bus, registry = create_engine(mock_llm)
+        thought_events: list[AgentEvent] = []
+        answer_content_events: list[AgentEvent] = []
+        done_events: list[AgentEvent] = []
+
+        async def collect(event: AgentEvent):
+            if event.type == EventType.THOUGHT:
+                thought_events.append(event)
+            elif event.type == EventType.FINAL_ANSWER:
+                if event.done:
+                    done_events.append(event)
+                elif event.data.get("content"):
+                    answer_content_events.append(event)
+
+        event_bus.on(EventType.THOUGHT, collect)
+        event_bus.on(EventType.FINAL_ANSWER, collect)
+        state = await engine.execute("s1", "问题")
+
+        # 落库答案已 strip <think>
+        assert state.final_answer == "这是最终回答"
+        # content 作为 thought 流式发射过
+        assert thought_events
+        # natural_stop 不补发 answer 正文，仅一个 done 标记
+        assert answer_content_events == []
+        assert len(done_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_inline_final_answer_json_text(self):
+        """契约：模型把 final_answer 写成纯文本 JSON（千问）时，提取 answer 作为正文。
+
+        路由器从普通 content 中识别 {"answer":"..."} 并流式提取 answer 字段值，
+        前端正文面板得到纯文本答案，而非原始 JSON。
+        """
+        mock_llm = AsyncMock()
+
+        async def qwen_style_stream(messages, tools, **kwargs):
+            # 千问把 final_answer 调用写成纯文本，分片输出
+            for piece in ['{"answer": "', "你好！", "有什么", '可以帮你的吗？"}']:
+                yield StreamChunk(content=piece, response_type="content")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_llm.stream_with_tools = qwen_style_stream
+
+        engine, event_bus, registry = create_engine(mock_llm)
+        answer_chunks: list[str] = []
+        thought_chunks: list[str] = []
+
+        async def collect(event: AgentEvent):
+            if event.type == EventType.FINAL_ANSWER and event.data.get("content"):
+                answer_chunks.append(event.data["content"])
+            elif event.type == EventType.THOUGHT and event.data.get("content"):
+                thought_chunks.append(event.data["content"])
+
+        event_bus.on(EventType.FINAL_ANSWER, collect)
+        event_bus.on(EventType.THOUGHT, collect)
+        state = await engine.execute("s1", "你好")
+
+        # 答案为提取后的纯文本，不含 JSON 包裹
+        assert state.final_answer == "你好！有什么可以帮你的吗？"
+        assert "".join(answer_chunks) == "你好！有什么可以帮你的吗？"
+        # 原始 JSON 不应作为思考泄漏
+        assert "{" not in "".join(thought_chunks)
+
+    @pytest.mark.asyncio
+    async def test_final_answer_not_streamed_is_reemitted(self):
+        """契约：final_answer 未流式（Ollama 工具调用非增量）时，引擎补发完整正文。
+
+        模拟 Ollama：tool_calls 在最终 chunk 一次性返回，answer 从未作为 answer 类型
+        流式发出（answer_streamed=False）。引擎必须补发完整正文，否则前端正文为空。
+        """
+        mock_llm = AsyncMock()
+
+        async def ollama_style_stream(messages, tools, **kwargs):
+            # 仅在最终 chunk 携带 tool_calls，无任何 answer 类型分片
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_final",
+                        function_name="final_answer",
+                        arguments=json.dumps({"answer": "Ollama 答案"}),
+                    )
+                ],
+                finish_reason="tool_calls",
+                response_type="tool_call",
+            )
+
+        mock_llm.stream_with_tools = ollama_style_stream
+
+        engine, event_bus, registry = create_engine(mock_llm)
+        fa_events: list[AgentEvent] = []
+
+        async def collect(event: AgentEvent):
+            if event.type == EventType.FINAL_ANSWER:
+                fa_events.append(event)
+
+        event_bus.on(EventType.FINAL_ANSWER, collect)
+        state = await engine.execute("s1", "问题")
+
+        assert state.final_answer == "Ollama 答案"
+        # 必须补发完整正文（非 done 事件携带完整答案）
+        content_events = [e for e in fa_events if e.data.get("content") and not e.done]
+        assert any(e.data["content"] == "Ollama 答案" for e in content_events)
+        # 且恰好一个 done 标记
+        assert len([e for e in fa_events if e.done]) == 1
+
+    @pytest.mark.asyncio
+    async def test_malformed_final_answer_uses_fallback(self):
+        """契约：final_answer 参数三级容错均失败时，用兜底文案终止而非泄漏原始 JSON。"""
+        mock_llm = AsyncMock()
+
+        async def broken_stream(messages, tools, **kwargs):
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_final",
+                        function_name="final_answer",
+                        arguments="not valid json and no answer field",
+                    )
+                ],
+                finish_reason="tool_calls",
+                response_type="tool_call",
+            )
+
+        mock_llm.stream_with_tools = broken_stream
+
+        engine, event_bus, registry = create_engine(mock_llm)
+        state = await engine.execute("s1", "问题")
+
+        assert state.is_complete is True
+        # 不应把原始 JSON 当答案
+        assert "not valid json" not in state.final_answer
+        assert state.final_answer  # 非空兜底文案
+
+
+    @pytest.mark.asyncio
     async def test_parallel_tool_calls(self):
         """parallel_tool_calls=True 时，多个工具调用并行执行"""
         mock_llm = AsyncMock()
