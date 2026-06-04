@@ -706,7 +706,7 @@ function Chat() {
     onDismissPendingSessionFile: handleDismissPendingSessionFile,
   }
 
-  // 空态：标题 + 提问示例气泡 + 居中输入框（参考 WeKnora 新对话布局）
+  // 空态：标题 + 提问示例气泡 + 居中输入框
   // 加载历史消息期间不显示空态，避免「Artoo 欢迎页」闪现
   if (isEmpty && !isLoadingMessages) {
     return (

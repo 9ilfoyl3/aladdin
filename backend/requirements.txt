@@ -26,6 +26,9 @@ python-docx>=1.1.2
 openpyxl>=3.1.5
 python-pptx>=1.0.2
 
+# 中文分词（MMR 去冗余的词级 Jaccard；缺失时退化字符 bigram，不强依赖）
+jieba>=0.42.1
+
 # ML 模型依赖已移除，Embedding/Rerank 统一使用远程服务
 
 # OCR：统一使用远程 API（external_api / textin）

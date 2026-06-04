@@ -1,6 +1,6 @@
 """跨进程失效广播基础设施
 
-对齐 weknora system_setting.go 范式：
+采用「广播失效信号」范式：
 - 每进程一个 instance_id（uuid，构造时生成）。
 - publish: 写路径调用，只发 key + origin，不发 value（消息仅作失效信号）。
 - subscribe_loop: 各进程启动时后台订阅；收到消息比对 origin——
@@ -20,7 +20,7 @@ CHANNEL = "aladdin:invalidate"
 
 
 class InvalidationBus:
-    """跨进程失效广播。对齐 weknora system_setting.go 范式:
+    """跨进程失效广播。采用「广播失效信号」范式:
     - 每进程一个 instance_id(uuid，构造时生成)。
     - publish: 写路径调用，只发 key + origin，不发 value。
     - subscribe_loop: 各进程启动时后台订阅；收到消息比对 origin——

@@ -1,7 +1,7 @@
 """ApiKeyAuthenticator：API Key 校验 + 判型 + 身份合成（tenant-auth）。
 
 三处收敛点之一（认证侧）。替换原 verify_key 的"仅校验"，扩展为按 key_type 分支
-合成统一的 IdentityContext（WeKnora 式固定角色，不再有权限点字典）：
+合成统一的 IdentityContext（固定角色，不再有权限点字典）：
   - tenant_level   -> Virtual_Identity，role=None（机器身份，靠 kb_scope 裁剪）
   - user_level     -> 绑定用户的固定角色（admin/member）；通道操作级别钉死 tenant
   - external_agent -> 校验 X-External-User-Id；按 (key_source, external_user_id) 懒创建

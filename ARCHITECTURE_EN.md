@@ -133,7 +133,7 @@ The tool whitelist is configurable via the Agent preset's `allowed_tools`. `fina
 
 ## Progressive RAG System Prompt
 
-The default system prompt (`prompts/progressive_rag.py`) adapts WeKnora's "Assess-Reconnaissance-Plan-Execute" workflow around an **Evidence-First** principle:
+The default system prompt (`prompts/progressive_rag.py`) uses an "Assess-Reconnaissance-Plan-Execute" workflow around an **Evidence-First** principle:
 
 1. **Intent Assessment** — pure conversation (greetings / thanks) goes straight to `final_answer`; otherwise proceed to retrieval.
 2. **Phase 1 Reconnaissance** — grep_chunks (keyword) + knowledge_search (semantic) probe; on hits, **must** call list_knowledge_chunks for a deep read.

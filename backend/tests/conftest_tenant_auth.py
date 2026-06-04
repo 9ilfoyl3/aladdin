@@ -3,7 +3,7 @@
 鉴权判定（kb_authorization_decision）、口令哈希、JWT 被设计为纯函数/可注入，
 故大多数属性可不触达真实 PG/Milvus，以内存数据高频验证。
 
-权限模型已重构为 WeKnora 式「固定角色（admin/member）+ 归属轴」，
+权限模型为「固定角色（admin/member）+ 归属轴」，
 身份生成器一律产出 ``role``（admin / member / None），不再有 effective_permissions / role_ids。
 """
 

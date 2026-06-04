@@ -37,6 +37,9 @@ python-pptx>=1.0.2
 # Token 计算
 tiktoken>=0.7.0
 
+# 中文分词（MMR 去冗余的词级 Jaccard；缺失时退化字符 bigram，不强依赖）
+jieba>=0.42.1
+
 # 认证与授权
 PyJWT>=2.9
 bcrypt>=4.1

@@ -2,7 +2,7 @@
 
 ## Overview
 
-将 Artoo 的 Agent 层从固定管道（Planner→Executor→Reflector）重构为真正的 ReAct（Reasoning + Acting）循环架构，参考 WeKnora v0.6 的设计。LLM 作为 Agent 自主决策调用什么工具、搜几次、从什么角度搜，而不是由代码预设检索策略。
+将 Artoo 的 Agent 层从固定管道（Planner→Executor→Reflector）重构为真正的 ReAct（Reasoning + Acting）循环架构。LLM 作为 Agent 自主决策调用什么工具、搜几次、从什么角度搜，而不是由代码预设检索策略。
 
 核心变更：
 - 删除 orchestrator/planner/reflector/rewriter/router/executor 六个模块
@@ -180,7 +180,7 @@ class LLMProvider(ABC):
 
 ### 8. knowledge_search 内部检索流程
 
-参考 WeKnora `knowledgebase_search.go` + `knowledge_search.go` 确认的流程：
+参考典型的 knowledge base search + knowledge search 流程：
 
 ```
 knowledge_search(queries: ["q1", "q2", ...])
@@ -191,7 +191,7 @@ knowledge_search(queries: ["q1", "q2", ...])
 │   └── Sparse 稀疏检索（可选，远程服务支持时启用）
 │
 ├── 2. RRF 融合（Reciprocal Rank Fusion）
-│   ├── WeKnora 实现：vectorWeight/(k+vectorRank) + keywordWeight/(k+keywordRank)
+│   ├── RRF 公式：vectorWeight/(k+vectorRank) + keywordWeight/(k+keywordRank)
 │   ├── 支持可配置权重（默认 vector=0.7, keyword=0.3, k=60）
 │   ├── 仅 vector 结果时跳过 RRF，保留原始 embedding 分数
 │   └── 仅 keyword 结果时跳过 RRF，保留原始 BM25 分数
@@ -419,7 +419,7 @@ EventBus 同步发射事件，保证前端收到的事件顺序与执行顺序�
 
 ### 1. 为什么删除 Reflector？
 
-WeKnora 没有独立的 Reflector 模块。反思能力通过两种方式实现：
+本设计不设独立的 Reflector 模块。反思能力通过两种方式实现：
 - **System Prompt 引导**：prompt 中明确要求"每次检索后必须反思信息是否充分"
 - **thinking tool**：LLM 可以调用 thinking tool 进行显式反思
 
@@ -427,7 +427,7 @@ WeKnora 没有独立的 Reflector 模块。反思能力通过两种方式实现�
 
 ### 2. 为什么用 final_answer tool？
 
-WeKnora 同时支持自然停止和 final_answer tool。final_answer 的好处：
+本设计同时支持自然停止和 final_answer tool。final_answer 的好处：
 - 强制 LLM 在提交答案前"想清楚"
 - 答案内容在 tool arguments 中，解析更可靠
 - 减少 LLM 提前停止的概率
@@ -735,7 +735,7 @@ backend/app/agent/
 
 ### 1. 为什么删除 Reflector？
 
-WeKnora 没有独立的 Reflector 模块。反思能力通过两种方式实现：
+本设计不设独立的 Reflector 模块。反思能力通过两种方式实现：
 - **System Prompt 引导**：prompt 中明确要求"每次检索后必须反思信息是否充分"
 - **thinking tool**：LLM 可以调用 thinking tool 进行显式反思
 
@@ -746,7 +746,7 @@ WeKnora 没有独立的 Reflector 模块。反思能力通过两种方式实现�
 
 ### 2. 为什么用 final_answer tool 而不是自然停止？
 
-WeKnora 同时支持两种停止方式：
+本设计同时支持两种停止方式：
 - `finish_reason == "stop"` 且无 tool_calls → 自然停止，content 就是答案
 - 调用 `final_answer` tool → 显式停止
 
@@ -768,7 +768,7 @@ WeKnora 同时支持两种停止方式：
 
 ### 4. 上下文窗口管理
 
-参考 WeKnora 的做法：
+上下文窗口管理的做法：
 - 使用 token 估算器（BPE 或字符数近似）
 - 当 token 数接近 `max_context_tokens` 时，压缩历史消息
 - 压缩策略：保留 system prompt + 最近 N 轮 + 当前轮的所有 tool results

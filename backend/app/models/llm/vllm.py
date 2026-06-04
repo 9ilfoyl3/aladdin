@@ -10,6 +10,8 @@ from typing import AsyncIterator
 import httpx
 
 from app.models.llm.json_field_extractor import JSONFieldExtractor
+from app.models.llm.provider_detect import LLMProviderName, detect_provider
+from app.models.llm.thinking_dialect import apply_thinking
 from app.models.provider import (
     ChatResponse,
     LLMProvider,
@@ -22,7 +24,13 @@ from app.models.provider import (
 class VllmLLM(LLMProvider):
     """vLLM LLM Provider，基于 OpenAI 兼容接口"""
 
-    def __init__(self, base_url: str, model: str, api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "",
+        provider: str | None = None,
+    ):
         """初始化 vLLM 客户端
 
         Args:
@@ -31,15 +39,53 @@ class VllmLLM(LLMProvider):
                       或 https://ark.cn-beijing.volces.com/api/coding/v3
             model: 模型名称
             api_key: API 密钥（远端服务需要）
+            provider: 可选，显式指定模型厂商（thinking 方言分派用）。
+                      为空时根据 base_url 自动检测。前端无需配置——仅在需要覆盖
+                      自动检测时使用。
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        # 模型厂商：决定 thinking 开关注入到请求体的哪个字段（见 thinking_dialect）。
+        # 显式指定优先；否则按 base_url 自动检测。
+        if provider:
+            try:
+                self.provider = LLMProviderName(provider)
+            except ValueError:
+                self.provider = detect_provider(self.base_url, self.model)
+        else:
+            self.provider = detect_provider(self.base_url, self.model)
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        print(f"[vLLM] 初始化 - base_url: {self.base_url}, model: {self.model}, api_key 长度: {len(api_key) if api_key else 0}")
+        print(
+            f"[vLLM] 初始化 - base_url: {self.base_url}, model: {self.model}, "
+            f"provider: {self.provider.value}, api_key 长度: {len(api_key) if api_key else 0}"
+        )
         self._client = httpx.AsyncClient(timeout=120.0, headers=headers)
+
+    def _build_payload(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        """统一构造请求体，并按厂商方言注入 thinking 开关。
+
+        从 kwargs 中拦截 enable_thinking（前端唯一的思考开关），转交 thinking_dialect
+        按厂商写入正确的字段（chat_template_kwargs / 顶层 enable_thinking / thinking.type
+        等），而非盲目拼进顶层 payload。其余 kwargs（temperature、tool_choice 等）透传。
+        """
+        enable_thinking = kwargs.pop("enable_thinking", None)
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            **kwargs,
+        }
+        payload = apply_thinking(
+            payload,
+            enable_thinking,
+            self.base_url,
+            self.model,
+            self.provider,
+        )
+        return payload
 
     async def generate(self, messages: list[dict], **kwargs) -> str:
         """同步生成完整回复
@@ -50,16 +96,11 @@ class VllmLLM(LLMProvider):
         Returns:
             模型生成的完整文本
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 请求 URL: {url}")
-            print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, enable_thinking={payload.get('enable_thinking', 'not set')}")
+            print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, chat_template_kwargs={payload.get('chat_template_kwargs', 'not set')}")
             print(f"[vLLM] Client Headers: {dict(self._client.headers)}")
             resp = await self._client.post(url, json=payload)
             print(f"[vLLM] 实际请求 Headers: {dict(resp.request.headers)}")
@@ -87,12 +128,7 @@ class VllmLLM(LLMProvider):
         Yields:
             模型生成的文本片段
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 流式请求 URL: {url}")
@@ -150,13 +186,7 @@ class VllmLLM(LLMProvider):
         Returns:
             ChatResponse 包含 content、tool_calls、finish_reason、usage
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "tools": tools,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, tools=tools, **kwargs)
         # 如果 tools 为空列表，不发送 tools 参数（某些 API 不接受空 tools）
         if not tools:
             payload.pop("tools", None)
@@ -228,13 +258,7 @@ class VllmLLM(LLMProvider):
         Yields:
             StreamChunk 包含 content/tool_calls/finish_reason/response_type
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            "tools": tools,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
 
         # 累积 tool_calls 的状态（按 index 存储）
         tool_call_map: dict[int, dict] = {}

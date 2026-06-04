@@ -39,7 +39,7 @@ class TenantScopeModeEnum(str, Enum):
 class IdentityContext:
     """单次请求的统一身份。所有字段在认证/Guard 阶段一次性确定后只读。
 
-    权限模型为 WeKnora 式「固定角色 + 归属轴」，不再有任何权限点字典：
+    权限模型为「固定角色 + 归属轴」，不再有任何权限点字典：
     - ``role`` 表示租户内固定角色（admin / member），它来自 JWT 中的 ``User.role``，
       或由 API Key 模型在认证时设定（见下表）。不再存在 effective_permissions /
       role_ids 这类权限点快照。

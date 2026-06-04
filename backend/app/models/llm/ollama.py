@@ -33,6 +33,35 @@ class OllamaLLM(LLMProvider):
         self.model = model
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=120.0)
 
+    def _build_payload(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        """统一构造 Ollama /api/chat 请求体，翻译通用参数为 Ollama 原生格式。
+
+        Ollama 不认 OpenAI 风格的顶层 enable_thinking / temperature：
+        - enable_thinking（前端唯一思考开关）→ Ollama 原生布尔字段 `think`
+        - temperature 等采样参数 → 归入 `options` 对象
+        其余 kwargs 透传。这样思考开关对 Qwen3/DeepSeek 等 Ollama 推理模型真正生效。
+        """
+        enable_thinking = kwargs.pop("enable_thinking", None)
+        temperature = kwargs.pop("temperature", None)
+
+        options = kwargs.pop("options", None)
+        if not isinstance(options, dict):
+            options = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            **kwargs,
+        }
+        if options:
+            payload["options"] = options
+        if enable_thinking is not None:
+            payload["think"] = bool(enable_thinking)
+        return payload
+
     async def generate(self, messages: list[dict], **kwargs) -> str:
         """同步生成完整回复
 
@@ -42,12 +71,7 @@ class OllamaLLM(LLMProvider):
         Returns:
             模型生成的完整文本
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, **kwargs)
         try:
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
@@ -69,12 +93,7 @@ class OllamaLLM(LLMProvider):
         Yields:
             模型生成的文本片段
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, **kwargs)
         try:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:
                 resp.raise_for_status()
@@ -103,13 +122,7 @@ class OllamaLLM(LLMProvider):
         Returns:
             ChatResponse 包含 content、tool_calls、finish_reason、usage
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "stream": False,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, tools=tools, **kwargs)
         try:
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
@@ -158,13 +171,7 @@ class OllamaLLM(LLMProvider):
         Yields:
             StreamChunk 包含 content 或 tool_calls
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "stream": True,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
         try:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:
                 resp.raise_for_status()

@@ -272,6 +272,8 @@ def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
     if config.provider == "ollama":
         return OllamaLLM(base_url=config.base_url, model=config.model)
     else:
+        # provider 字段当前承载基础设施类型（ollama/vllm）。对于 vLLM 兼容端点，
+        # 实际模型厂商由 VllmLLM 内部根据 base_url 自动检测，用于 thinking 方言分派。
         return VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
 
 

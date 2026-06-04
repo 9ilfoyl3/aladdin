@@ -431,7 +431,7 @@ class AgentEngine:
                 #   • final_answer 标准工具 + 未流式（Ollama 工具调用非增量返回 / 兜底文案）
                 #     → 补发完整正文，否则前端正文面板为空
                 #   • natural_stop / stuck_loop → content 已作为 thought 流式发射，
-                #     前端在收到 done 时把最后一段 thought 转为 answer（与 WeKnora 一致），
+                #     前端在收到 done 时把最后一段 thought 转为 answer，
                 #     此处不补发，避免思考面板与正文面板重复显示同一段内容
                 need_emit_answer = (
                     verdict.reason == "final_answer"

@@ -83,7 +83,7 @@ class TestOllamaGenerate:
 
     @pytest.mark.asyncio
     async def test_generate_passes_kwargs(self, ollama: OllamaLLM):
-        """额外参数应传递到请求体"""
+        """采样参数应按 Ollama 契约归入 options，thinking 翻译为 think"""
         captured_body = {}
 
         def handler(request: httpx.Request):
@@ -98,9 +98,12 @@ class TestOllamaGenerate:
         )
 
         await ollama.generate(
-            [{"role": "user", "content": "test"}], temperature=0.7
+            [{"role": "user", "content": "test"}], temperature=0.7, enable_thinking=True
         )
-        assert captured_body["temperature"] == 0.7
+        # Ollama 采样参数在 options 对象内（顶层 temperature 会被忽略）
+        assert captured_body["options"]["temperature"] == 0.7
+        # 思考开关翻译为 Ollama 原生 think 字段
+        assert captured_body["think"] is True
         assert captured_body["stream"] is False
 
 
