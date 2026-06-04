@@ -19,10 +19,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class KBRetrievalConfig:
-    """知识库检索配置"""
+    """知识库检索配置
+
+    Attributes:
+        kb_id: 知识库 ID（会话文件源固定为 ``"session_files"``，对应共享 collection
+            ``kb_session_files``）。
+        priority: 优先级权重，主库 ``1.0``、辅助库 ``0.8``、会话文件源 ``1.2``
+            （高于普通辅助库，使刚上传的内容更易靠前）。
+        expr: 该源专属的 Milvus 标量过滤表达式（如会话源用
+            ``session_id == "{sid}"`` 强制会话隔离）。``None`` 时仅应用全局
+            ``filters.expr``；非 None 时与全局 expr 用 `` and `` 合并，二者均存在
+            则同时生效，单一存在则按非空者生效（与既有 ``filters.expr`` 行为兼容，
+            默认 None 时行为不变）。
+    """
 
     kb_id: str
-    priority: float = 1.0  # 优先级权重 (主库1.0, 辅助库0.8)
+    priority: float = 1.0  # 优先级权重 (主库1.0, 辅助库0.8, 会话文件源1.2)
+    expr: str | None = None  # 该源专属过滤表达式（如会话源 session_id 隔离）
 
 
 @dataclass
@@ -123,12 +136,28 @@ class MultiKBRetriever:
         sem = asyncio.Semaphore(self.max_concurrency)
 
         async def _guarded_search(cfg: KBRetrievalConfig) -> list[RetrievalResult]:
-            """带并发限流和超时保护的单源检索"""
+            """带并发限流和超时保护的单源检索
+
+            合并"全局 ``filters.expr``"与"该源 ``cfg.expr``"为最终下传到底层
+            ``HybridRetriever.search`` 的 expr：
+
+            - 二者均非 None → ``"({global}) and ({cfg})"``（保留各自子表达式优先级）
+            - 仅一方非 None → 用非空者
+            - 二者均为 None → 传 ``None``（保留既有行为不变）
+
+            会话文件源（``cfg.expr = 'session_id == "..."'``）由此叠加在全局 doc_id
+            过滤之上，跨会话不会泄露；正式 KB 源 ``cfg.expr`` 默认 None，行为与
+            bugfix 改造前一致。
+            """
+            if expr is not None and cfg.expr is not None:
+                effective_expr = f"({expr}) and ({cfg.expr})"
+            else:
+                effective_expr = expr if expr is not None else cfg.expr
             async with sem:
                 return await asyncio.wait_for(
                     self.retriever.search(
                         query, cfg.kb_id, top_k=source_top_k, skip_rerank=True,
-                        expr=expr, tenant_id=tenant_id,
+                        expr=effective_expr, tenant_id=tenant_id,
                     ),
                     timeout=self.per_source_timeout,
                 )

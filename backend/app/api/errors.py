@@ -32,6 +32,7 @@ class ErrorCodeEnum(str, Enum):
     MISSING_EXTERNAL_USER_ID = "missing_external_user_id"
     VALIDATION_ERROR = "validation_error"
     BAD_REQUEST = "bad_request"
+    FILE_TOO_LARGE = "file_too_large"
 
 
 class AppError(Exception):
@@ -113,9 +114,51 @@ class ValidationInputError(AppError):
     default_detail = "输入不合法"
 
 
+class FileTooLargeError(AppError):
+    """上传文件超过租户级 Upload_File_Size_Limit（session-file-upload，Req 3.2）。
+
+    在上传入口（解析前）按 ``UploadLimitResolver`` 求得的生效上限拦截，返回 413 并
+    在文案中带上允许的大小上限（MB），供前端明确提示。会话上传与知识库上传共用同一上限。
+    """
+
+    code = ErrorCodeEnum.FILE_TOO_LARGE
+    http_status = 413
+    default_detail = "上传文件超过允许的大小上限"
+
+    @classmethod
+    def from_limit(cls, limit_bytes: int) -> "FileTooLargeError":
+        """据生效字节上限构造异常，文案带上允许的 MB 上限（Req 3.2）。"""
+        limit_mb = limit_bytes // (1024 * 1024)
+        return cls(f"上传文件超过允许的大小上限（最大 {limit_mb}MB）")
+
+
 def register_exception_handlers(app: FastAPI) -> None:
-    """注册全局异常处理：把 AppError 统一转为 {"detail": ...} 响应。"""
+    """注册全局异常处理：把 AppError 统一转为 {"detail": ...} 响应。
+
+    会话上传 / 容量闸门两个业务异常（``SessionFileCountExceeded`` /
+    ``UploadCapExceeded``）不在 ``AppError`` 体系内（前者在 ``app.session_upload.service``
+    保持精简的领域异常形态、后者在 ``app.pipeline.pipeline`` 同时被 KB 异步路径以
+    "置文档 failed" 方式吞掉），但会从会话同步上传路径透出到 HTTP 层。统一在此映射
+    为 413 Payload Too Large，文案直接取异常消息（已含 used/incoming/cap 信息），
+    保证路由层零 try/catch（团队规范"Controller 层禁止 try-catch"）。延迟导入避免
+    循环依赖（service / pipeline 都依赖本模块）。
+    """
 
     @app.exception_handler(AppError)
     async def _handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=exc.http_status, content={"detail": exc.detail})
+
+    from app.pipeline.pipeline import UploadCapExceeded
+    from app.session_upload.service import SessionFileCountExceeded
+
+    @app.exception_handler(SessionFileCountExceeded)
+    async def _handle_session_file_count_exceeded(
+        _request: Request, exc: SessionFileCountExceeded
+    ) -> JSONResponse:
+        return JSONResponse(status_code=413, content={"detail": str(exc)})
+
+    @app.exception_handler(UploadCapExceeded)
+    async def _handle_upload_cap_exceeded(
+        _request: Request, exc: UploadCapExceeded
+    ) -> JSONResponse:
+        return JSONResponse(status_code=413, content={"detail": str(exc)})

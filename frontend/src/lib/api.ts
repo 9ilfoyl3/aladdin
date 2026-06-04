@@ -77,6 +77,16 @@ export interface KnowledgeBaseListParams {
   q?: string
 }
 
+// 知识库容量进度条（与后端 KBCapacityVO 对齐，session-file-upload Req 7）
+// 真实度量单位是 child chunk；文件数（approx_*_files）是辅助翻译，标"约"。
+export interface KBCapacity {
+  used_chunks: number
+  total_chunks: number
+  percent: number
+  approx_total_files: number
+  approx_used_files: number
+}
+
 // 知识库相关接口
 export const knowledgeBaseApi = {
   list: (params?: KnowledgeBaseListParams) => {
@@ -300,8 +310,27 @@ export const apiKeyApi = {
 const tenantHeader = (tenantId?: string): RequestInit =>
   tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
 
+// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 上传限制平台级
+// （单库 chunk 硬上限 KB_Chunk_Cap、会话 chunk 平台天花板 Session_Chunk_Ceiling）。
 export interface PlatformConfig {
   load_cache_ttl: number
+  kb_chunk_cap: number
+  session_chunk_ceiling: number
+}
+
+// 单库 chunk 上限的内存推荐值（仅 GET 返回；信息性建议，不自动写入，Req 5.1）
+export interface MemoryRecommendation {
+  detected_memory_gb: number
+  recommended_kb_chunk_cap: number
+  safety_factor: number
+  active_kbs_assumption: number
+  assumption: string
+}
+
+// 平台配置 GET/PUT 响应：附带 memory_recommendation（仅 GET 填充）与 changes（仅 PUT 填充）
+export interface PlatformConfigResponse extends PlatformConfig {
+  memory_recommendation?: MemoryRecommendation | null
+  changes?: { field: string; old: unknown; new: unknown }[]
 }
 
 export const systemApi = {
@@ -320,10 +349,11 @@ export const systemApi = {
       method: 'POST',
       ...tenantHeader(tenantId),
     }),
-  // 平台配置（超管专属）：collection 加载缓存 TTL
-  getPlatformConfig: () => request<PlatformConfig>('/system/platform-config'),
-  updatePlatformConfig: (data: PlatformConfig) =>
-    request<PlatformConfig>('/system/platform-config', {
+  // 平台配置（超管专属）：collection 加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
+  getPlatformConfig: () => request<PlatformConfigResponse>('/system/platform-config'),
+  // 仅提交本次改动的字段（后端 model_dump(exclude_unset=True, exclude_none=True)）
+  updatePlatformConfig: (data: Partial<PlatformConfig>) =>
+    request<PlatformConfigResponse>('/system/platform-config', {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
@@ -553,6 +583,70 @@ export interface SessionMessageItem {
   kb_id: string | null
   kb_ids: string[] | null
   created_at: string
+}
+
+// 会话级文件上传（session-file-upload Task 8 / Design C8）
+//
+// 后端入口 /api/sessions/{session_id}/files：
+// - POST  multipart(file)  → 同步建索引，返回 SessionFileResponse
+// - GET                    → 列出本会话已上传文件
+// - DELETE /{file_id}      → 移除单文件并释放配额（204）
+//
+// 鉴权：仅会话所有者本人；非 owner / 非存在 → 后端统一 404（存在性非泄露）。
+// 限制超额：413（FileTooLargeError / SessionFileCountExceeded / UploadCapExceeded），
+// detail 是后端已格式化的友好中文，由 request()/uploadFile() 透传到 toast。
+export interface SessionFileResponse {
+  id: string
+  session_id: string
+  filename: string
+  file_type: string | null
+  file_size: number | null
+  chunk_count: number
+  /** processing | completed | failed —— 同步建索引完成后通常为 completed */
+  status: string
+  created_at: string
+}
+
+// multipart 上传专用：复用 request() 的错误解析（含 413/422 友好中文 detail）
+async function uploadFile<T>(endpoint: string, formData: FormData): Promise<T> {
+  const url = `${BASE_URL}${endpoint}`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  })
+  if (!response.ok) {
+    if (response.status === 401) handleUnauthorized()
+    const error = await response.json().catch(() => ({}))
+    const detail = error.detail
+    if (Array.isArray(detail)) {
+      const msg = detail
+        .map((d) =>
+          d && typeof d === 'object' && 'field' in d
+            ? `${d.field}=${d.value} 超出允许范围 ${d.allowed_range}`
+            : typeof d === 'string'
+              ? d
+              : JSON.stringify(d)
+        )
+        .join('；')
+      throw new Error(msg || `请求失败: ${response.status}`)
+    }
+    throw new Error(typeof detail === 'string' ? detail : `请求失败: ${response.status}`)
+  }
+  if (response.status === 204) return undefined as T
+  return response.json()
+}
+
+export const sessionFileApi = {
+  list: (sessionId: string) =>
+    request<SessionFileResponse[]>(`/sessions/${sessionId}/files`),
+  upload: (sessionId: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return uploadFile<SessionFileResponse>(`/sessions/${sessionId}/files`, fd)
+  },
+  remove: (sessionId: string, fileId: string) =>
+    request<void>(`/sessions/${sessionId}/files/${fileId}`, { method: 'DELETE' }),
 }
 
 // 会话管理接口

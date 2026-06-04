@@ -16,6 +16,8 @@ import {
   Database,
   Server,
   RotateCcw,
+  Sparkles,
+  HardDrive,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { systemApi, type PlatformConfig } from '@/lib/api'
@@ -25,6 +27,7 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
@@ -48,9 +51,9 @@ interface SettingsDialogProps {
   isSuperAdmin?: boolean
 }
 
-type SectionId = 'appearance' | 'chunk' | 'retrieval' | 'platform'
+type SectionId = 'appearance' | 'chunk' | 'retrieval' | 'upload' | 'platform'
 
-// 检索配置（六档：分块/召回/融合/精排/去重/索引），与后端 SystemConfigResponse.retrieval 对应。
+// 检索配置（七档：分块/召回/融合/精排/去重/索引/上传限制），与后端 SystemConfigResponse.retrieval 对应。
 interface RetrievalConfig {
   parent_chunk_size: number
   child_chunk_size: number
@@ -69,6 +72,10 @@ interface RetrievalConfig {
   hnsw_ef: number
   hnsw_ef_construction: number
   hnsw_m: number
+  // 上传限制档（session-file-upload，租户级，Req 8.1/3.1/6.1）
+  upload_max_file_mb: number
+  session_max_files: number
+  session_chunk_cap: number
   [key: string]: string | number | boolean
 }
 
@@ -100,6 +107,13 @@ const FIELD_LABELS: Record<string, string> = {
   hnsw_ef_construction: 'HNSW 建索引 efConstruction',
   hnsw_m: 'HNSW 建索引 M',
   load_cache_ttl: '加载缓存 TTL',
+  // 上传限制档（session-file-upload，租户级）
+  upload_max_file_mb: '单文件大小上限',
+  session_max_files: '会话文件数上限',
+  session_chunk_cap: '会话累计 chunk 上限',
+  // 上传限制平台级（session-file-upload，超管可配）
+  kb_chunk_cap: '单库 chunk 硬上限',
+  session_chunk_ceiling: '会话 chunk 平台天花板',
 }
 
 // 值格式化：布尔显示开/关，空值显示 -，其余转字符串
@@ -109,7 +123,7 @@ function fmtVal(v: unknown): string {
   return String(v)
 }
 
-// 检索字段定义（用于「切片配置」「检索配置」表单渲染）
+// 检索字段定义（用于「切片配置」「检索配置」「上传限制」表单渲染）
 interface RetrievalField {
   key: string
   label: string
@@ -118,6 +132,12 @@ interface RetrievalField {
   step?: number
   min?: number
   max?: number
+  /** 是否在数字输入框上方额外渲染滑块（适合范围跨度大、便于直观调节的字段，如上传限制档）。 */
+  slider?: boolean
+  /** 滑块刻度步长（仅 slider=true 生效；不填取 step 或 1）。 */
+  sliderStep?: number
+  /** 数值后缀单位（用于滑块当前值展示，如 MB / 个 / 块）。 */
+  unit?: string
 }
 
 interface RetrievalGroup {
@@ -195,6 +215,58 @@ const RETRIEVAL_GROUPS: RetrievalGroup[] = [
   },
 ]
 
+// 上传限制档（session-file-upload，租户级；与后端 RETRIEVAL_FIELD_SPECS 中的
+// upload_max_file_mb / session_max_files / session_chunk_cap 一一对应。仅租户管理员可改）
+const UPLOAD_GROUPS: RetrievalGroup[] = [
+  {
+    title: '文件大小',
+    icon: HardDrive,
+    description: '单个上传文件允许的最大体积，会话上传与知识库上传共用同一上限',
+    fields: [
+      {
+        key: 'upload_max_file_mb',
+        label: '单文件大小上限',
+        type: 'number',
+        min: 1,
+        max: 100,
+        slider: true,
+        sliderStep: 1,
+        unit: 'MB',
+        hint: '范围 [1, 100] MB。超出此大小的文件在上传入口被拒绝（解析前判定）',
+      },
+    ],
+  },
+  {
+    title: '会话上传',
+    icon: Sparkles,
+    description: '对话会话内临时上传文件的累计配额，决定实时建索引的总耗时与共享 embedding 资源占用',
+    fields: [
+      {
+        key: 'session_max_files',
+        label: '会话文件数上限',
+        type: 'number',
+        min: 1,
+        max: 20,
+        slider: true,
+        sliderStep: 1,
+        unit: '个',
+        hint: '范围 [1, 20]。单个会话累计允许的临时上传文件数，移除文件释放配额',
+      },
+      {
+        key: 'session_chunk_cap',
+        label: '会话累计 chunk 上限',
+        type: 'number',
+        min: 500,
+        max: 20000,
+        slider: true,
+        sliderStep: 100,
+        unit: '块',
+        hint: '范围 [500, 20000]。单会话所有文件的 child chunk 之和；最终生效值会与平台天花板取较小者',
+      },
+    ],
+  },
+]
+
 // 系统设置弹窗：左侧分类导航 + 右侧设置内容。
 // 分项：外观（主题，所有人）/ 切片配置 + 检索配置（管理员，租户级）/ 平台配置（超管，TTL）。
 export default function SettingsDialog({
@@ -222,7 +294,7 @@ export default function SettingsDialog({
           <DialogTitle className="text-base font-semibold">设置</DialogTitle>
           <DialogDescription className="text-xs">
             {tenantId
-              ? `正在配置指定租户的切片与检索参数（租户 ${tenantId}）。`
+              ? `正在配置指定租户的切片、检索与上传限制参数（租户 ${tenantId}）。`
               : '根据你的偏好调整界面外观与文档处理行为。'}
           </DialogDescription>
         </DialogHeader>
@@ -252,6 +324,7 @@ export default function SettingsDialog({
             {active === 'appearance' && <AppearanceSection />}
             {active === 'chunk' && <RetrievalConfigSection tenantId={tenantId} mode="chunk" />}
             {active === 'retrieval' && <RetrievalConfigSection tenantId={tenantId} mode="retrieval" />}
+            {active === 'upload' && <RetrievalConfigSection tenantId={tenantId} mode="upload" />}
             {active === 'platform' && <PlatformSection />}
           </div>
         </div>
@@ -264,6 +337,7 @@ const ALL_SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'chunk', label: '切片配置', icon: Layers },
   { id: 'retrieval', label: '检索配置', icon: Search },
+  { id: 'upload', label: '上传限制', icon: HardDrive },
   { id: 'platform', label: '平台配置', icon: Server },
 ]
 
@@ -374,12 +448,20 @@ function AppearanceSection() {
 }
 
 // ============================================================
-// 切片配置 / 检索配置（租户级，经 RetrievalConfigStore 读写）
-// mode='chunk'：仅渲染分块三档；mode='retrieval'：渲染召回/融合/精排/去重/索引五档。
-// 两者共享同一份 form（GET /system/config 的 retrieval 分区），保存时整体 PUT。
+// 切片配置 / 检索配置 / 上传限制（租户级，经 RetrievalConfigStore 读写）
+// mode='chunk'：仅渲染分块三档；mode='retrieval'：渲染召回/融合/精排/去重/索引五档；
+// mode='upload'：渲染文件大小 + 会话上传两档（upload_max_file_mb / session_max_files
+// / session_chunk_cap）。三者共享同一份 form（GET /system/config 的 retrieval 分区），
+// 保存时整体 PUT；后端按嵌套 retrieval 字段处理（仅租户管理员可改，Req 8.1/8.3/8.5）。
 // ============================================================
 
-function RetrievalConfigSection({ tenantId, mode }: { tenantId?: string; mode: 'chunk' | 'retrieval' }) {
+function RetrievalConfigSection({
+  tenantId,
+  mode,
+}: {
+  tenantId?: string
+  mode: 'chunk' | 'retrieval' | 'upload'
+}) {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
   const [form, setForm] = useState<SystemConfig | null>(null)
@@ -412,7 +494,12 @@ function RetrievalConfigSection({ tenantId, mode }: { tenantId?: string; mode: '
     onError: (err) => toast.error(err instanceof Error ? err.message : '恢复默认失败'),
   })
 
-  const groups = mode === 'chunk' ? [CHUNK_GROUP] : RETRIEVAL_GROUPS
+  const groups =
+    mode === 'chunk'
+      ? [CHUNK_GROUP]
+      : mode === 'upload'
+        ? UPLOAD_GROUPS
+        : RETRIEVAL_GROUPS
   // 本分项涉及的字段集合（用于 diff 时只对比本页字段）
   const sectionKeys = new Set(groups.flatMap((g) => g.fields.map((f) => f.key)))
 
@@ -468,7 +555,8 @@ function RetrievalConfigSection({ tenantId, mode }: { tenantId?: string; mode: '
   async function handleReset() {
     const ok = await confirm({
       title: '恢复默认值',
-      description: '该操作会重置全部分块（父块/子块/重叠）与召回/融合/精排/去重/索引参数为默认值，确定继续？',
+      description:
+        '该操作会重置全部分块（父块/子块/重叠）、召回/融合/精排/去重/索引参数与上传限制（文件大小、会话文件数、会话累计 chunk）为默认值，确定继续？',
       confirmText: '恢复默认',
       variant: 'destructive',
     })
@@ -498,14 +586,62 @@ function RetrievalConfigSection({ tenantId, mode }: { tenantId?: string; mode: '
           <div className="grid grid-cols-2 gap-4">
             {group.fields.map((field) => {
               const value = form.retrieval?.[field.key]
+              const numericValue =
+                typeof value === 'number'
+                  ? value
+                  : value != null && value !== ''
+                    ? Number(value)
+                    : null
               return (
                 <div key={field.key} className="space-y-1.5">
-                  <Label className="text-xs">{field.label}</Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-xs">{field.label}</Label>
+                    {field.slider && numericValue != null && Number.isFinite(numericValue) && (
+                      <span className="text-[11px] font-mono tabular-nums text-muted-foreground">
+                        {numericValue}
+                        {field.unit ? ` ${field.unit}` : ''}
+                      </span>
+                    )}
+                  </div>
                   {field.type === 'switch' ? (
                     <div className="flex items-center h-9">
                       <Switch
                         checked={!!value}
                         onCheckedChange={(val) => updateRetrievalField(field.key, val)}
+                      />
+                    </div>
+                  ) : field.slider &&
+                    field.min != null &&
+                    field.max != null ? (
+                    <div className="space-y-2">
+                      <Slider
+                        value={[
+                          numericValue != null && Number.isFinite(numericValue)
+                            ? Math.min(Math.max(numericValue, field.min), field.max)
+                            : field.min,
+                        ]}
+                        min={field.min}
+                        max={field.max}
+                        step={field.sliderStep ?? field.step ?? 1}
+                        onValueChange={(vals: number[]) => updateRetrievalField(field.key, vals[0])}
+                      />
+                      <Input
+                        type="number"
+                        value={numericValue != null ? numericValue : ''}
+                        step={field.step ?? field.sliderStep ?? 1}
+                        min={field.min}
+                        max={field.max}
+                        onChange={(e) => updateRetrievalField(field.key, Number(e.target.value))}
+                        onBlur={(e) => {
+                          // 范围裁剪：用户手动输入越界时，blur 时拉回区间，避免 422 才发现
+                          const v = Number(e.target.value)
+                          if (!Number.isFinite(v)) return
+                          const min = field.min as number
+                          const max = field.max as number
+                          if (v < min) updateRetrievalField(field.key, min)
+                          else if (v > max) updateRetrievalField(field.key, max)
+                        }}
+                        className="h-9"
                       />
                     </div>
                   ) : (
@@ -549,13 +685,32 @@ function RetrievalConfigSection({ tenantId, mode }: { tenantId?: string; mode: '
 }
 
 // ============================================================
-// 平台配置（超管专属）：collection 加载缓存 TTL（Load_Cache_TTL）
+// 平台配置（超管专属）：
+//   - Load_Cache_TTL（collection 加载缓存有效期，秒）
+//   - KB_Chunk_Cap（单库 child chunk 硬上限，约束 Milvus 常驻内存）
+//   - Session_Chunk_Ceiling（会话 chunk 平台天花板，约束共享 embedding 资源）
+// 额外展示基于运行内存的 KB_Chunk_Cap 推荐值（信息性，不自动写入；超管可点
+// 「应用建议值」回填到表单后再确认保存，Req 5.4）。
 // ============================================================
+
+// 平台配置范围（与后端 PLATFORM_FIELD_SPECS 对齐，单一事实源在后端）
+const LOAD_CACHE_TTL_MIN = 0
+const LOAD_CACHE_TTL_MAX = 3600
+const KB_CHUNK_CAP_MIN = 10_000
+const KB_CHUNK_CAP_MAX = 10_000_000
+const SESSION_CHUNK_CEILING_MIN = 500
+const SESSION_CHUNK_CEILING_MAX = 100_000
+
+type PlatformFormState = {
+  load_cache_ttl: number | ''
+  kb_chunk_cap: number | ''
+  session_chunk_ceiling: number | ''
+}
 
 function PlatformSection() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
-  const [ttl, setTtl] = useState<number | null>(null)
+  const [form, setForm] = useState<PlatformFormState | null>(null)
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['platform-config'],
@@ -564,75 +719,224 @@ function PlatformSection() {
   })
 
   useEffect(() => {
-    if (data) setTtl(data.load_cache_ttl)
+    if (data) {
+      setForm({
+        load_cache_ttl: data.load_cache_ttl,
+        kb_chunk_cap: data.kb_chunk_cap,
+        session_chunk_ceiling: data.session_chunk_ceiling,
+      })
+    }
   }, [data])
 
   const saveMutation = useMutation({
-    mutationFn: (payload: PlatformConfig) => systemApi.updatePlatformConfig(payload),
+    mutationFn: (payload: Partial<PlatformConfig>) => systemApi.updatePlatformConfig(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['platform-config'] })
       toast.success('平台配置已保存')
     },
+    // 后端 422 范围错误经 request 通用处理拼成「字段=值 超出允许范围 [lo, hi]」
     onError: (err) => toast.error(err instanceof Error ? err.message : '保存失败'),
   })
 
+  function updateField(key: keyof PlatformFormState, raw: string) {
+    if (!form) return
+    // 空字符串保留为 ''，避免 Number('') = 0 把已配置值改成 0
+    setForm({ ...form, [key]: raw === '' ? '' : Number(raw) })
+  }
+
+  // 应用内存推荐：把建议值回填到 kb_chunk_cap 输入框，**不自动保存**
+  // 超管确认后仍需点击「保存」走 PUT 流程（Req 5.4）。
+  function applyRecommendedKbCap() {
+    if (!form || !data?.memory_recommendation) return
+    const recommended = data.memory_recommendation.recommended_kb_chunk_cap
+    setForm({ ...form, kb_chunk_cap: recommended })
+    toast('已填入推荐值，确认后点击保存生效')
+  }
+
   async function handleSave() {
-    if (ttl == null) return
-    // 无变更短路：与服务器当前值一致则不提交
-    if (ttl === data?.load_cache_ttl) {
+    if (!form || !data) return
+    // 收集本次改动字段（与服务器当前值不同 + 非空）
+    const patch: Partial<PlatformConfig> = {}
+    const localChanges: { field: string; label: string; old: unknown; new: unknown }[] = []
+    const fields: (keyof PlatformFormState)[] = [
+      'load_cache_ttl',
+      'kb_chunk_cap',
+      'session_chunk_ceiling',
+    ]
+    for (const k of fields) {
+      const next = form[k]
+      const prev = data[k]
+      if (next === '' || next == null) continue // 空输入视为未修改，避免 NaN/0 落库
+      if (next !== prev) {
+        patch[k] = next as number
+        localChanges.push({ field: k, label: FIELD_LABELS[k] ?? k, old: prev, new: next })
+      }
+    }
+
+    if (localChanges.length === 0) {
       toast('未检测到修改')
       return
     }
+
     const ok = await confirm({
       title: '确认保存平台配置',
       description: (
-        <div>
-          {FIELD_LABELS.load_cache_ttl}：{fmtVal(data?.load_cache_ttl)} → {fmtVal(ttl)}（秒）
+        <div className="space-y-1">
+          {localChanges.map((c) => (
+            <div key={c.field}>
+              {c.label}：{fmtVal(c.old)} → {fmtVal(c.new)}
+            </div>
+          ))}
         </div>
       ),
       confirmText: '确认保存',
       variant: 'default',
     })
-    if (ok) saveMutation.mutate({ load_cache_ttl: ttl })
+    if (ok) saveMutation.mutate(patch)
   }
 
   if (isError) {
-    return (
-      <div className="text-sm text-muted-foreground">平台配置加载失败。</div>
-    )
+    return <div className="text-sm text-muted-foreground">平台配置加载失败。</div>
   }
 
+  const recommendation = data?.memory_recommendation ?? null
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="space-y-0.5">
         <h3 className="text-sm font-semibold">平台配置</h3>
-        <p className="text-xs text-muted-foreground">全平台基础设施参数，仅超级管理员可见，对全平台生效。</p>
+        <p className="text-xs text-muted-foreground">
+          全平台基础设施参数，仅超级管理员可见，对全平台生效。
+        </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label className="text-xs">加载缓存 TTL（load_cache_ttl）</Label>
-          <Input
-            type="number"
-            min={0}
-            max={3600}
-            value={ttl != null ? ttl : ''}
-            onChange={(e) => setTtl(Number(e.target.value))}
-            className="h-9"
-            disabled={isLoading}
-          />
-          <p className="text-[11px] text-muted-foreground">
-            控制 collection 加载缓存有效期（秒），影响检索延迟与新数据可见性，对全平台生效。范围 [0, 3600]。
-          </p>
+      {/* 加载缓存 TTL */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2.5">
+          <Server className="h-4 w-4 text-primary shrink-0" />
+          <div>
+            <h3 className="text-sm font-semibold">加载缓存</h3>
+            <p className="text-[11px] text-muted-foreground">影响检索延迟与新数据可见性</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs">加载缓存 TTL（load_cache_ttl）</Label>
+            <Input
+              type="number"
+              min={LOAD_CACHE_TTL_MIN}
+              max={LOAD_CACHE_TTL_MAX}
+              value={form?.load_cache_ttl ?? ''}
+              onChange={(e) => updateField('load_cache_ttl', e.target.value)}
+              className="h-9"
+              disabled={isLoading || !form}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              控制 collection 加载缓存有效期（秒），范围 [{LOAD_CACHE_TTL_MIN}, {LOAD_CACHE_TTL_MAX}]。
+            </p>
+          </div>
         </div>
       </div>
 
-      <div className="flex justify-end pt-2">
+      {/* 上传限制平台级（session-file-upload） */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2.5">
+          <Database className="h-4 w-4 text-primary shrink-0" />
+          <div>
+            <h3 className="text-sm font-semibold">上传限制（平台级）</h3>
+            <p className="text-[11px] text-muted-foreground">
+              单库 chunk 硬上限约束 Milvus 常驻内存；会话 chunk 天花板约束共享 embedding 资源
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-xs">单库 chunk 硬上限（kb_chunk_cap）</Label>
+              {recommendation && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[11px] text-primary hover:text-primary cursor-pointer"
+                  onClick={applyRecommendedKbCap}
+                  disabled={!form}
+                  title={`基于运行内存推荐：${recommendation.recommended_kb_chunk_cap.toLocaleString()}`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  应用建议值
+                </Button>
+              )}
+            </div>
+            <Input
+              type="number"
+              min={KB_CHUNK_CAP_MIN}
+              max={KB_CHUNK_CAP_MAX}
+              step={1000}
+              value={form?.kb_chunk_cap ?? ''}
+              onChange={(e) => updateField('kb_chunk_cap', e.target.value)}
+              className="h-9"
+              disabled={isLoading || !form}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              单个知识库允许容纳的 child chunk 总数上限，范围 [
+              {KB_CHUNK_CAP_MIN.toLocaleString()}, {KB_CHUNK_CAP_MAX.toLocaleString()}]。
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">会话 chunk 平台天花板（session_chunk_ceiling）</Label>
+            <Input
+              type="number"
+              min={SESSION_CHUNK_CEILING_MIN}
+              max={SESSION_CHUNK_CEILING_MAX}
+              step={500}
+              value={form?.session_chunk_ceiling ?? ''}
+              onChange={(e) => updateField('session_chunk_ceiling', e.target.value)}
+              className="h-9"
+              disabled={isLoading || !form}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              单会话累计 chunk 上限的全局天花板，租户配置不得超过此值（生效取 min），范围 [
+              {SESSION_CHUNK_CEILING_MIN.toLocaleString()}, {SESSION_CHUNK_CEILING_MAX.toLocaleString()}]。
+            </p>
+          </div>
+        </div>
+
+        {/* 内存推荐面板（信息性，仅展示；点「应用建议值」回填后由超管确认保存） */}
+        {recommendation && (
+          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <HardDrive className="h-3.5 w-3.5 text-primary" />
+              内存推荐
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+              <div>
+                检测内存：
+                <span className="text-foreground font-medium">
+                  {recommendation.detected_memory_gb > 0
+                    ? `${recommendation.detected_memory_gb} GiB`
+                    : '检测失败（已降级保守默认）'}
+                </span>
+              </div>
+              <div>
+                推荐 chunk 上限：
+                <span className="text-foreground font-medium">
+                  {recommendation.recommended_kb_chunk_cap.toLocaleString()}
+                </span>
+              </div>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">{recommendation.assumption}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end pt-2 border-t border-border">
         <Button
           type="button"
           onClick={handleSave}
-          disabled={isLoading || saveMutation.isPending || ttl == null}
-          className="gap-2 cursor-pointer"
+          disabled={isLoading || saveMutation.isPending || !form}
+          className="gap-2 cursor-pointer mt-4"
         >
           {saveMutation.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           保存平台配置

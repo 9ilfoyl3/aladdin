@@ -32,6 +32,11 @@ from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.auth.kb_scope import assemble_allowed_kb_ids
 from app.auth.validators import validate_org_permission
+from app.retrieval.config import (
+    RETRIEVAL_FIELD_SPECS,
+    get_platform_config_store,
+    get_retrieval_config_store,
+)
 from app.schema.api import PageResult
 from app.schema.db import Document, KnowledgeBase, KnowledgeBaseGrant, Tenant, User
 from app.storage.milvus import MilvusClient, get_milvus_client
@@ -39,6 +44,10 @@ from app.storage.milvus import MilvusClient, get_milvus_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/knowledge-bases", tags=["KnowledgeBase"])
+
+# 单 MB 文件保守估算的 child chunk 密度（chunk/MB），仅用于「约可容纳 N 份文档」的辅助翻译展示。
+# 真实入库判定始终以精确 child chunk 数（KB_Chunk_Cap，Req 4）为准，而非该近似文件数（Req 7.5）。
+CHUNK_DENSITY = 300
 
 
 # ============================================================
@@ -60,6 +69,26 @@ class KnowledgeBaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
     config: dict | None = None
+
+
+class KBCapacityVO(BaseModel):
+    """知识库容量进度条（用户侧可视化，Req 7）。
+
+    真实度量单位为 child chunk：分母 = 平台 Effective KB_Chunk_Cap，分子 = 该库当前精确
+    child chunk 数（聚合 ``Document.chunk_count``）。文件数（``approx_*_files``）仅作辅助
+    翻译，标「约」，真实入库判定以精确 chunk 数为准（Req 7.5）。
+    """
+
+    # 该库当前精确 child chunk 数（聚合 Document.chunk_count）
+    used_chunks: int = Field(..., description="该库当前精确 child chunk 数")
+    # 总容量 = 平台 Effective KB_Chunk_Cap（Req 7.6）
+    total_chunks: int = Field(..., description="总容量（平台 KB_Chunk_Cap）")
+    # 已用百分比 = used / total，封顶 1.0（Req 7.3）
+    percent: float = Field(..., description="已用百分比（0~1，封顶 1.0）")
+    # 约可容纳文档数 = total_chunks // 单文件估算 chunk，向下取整（Req 7.4，标「约」）
+    approx_total_files: int = Field(..., description="约可容纳文档数（向下取整，近似）")
+    # 已传文档数（精确，Document 计数）
+    approx_used_files: int = Field(..., description="已传文档数（精确）")
 
 
 class KnowledgeBaseResponse(BaseModel):
@@ -87,6 +116,8 @@ class KnowledgeBaseResponse(BaseModel):
     # 当前请求者对该库是否有内容写权限（owner/组织读写/write 共享）。
     # 供前端在文档页显隐上传/新建/删除等写操作入口；真正鉴权仍在后端守卫。
     can_write: bool | None = None
+    # 容量进度条（Req 7）。列表/详情按需填充；未计算时为 None（向后兼容）。
+    capacity: KBCapacityVO | None = None
 
 
 class ShareRequest(BaseModel):
@@ -117,6 +148,77 @@ def _get_milvus() -> MilvusClient:
     return get_milvus_client()
 
 
+def _compute_capacity(
+    used_chunks: int,
+    used_files: int,
+    kb_chunk_cap: int,
+    upload_max_file_mb: int,
+) -> KBCapacityVO:
+    """纯函数：依据精确已用 chunk / 已传文档数 + 平台上限 + 租户单文件上限计算容量进度条。
+
+    - ``total_chunks`` = 平台 Effective KB_Chunk_Cap（分母，Req 7.2/7.6）。
+    - ``percent`` = used / total，封顶 1.0；total<=0 时记 0（防除零，Req 7.3）。
+    - ``approx_total_files`` = total_chunks // (upload_max_file_mb × CHUNK_DENSITY)，向下取整
+      （单文件估算 chunk = 租户上传上限 × 保守密度，Req 7.4）；估算分母<=0 时记 0。
+    - ``approx_used_files`` = 已传文档数（精确）。
+
+    入参均按非负兜底处理，保证输出稳定（不抛错）。
+    """
+    used = max(0, used_chunks)
+    total = max(0, kb_chunk_cap)
+    used_docs = max(0, used_files)
+
+    percent = min(1.0, used / total) if total > 0 else 0.0
+
+    per_file_chunks = max(0, upload_max_file_mb) * CHUNK_DENSITY
+    approx_total_files = total // per_file_chunks if per_file_chunks > 0 else 0
+
+    return KBCapacityVO(
+        used_chunks=used,
+        total_chunks=total,
+        percent=percent,
+        approx_total_files=approx_total_files,
+        approx_used_files=used_docs,
+    )
+
+
+async def _build_capacity(
+    db: AsyncSession,
+    kb: KnowledgeBase,
+    *,
+    used_files: int | None = None,
+) -> KBCapacityVO:
+    """读平台 KB_Chunk_Cap + 该库租户的 Upload_File_Size_Limit，聚合该库精确 chunk/文档数，
+    组装 ``KBCapacityVO``。
+
+    - 已用 chunk = 聚合该库 ``Document.chunk_count`` 之和（精确，Req 7.2）。
+    - 已传文档数：若调用方已批量算出则复用，否则单独 count（Req 7.4 的 approx_used_files）。
+    - 配置读失败由 Store 自身降级安全默认（不抛错）。
+    """
+    platform_cfg = await get_platform_config_store().get_effective()
+    retrieval_cfg = await get_retrieval_config_store().get_effective(kb.tenant_id)
+
+    used_chunks = (
+        await db.execute(
+            select(func.coalesce(func.sum(Document.chunk_count), 0)).where(Document.kb_id == kb.id)
+        )
+    ).scalar_one()
+
+    if used_files is None:
+        used_files = (
+            await db.execute(
+                select(func.count(Document.id)).where(Document.kb_id == kb.id)
+            )
+        ).scalar_one()
+
+    return _compute_capacity(
+        used_chunks=int(used_chunks or 0),
+        used_files=int(used_files or 0),
+        kb_chunk_cap=platform_cfg.kb_chunk_cap,
+        upload_max_file_mb=retrieval_cfg.upload_max_file_mb,
+    )
+
+
 def _to_resp(
     kb: KnowledgeBase,
     doc_count: int | None = None,
@@ -125,6 +227,7 @@ def _to_resp(
     tenant_name: str | None = None,
     share_count: int | None = None,
     can_write: bool | None = None,
+    capacity: KBCapacityVO | None = None,
 ) -> KnowledgeBaseResponse:
     return KnowledgeBaseResponse(
         id=kb.id, name=kb.name, description=kb.description, config=kb.config,
@@ -134,6 +237,7 @@ def _to_resp(
         org_permission=kb.org_permission,
         owner_username=owner_username, tenant_name=tenant_name,
         share_count=share_count, can_write=can_write,
+        capacity=capacity,
     )
 
 
@@ -305,6 +409,22 @@ async def list_knowledge_bases(
         )
         share_count_map = {kid: cnt for kid, cnt in sc.all()}
 
+    # 容量进度条（Req 7）：聚合本页各库精确 child chunk 数（Document.chunk_count 之和）；
+    # 平台 KB_Chunk_Cap 全局只读一次，租户级 Upload_File_Size_Limit 按页内租户去重读取。
+    page_kb_ids = [kb.id for kb in kbs]
+    used_chunk_map: dict[str, int] = {}
+    if page_kb_ids:
+        ucr = await db.execute(
+            select(Document.kb_id, func.coalesce(func.sum(Document.chunk_count), 0))
+            .where(Document.kb_id.in_(page_kb_ids)).group_by(Document.kb_id)
+        )
+        used_chunk_map = {row[0]: int(row[1] or 0) for row in ucr.all()}
+    platform_cfg = await get_platform_config_store().get_effective()
+    upload_mb_by_tenant: dict[str | None, int] = {}
+    for tid in {kb.tenant_id for kb in kbs}:
+        cfg = await get_retrieval_config_store().get_effective(tid)
+        upload_mb_by_tenant[tid] = cfg.upload_max_file_mb
+
     items = [
         _to_resp(
             kb, count_map.get(kb.id, 0),
@@ -314,6 +434,14 @@ async def list_knowledge_bases(
                 share_count_map.get(kb.id, 0)
                 if subject is not None and kb.owner_user_id == subject
                 else None
+            ),
+            capacity=_compute_capacity(
+                used_chunks=used_chunk_map.get(kb.id, 0),
+                used_files=count_map.get(kb.id, 0),
+                kb_chunk_cap=platform_cfg.kb_chunk_cap,
+                upload_max_file_mb=upload_mb_by_tenant.get(
+                    kb.tenant_id, RETRIEVAL_FIELD_SPECS["upload_max_file_mb"].default
+                ),
             ),
         )
         for kb in kbs
@@ -376,7 +504,7 @@ async def get_knowledge_base(
         kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
         access=KbAccessEnum.WRITE, grants=grants,
     )
-    return _to_resp(kb, can_write=write_decision.allow)
+    return _to_resp(kb, can_write=write_decision.allow, capacity=await _build_capacity(db, kb))
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseResponse)

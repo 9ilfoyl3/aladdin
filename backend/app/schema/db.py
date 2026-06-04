@@ -229,6 +229,10 @@ class RetrievalConfigRow(Base):
     hnsw_ef: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hnsw_ef_construction: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hnsw_m: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 上传限制档 Upload_Tier（session-file-upload，租户级；缺失由 effective_from_raw 兜底）
+    upload_max_file_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    session_max_files: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    session_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -244,6 +248,9 @@ class PlatformConfigRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default="global")
     load_cache_ttl: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # collection 加载缓存有效期（秒）
+    # 上传限制平台级（session-file-upload，超管可配；缺失由 effective_from_raw 兜底）
+    kb_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 单库 child chunk 硬上限
+    session_chunk_ceiling: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 会话 chunk 平台天花板
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -317,6 +324,63 @@ class ChatMessageRecord(Base, TenantScopedMixin):
 
     # 关联
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
+
+
+# ============================================================
+# session-file-upload：会话级文件上传新增模型
+# 会话上传文件的向量存共享 Milvus collection（kb_session_files，按 session_id 标量隔离），
+# 文件元数据与 chunk 文本存以下两张独立关系表（不复用受 FK 约束的 Chunk 表，因 Chunk.kb_id /
+# Chunk.doc_id 均 NOT NULL + 外键，无法承载会话文件）。两表为全新表，经 init_db 的
+# create_all 自动建表（与 tenant-auth / kb-retrieval-optimization 新表同款做法，无需迁移脚本）。
+# ============================================================
+
+
+class SessionFile(Base, TenantScopedMixin):
+    """会话级上传文件元数据。
+
+    与 ChatSession 绑定（session_id FK + ondelete CASCADE），删会话时 DB 自动删本表行；
+    共享 collection 中的向量由 SessionUploadService.cleanup_session_files 按 session_id 显式删除
+    （DB 级联管不到 Milvus）。`id` 复用为该文件在 Milvus 中向量的 doc_id，使
+    delete_by_doc_id 能精准移除单文件向量（Req 1.8）。`chunk_count` 供会话累计 chunk 配额
+    聚合（Req 6.4），移除文件即释放（Req 6.7）。继承 TenantScopedMixin（提供 tenant_id 列 +
+    方案 B 租户兜底过滤），与既有受隔离模型一致。
+    """
+    __tablename__ = "session_files"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # 文件 ID（= 用作 Milvus doc_id）
+    session_id: Mapped[str] = mapped_column(
+        String, ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    file_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 该文件 child chunk 数（会话累计配额聚合用）
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="completed")  # processing | completed | failed
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SessionChunk(Base, TenantScopedMixin):
+    """会话文件的 chunk 文本（父/子块）。
+
+    与 SessionFile 绑定（file_id FK + ondelete CASCADE），删会话（级联删 SessionFile）或删单文件
+    时自动清理本表行。不复用正式 `Chunk` 表（其 kb_id / doc_id 均 NOT NULL + 外键，无法承载会话
+    文件）。`id` = Milvus 中该 chunk 的 chunk_id；父块扩展时按 parent_id 从本表取内容（与正式库
+    走 Chunk 表的父块扩展对称，但查独立表）。无指向 documents / knowledge_bases 的外键，规避
+    Chunk 表的 FK 约束问题。
+    """
+    __tablename__ = "session_chunks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # = Milvus chunk_id
+    file_id: Mapped[str] = mapped_column(
+        String, ForeignKey("session_files.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    parent_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 # ============================================================

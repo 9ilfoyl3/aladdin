@@ -1,12 +1,16 @@
 import { useState, useRef, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi } from '@/lib/api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi } from '@/lib/api'
+import type { SessionFileResponse } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
+import type { PendingSessionFile } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import { useSession } from '@/lib/session-context'
+import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
 
 interface KnowledgeBaseItem {
@@ -35,11 +39,16 @@ function Chat() {
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const [contextUsage, setContextUsage] = useState<{ current: number; max: number }>({ current: 0, max: 0 })
+  // 会话文件本地占位（POST 在飞 / 失败提示），与服务端列表一起展示。
+  // 同步上传完成后由 react-query 刷新列表 + 清掉对应占位。
+  const [pendingFiles, setPendingFiles] = useState<PendingSessionFile[]>([])
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
 
   const { currentSessionId, setCurrentSessionId, refreshSessions } = useSession()
+  const confirm = useConfirm()
+  const queryClient = useQueryClient()
 
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
@@ -56,6 +65,19 @@ function Chat() {
     queryKey: ['agent-presets'],
     queryFn: () => agentPresetApi.list(),
   })
+
+  // 会话上传文件列表（仅在会话存在时拉取；切会话时随 currentSessionId 重新拉）
+  // session-file-upload Task 16 / Req 1.8
+  const { data: sessionFiles = [] } = useQuery<SessionFileResponse[]>({
+    queryKey: ['session-files', currentSessionId],
+    queryFn: () => sessionFileApi.list(currentSessionId!),
+    enabled: !!currentSessionId,
+  })
+
+  // 切换会话时清掉本地占位（避免 A 会话上传中切到 B 仍显示）
+  useEffect(() => {
+    setPendingFiles([])
+  }, [currentSessionId])
 
   // 默认选中 is_default 的 Agent 预设
   useEffect(() => {
@@ -575,6 +597,84 @@ function Chat() {
     )
   }
 
+  // ==========================================================================
+  // 会话文件上传 / 移除（session-file-upload Task 16）
+  //
+  // 设计：上传时若用户尚未开会话，先调 POST /sessions 建会话，再 POST 文件；
+  // 同步建索引完成后由后端返回 SessionFileResponse，react-query 刷新列表 +
+  // 清掉本地占位；并发上传按文件逐个 await 排队，避免同时打多份解析占用 API
+  // 进程的 embed 信号量。失败则将占位状态置 failed + toast 后端友好中文 detail。
+  // ==========================================================================
+
+  async function ensureSessionId(): Promise<string | null> {
+    if (currentSessionId) return currentSessionId
+    try {
+      const session = await sessionApi.create({ title: '新对话' })
+      pendingSendSessionRef.current = session.id
+      setCurrentSessionId(session.id)
+      refreshSessions()
+      return session.id
+    } catch (err) {
+      console.error('自动创建会话失败', err)
+      toast.error(err instanceof Error ? err.message : '创建会话失败')
+      return null
+    }
+  }
+
+  async function handleUploadSessionFiles(files: FileList) {
+    const sessionId = await ensureSessionId()
+    if (!sessionId) return
+
+    // 逐个串行上传（同步建索引耗时较长，避免并发打爆 API 进程的 embed 信号量）
+    for (const file of Array.from(files)) {
+      const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`
+      setPendingFiles((prev) => [
+        ...prev,
+        { localId, filename: file.name, size: file.size, status: 'uploading' },
+      ])
+      try {
+        await sessionFileApi.upload(sessionId, file)
+        // 成功：刷新服务端列表 + 清占位（让服务端条目无缝替换）
+        await queryClient.invalidateQueries({ queryKey: ['session-files', sessionId] })
+        setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '上传失败'
+        toast.error(msg)
+        // 失败的占位保留并标红，让用户能看到失败原因；点击 X 才本地清掉
+        setPendingFiles((prev) =>
+          prev.map((p) =>
+            p.localId === localId ? { ...p, status: 'failed', errorMessage: msg } : p
+          )
+        )
+      }
+    }
+  }
+
+  async function handleRemoveSessionFile(fileId: string) {
+    if (!currentSessionId) return
+    const target = sessionFiles.find((f) => f.id === fileId)
+    const ok = await confirm({
+      title: '移除会话文件',
+      description: (
+        <>
+          确定要从本会话移除文件{target ? `「${target.filename}」` : ''}吗？该文件的索引将被删除，后续问答不会再命中其内容。
+        </>
+      ),
+      confirmText: '移除',
+    })
+    if (!ok) return
+    try {
+      await sessionFileApi.remove(currentSessionId, fileId)
+      await queryClient.invalidateQueries({ queryKey: ['session-files', currentSessionId] })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '移除失败')
+    }
+  }
+
+  function handleDismissPendingSessionFile(localId: string) {
+    setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
+  }
+
   const selectedModelName = llmConfigs.find((c) => c.id === selectedModel)?.name || ''
 
   const isEmpty = messages.length === 0
@@ -597,6 +697,13 @@ function Chat() {
     onModelChange: setSelectedModel,
     onPresetChange: setSelectedPreset,
     onToggleAuxiliaryKb: toggleAuxiliaryKb,
+    // 会话文件上传：始终可用（即使未选 KB，Req 1.4），仅在流式或建索引时禁用由组件内判断
+    sessionFiles,
+    pendingSessionFiles: pendingFiles,
+    canUploadSessionFile: !isStreaming,
+    onUploadSessionFiles: handleUploadSessionFiles,
+    onRemoveSessionFile: handleRemoveSessionFile,
+    onDismissPendingSessionFile: handleDismissPendingSessionFile,
   }
 
   // 空态：标题 + 提问示例气泡 + 居中输入框（参考 WeKnora 新对话布局）

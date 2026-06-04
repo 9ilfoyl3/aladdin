@@ -22,6 +22,7 @@ from app.retrieval.config import (
     validate_patch,
     validate_platform_patch,
 )
+from app.session_upload.memory import recommend_kb_chunk_cap
 from app.storage.invalidation import get_invalidation_bus
 from app.storage.milvus import MilvusClient
 
@@ -83,6 +84,10 @@ class RetrievalConfigSection(BaseModel):
     hnsw_ef: int
     hnsw_ef_construction: int
     hnsw_m: int
+    # 上传限制档 Upload_Tier（session-file-upload，租户级，Req 3.1/6.1/8.1）
+    upload_max_file_mb: int
+    session_max_files: int
+    session_chunk_cap: int
 
     @classmethod
     def from_config(cls, config: RetrievalConfig) -> "RetrievalConfigSection":
@@ -120,6 +125,10 @@ class RetrievalConfigUpdate(BaseModel):
     hnsw_ef: int | None = None
     hnsw_ef_construction: int | None = None
     hnsw_m: int | None = None
+    # 上传限制档 Upload_Tier（session-file-upload，租户级，Req 3.1/6.1/8.1）
+    upload_max_file_mb: int | None = None
+    session_max_files: int | None = None
+    session_chunk_cap: int | None = None
 
 
 class SystemConfigResponse(BaseModel):
@@ -482,10 +491,29 @@ async def reset_retrieval_config(
 # ============================================================
 
 
+class MemoryRecommendationVO(BaseModel):
+    """单库 chunk 上限（KB_Chunk_Cap）的内存推荐值（信息性，不自动写入，Req 5.1/5.3/5.6）。
+
+    字段与 ``app.session_upload.memory.recommend_kb_chunk_cap`` 返回的 dict 同名同型，
+    可直接 ``MemoryRecommendationVO(**recommend_kb_chunk_cap())`` 构造。
+    """
+
+    detected_memory_gb: float
+    recommended_kb_chunk_cap: int
+    safety_factor: float
+    active_kbs_assumption: int
+    assumption: str
+
+
 class PlatformConfigResponse(BaseModel):
     """平台级配置响应（超管专属，不并入 SystemConfigResponse，Req 18.3）。"""
 
     load_cache_ttl: int
+    # 上传限制平台级（session-file-upload，超管可配，Req 4.1/6.2）
+    kb_chunk_cap: int
+    session_chunk_ceiling: int
+    # 单库 chunk 上限的内存推荐值（仅 GET 填充，信息性建议，Req 5.1）
+    memory_recommendation: MemoryRecommendationVO | None = None
     # 本次实际变更明细（仅 PUT 填充；GET 无变更时为空列表，供前端确认/提示用）
     changes: list[ConfigChange] = Field(default_factory=list)
 
@@ -494,6 +522,9 @@ class PlatformConfigUpdate(BaseModel):
     """平台级配置更新请求（字段 Optional，仅更新提交字段）。"""
 
     load_cache_ttl: int | None = None
+    # 上传限制平台级（session-file-upload，超管可配，Req 4.1/6.2）
+    kb_chunk_cap: int | None = None
+    session_chunk_ceiling: int | None = None
 
 
 @router.get("/platform-config", response_model=PlatformConfigResponse)
@@ -502,11 +533,16 @@ async def get_platform_config(
 ):
     """读取平台级配置（仅超级管理员/JWT，禁 api_key 通道，Req 18.1/18.2）。
 
-    本期承载 Load_Cache_TTL（控制 collection 加载缓存有效期，影响检索延迟与新数据
-    可见性，对全平台生效，Req 18.4）。
+    本期承载 Load_Cache_TTL（控制 collection 加载缓存有效期），以及上传限制平台级配置
+    （单库 chunk 硬上限 KB_Chunk_Cap、会话 chunk 平台天花板 Session_Chunk_Ceiling），均对
+    全平台生效（Req 4.1/6.2/18.4）。额外返回基于运行内存的 KB_Chunk_Cap 推荐值（信息性，
+    不自动写入，Req 5.1）。
     """
     eff = await get_platform_config_store().get_effective()
-    return PlatformConfigResponse(**eff.model_dump())
+    return PlatformConfigResponse(
+        **eff.model_dump(),
+        memory_recommendation=MemoryRecommendationVO(**recommend_kb_chunk_cap()),
+    )
 
 
 @router.put("/platform-config", response_model=PlatformConfigResponse)
@@ -549,6 +585,8 @@ async def update_platform_config(
     eff = await store.get_effective()
     return PlatformConfigResponse(
         load_cache_ttl=eff.load_cache_ttl,
+        kb_chunk_cap=eff.kb_chunk_cap,
+        session_chunk_ceiling=eff.session_chunk_ceiling,
         changes=[ConfigChange(**c) for c in changes],
     )
 

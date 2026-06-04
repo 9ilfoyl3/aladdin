@@ -51,6 +51,10 @@ EXPECTED_SPECS = {
     "hnsw_ef": (128, 1, 2048, KIND_INT),
     "hnsw_ef_construction": (128, 8, 512, KIND_INT),
     "hnsw_m": (16, 4, 64, KIND_INT),
+    # 上传限制档 Upload_Tier（session-file-upload 新增，租户级）
+    "upload_max_file_mb": (10, 1, 100, KIND_INT),
+    "session_max_files": (5, 1, 20, KIND_INT),
+    "session_chunk_cap": (6000, 500, 20000, KIND_INT),
 }
 
 
