@@ -295,6 +295,9 @@ function Chat() {
       let buffer = ''
       let isAgentMode = false
       let totalDurationMs: number | undefined = undefined
+      // 检索降级标志（来自 meta 事件 metadata）：区分会话文件源 / 知识库源失败（Req 2.x）
+      let sessionSourceFailed = false
+      let kbSourceFailed = false
 
       if (reader) {
         while (true) {
@@ -312,6 +315,23 @@ function Chat() {
 
             try {
               const parsed = JSON.parse(data)
+
+              // 检索降级元数据（meta 事件携带 metadata；区分会话文件源 / 知识库源失败，Req 2.x）。
+              // 任何带 metadata 的事件都提取，挂到当前 assistant 消息以渲染分类提示。
+              if (parsed.metadata && typeof parsed.metadata === 'object') {
+                if (parsed.metadata.session_source_failed) sessionSourceFailed = true
+                if (parsed.metadata.kb_source_failed) kbSourceFailed = true
+                if (sessionSourceFailed || kbSourceFailed) {
+                  setMessages((prev) => {
+                    const updated = [...prev]
+                    const last = updated[updated.length - 1]
+                    if (last && last.role === 'assistant') {
+                      updated[updated.length - 1] = { ...last, sessionSourceFailed, kbSourceFailed }
+                    }
+                    return updated
+                  })
+                }
+              }
 
               // Task 10.1: 检测新 Agent SSE 事件格式（有 type 字段）
               if (parsed.type) {
@@ -547,13 +567,15 @@ function Chat() {
             references,
             segments,
             totalDurationMs,
+            sessionSourceFailed,
+            kbSourceFailed,
           }
           return updated
         })
       } else {
         setMessages((prev) => {
           const updated = [...prev]
-          updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps }
+          updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps, sessionSourceFailed, kbSourceFailed }
           return updated
         })
       }

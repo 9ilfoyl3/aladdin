@@ -33,6 +33,7 @@ from app.storage.milvus import (  # noqa: E402
     MilvusClient,
     _FIELDS,
     _SESSION_FIELDS,
+    build_session_id_expr,
 )
 
 # 当整体测试套件先行运行 test_milvus.py（其将 pymilvus 全局替换为 MagicMock）时，
@@ -403,3 +404,44 @@ class TestSessionSearchExprInjection:
             assert len(own) == 1
             assert own[0]["doc_id"] == "doc_A"
             assert cross == []
+
+
+# ============================================================
+# build_session_id_expr：会话隔离 expr 的纵深防御校验（加固点 1）
+# ============================================================
+
+
+class TestBuildSessionIdExpr:
+    """``build_session_id_expr`` 对 session_id 做 UUID 字符集白名单校验后再拼 expr。
+
+    生产中 session_id 恒为服务端 UUID 且经 _verify_session_owner 校验，本不可注入；
+    本函数作为纵深防御，拒绝含引号 / 空格 / 布尔运算符等的非法输入，杜绝 expr 注入。
+    """
+
+    def test_valid_uuid_builds_expr(self):
+        """合法 UUID → 正确拼出 `session_id == "<uuid>"`。"""
+        import uuid
+
+        sid = str(uuid.uuid4())
+        assert build_session_id_expr(sid) == f'session_id == "{sid}"'
+
+    def test_hex_and_hyphen_allowed(self):
+        """十六进制 + 连字符字符集放行（覆盖 UUID 全字符集）。"""
+        assert build_session_id_expr("abc-123-DEF") == 'session_id == "abc-123-DEF"'
+
+    @pytest.mark.parametrize(
+        "malicious",
+        [
+            'x" or "1"=="1',          # 引号闭合 + 布尔注入
+            "sess or session_id != \"\"",  # 空格 + 运算符
+            'a"; drop',               # 引号 + 分号
+            "a b",                    # 空格
+            "中文",                    # 非 ASCII
+            "a'b",                    # 单引号
+            "",                       # 空串
+        ],
+    )
+    def test_injection_attempts_rejected(self, malicious):
+        """任何含 UUID 字符集以外字符的输入 → ValueError（拒绝注入）。"""
+        with pytest.raises(ValueError):
+            build_session_id_expr(malicious)

@@ -8,6 +8,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -28,6 +29,35 @@ logger = logging.getLogger(__name__)
 # 所有会话上传文件共用这一个常驻 collection，各会话靠 session_id 标量字段过滤隔离
 # （参考 WeKnora 的"共享 collection + 标量过滤"模式）。
 SESSION_FILES_KB_ID = "session_files"
+
+
+# session_id 安全字符白名单：字母数字 + 连字符（UUID 是其子集）。用于 expr 拼接前的
+# 纵深防御校验，杜绝引号 / 空格 / 等号 / 布尔运算符等注入 Milvus 过滤表达式的字符。
+_SESSION_ID_SAFE_RE = re.compile(r"[0-9a-zA-Z_-]{1,64}")
+
+
+def build_session_id_expr(session_id: str) -> str:
+    """构造会话隔离用的 Milvus 标量过滤表达式 ``session_id == "<sid>"``（纵深防御）。
+
+    底层检索链路（HybridRetriever / MilvusClient）以字符串 expr 工作、无 pymilvus
+    模板参数（``WithTemplateParam``）通道，故 session_id 以字符串拼接进 expr。生产中
+    session_id 恒为服务端生成的 UUID 且经 ``_verify_session_owner`` 校验后才会到达此处，
+    本不可注入；本函数对其做**格式白名单校验**作为纵深防御（对齐 WeKnora 参数化的安全
+    意图）：仅允许字母数字 + 下划线 + 连字符（UUID 是其子集），出现引号 / 空格 / 等号 /
+    布尔运算符等任何其它字符即判为非法输入抛 ``ValueError``，杜绝注入 expr 的可能。
+
+    Args:
+        session_id: 会话 ID（期望为 UUID 字符串）。
+
+    Returns:
+        形如 ``session_id == "xxxxxxxx-...."`` 的过滤表达式。
+
+    Raises:
+        ValueError: session_id 含 UUID 字符集以外的字符（潜在注入）。
+    """
+    if not session_id or not _SESSION_ID_SAFE_RE.fullmatch(session_id):
+        raise ValueError(f"非法 session_id（仅允许字母数字/下划线/连字符）: {session_id!r}")
+    return f'session_id == "{session_id}"'
 
 # Collection 字段定义（v2 schema，支持 BM25 全文检索）
 _FIELDS = [
@@ -650,7 +680,7 @@ class MilvusClient:
         except Exception:
             pass  # 可能已经 loaded，忽略错误
 
-        expr = f'session_id == "{session_id}"'
+        expr = build_session_id_expr(session_id)
         collection.delete(expr)
         collection.flush()
         # 删除后清除加载标记（Req 15.4），下次搜索强制重新 load。

@@ -59,7 +59,7 @@ from app.schema.api import (
 from app.schema.db import LLMConfig, ChatSession, ChatMessageRecord
 from app.session_upload.service import get_session_upload_service
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient, SESSION_FILES_KB_ID, get_milvus_client
+from app.storage.milvus import MilvusClient, SESSION_FILES_KB_ID, build_session_id_expr, get_milvus_client
 
 from sqlalchemy import select
 
@@ -404,6 +404,26 @@ def _build_hybrid_retriever() -> HybridRetriever:
     )
 
 
+def _build_degraded_metadata(failed_kb_ids: list[str]) -> dict:
+    """从失败源列表派生前端可消费的降级元数据（Req 2.x：区分会话源 vs 知识库源）。
+
+    - ``failed_source_count``：失败源总数（向后兼容既有字段）。
+    - ``failed_kb_ids``：失败源 ID 列表（含 ``SESSION_FILES_KB_ID`` 时表示会话文件源失败）。
+    - ``session_source_failed``：会话文件源是否失败（前端据此提示"会话文件检索失败"）。
+    - ``kb_source_failed``：是否有正式知识库源失败（前端据此提示"知识库检索失败"）。
+
+    前端拿到后即可分别渲染"会话文件检索失败"与"知识库检索失败"两类提示（design C7.1）。
+    """
+    session_failed = SESSION_FILES_KB_ID in failed_kb_ids
+    kb_failed = any(kid != SESSION_FILES_KB_ID for kid in failed_kb_ids)
+    return {
+        "failed_source_count": len(failed_kb_ids),
+        "failed_kb_ids": list(failed_kb_ids),
+        "session_source_failed": session_failed,
+        "kb_source_failed": kb_failed,
+    }
+
+
 async def _retrieve_multi_kb(
     query: str,
     kb_ids: list[str],
@@ -448,7 +468,7 @@ async def _retrieve_multi_kb(
                     KBRetrievalConfig(
                         kb_id=SESSION_FILES_KB_ID,
                         priority=1.2,
-                        expr=f'session_id == "{session_id}"',
+                        expr=build_session_id_expr(session_id),
                     )
                 )
         except Exception as e:
@@ -688,6 +708,7 @@ async def _stream_response(
     chunks: list[RetrievalResult] = []
     degraded = False
     failed_source_count = 0
+    failed_kb_ids: list[str] = []  # 哪些源失败（含 SESSION_FILES_KB_ID 时为会话源失败），供前端区分提示
     agent_steps_collected: list[dict] = []
 
     if kb_ids is not None:
@@ -712,6 +733,9 @@ async def _stream_response(
             degraded = True
             # 仅会话源时 kb_ids=[]，failed_source_count 至少计 1（会话源）。
             failed_source_count = max(len(kb_ids), 1)
+            # 整体异常无法区分具体失败源；若本次含会话源（kb_ids 为空即仅会话源，
+            # 或有 session_id 且该会话有文件），把会话源标记为失败以便前端区分提示。
+            failed_kb_ids = list(kb_ids) if kb_ids else [SESSION_FILES_KB_ID]
 
     elif kb_id and mode == "agent":
         # Agent 模式：使用 EventBus→SSE 桥接
@@ -839,8 +863,8 @@ async def _stream_response(
             "metadata": {
                 "retrieval_mode": mode,
                 "degraded": degraded,
-                "failed_source_count": failed_source_count,
                 "llm_degraded": False,
+                **_build_degraded_metadata(failed_kb_ids),
             },
         }
         yield json.dumps(meta_event, ensure_ascii=False)
@@ -874,6 +898,8 @@ async def _stream_response(
                 chunks = []
                 degraded = True
                 failed_source_count = 1
+                # 单库 direct/hybrid 路径只有正式知识库源（无会话源），失败即知识库源失败。
+                failed_kb_ids = [kb_id]
 
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
@@ -940,8 +966,8 @@ async def _stream_response(
         "metadata": {
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
-            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
+            **_build_degraded_metadata(failed_kb_ids),
         },
     }
     yield json.dumps(meta_event, ensure_ascii=False)
@@ -1057,6 +1083,7 @@ async def chat_completions(
     chunks: list[RetrievalResult] = []
     degraded = False
     failed_source_count = 0
+    failed_kb_ids: list[str] = []  # 失败源（含 SESSION_FILES_KB_ID 时为会话源），供前端区分提示
 
     # 流式响应（检索和生成一体化，支持进度推送）
     # use_multi_kb=True 但 request.kb_ids 为空（仅会话文件）→ 传 [] 让
@@ -1132,8 +1159,8 @@ async def chat_completions(
         metadata={
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
-            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
+            **_build_degraded_metadata(failed_kb_ids),
         },
     )
 

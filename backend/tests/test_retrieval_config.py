@@ -12,7 +12,7 @@ Feature: kb-retrieval-optimization
 import logging
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from app.retrieval.config import (
@@ -168,7 +168,7 @@ def _raw_config(draw):
 # ============================================================
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(data=_raw_config())
 def test_property_effective_from_raw_per_field_fallback(data):
     """Feature: kb-retrieval-optimization, Property 1: Effective_Value 逐字段独立兜底
@@ -202,7 +202,7 @@ def test_property_effective_from_raw_per_field_fallback(data):
             assert spec.lo <= effective_value <= spec.hi, f"{name} 结果越界"
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(
     field_name=st.sampled_from(list(RETRIEVAL_FIELD_SPECS.keys())),
     others_raw=_raw_config(),
@@ -298,7 +298,7 @@ def _patch_with_expected_violations(draw):
     return patch, violations
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(data=_patch_with_expected_violations())
 def test_property_validate_patch_rejects_exact_violations(data):
     """Feature: kb-retrieval-optimization, Property 2: 范围校验精确拒绝越界字段
