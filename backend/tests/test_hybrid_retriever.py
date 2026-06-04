@@ -6,9 +6,15 @@ from unittest.mock import MagicMock
 # 模拟 pymilvus 模块以避免导入依赖问题
 sys.modules.setdefault("pymilvus", MagicMock())
 
+import asyncio  # noqa: E402
+import copy  # noqa: E402
+
 import pytest  # noqa: E402
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
 
 from app.retrieval.base import BaseRetriever, RetrievalResult  # noqa: E402
+from app.retrieval.config import RetrievalConfig  # noqa: E402
 from app.retrieval.hybrid import HybridRetriever  # noqa: E402
 
 
@@ -647,3 +653,334 @@ async def test_search_with_trace_bm25_disabled():
     routes = {r["name"]: r for r in trace["routes"]}
     assert routes["bm25"]["enabled"] is False
     assert routes["bm25"]["recalled"] == 0
+
+
+# ===== H2 三路容错测试（search 三路降级 / 全失败抛错 / 全成功不变式）=====
+
+
+class RaisingRetriever(BaseRetriever):
+    """模拟检索器，调用即抛指定异常（用于 H2 单路 / 多路失败场景）"""
+
+    def __init__(self, exc: Exception | None = None):
+        self._exc = exc or RuntimeError("模拟检索失败")
+
+    async def search(self, query: str, kb_id: str, top_k: int = 10, **kwargs) -> list[RetrievalResult]:
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_h2_dense_route_failure_degrades_to_empty():
+    """H2：dense 路抛异常 → 该路当空，sparse 路正常融合返回，标记 route_degraded"""
+    sparse_results = [
+        RetrievalResult(chunk_id="c1", content="合同违约责任的认定标准", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+        RetrievalResult(chunk_id="c2", content="知识产权侵权的赔偿计算", score=0.8, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+    ]
+
+    vector_retriever = RaisingRetriever(RuntimeError("dense 路超时"))
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+    results = await hybrid.search("测试查询", kb_id="kb_001", top_k=5)
+
+    # dense 路降级为空，sparse 路结果照常融合返回，不整体失败
+    chunk_ids = {r.chunk_id for r in results}
+    assert chunk_ids == {"c1", "c2"}
+    # 标记本次检索发生路级降级（供任务 3 透传）
+    assert hybrid._last_route_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_h2_sparse_route_failure_degrades_to_empty():
+    """H2：sparse 路抛异常 → dense 路正常融合返回，标记 route_degraded"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="稠密内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = RaisingRetriever(ValueError("sparse 路偶发错误"))
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+    results = await hybrid.search("测试查询", kb_id="kb_001", top_k=5)
+
+    assert {r.chunk_id for r in results} == {"c1"}
+    assert hybrid._last_route_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_h2_bm25_route_failure_degrades_to_empty():
+    """H2：bm25 路（idx=2）抛异常 → dense/sparse 正常融合返回，标记 route_degraded"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="稠密内容", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="稀疏内容", score=0.85, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    bm25_retriever = RaisingRetriever(RuntimeError("bm25 路错误"))
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(
+        vector_retriever, sparse_retriever, reranker, db_factory, bm25_retriever=bm25_retriever
+    )
+    results = await hybrid.search("测试查询", kb_id="kb_001", top_k=5)
+
+    assert {r.chunk_id for r in results} == {"c1", "c2"}
+    assert hybrid._last_route_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_h2_all_routes_fail_raises_runtime_error():
+    """H2：三路全部失败 → 抛 RuntimeError 交上层降级（不静默返回空）"""
+    vector_retriever = RaisingRetriever(RuntimeError("dense 失败"))
+    sparse_retriever = RaisingRetriever(RuntimeError("sparse 失败"))
+    bm25_retriever = RaisingRetriever(RuntimeError("bm25 失败"))
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(
+        vector_retriever, sparse_retriever, reranker, db_factory, bm25_retriever=bm25_retriever
+    )
+
+    with pytest.raises(RuntimeError):
+        await hybrid.search("测试查询", kb_id="kb_001", top_k=5)
+
+
+@pytest.mark.asyncio
+async def test_h2_two_routes_fail_no_bm25_raises_runtime_error():
+    """H2：仅两路（dense+sparse，无 bm25）全部失败 → 抛 RuntimeError"""
+    vector_retriever = RaisingRetriever(RuntimeError("dense 失败"))
+    sparse_retriever = RaisingRetriever(RuntimeError("sparse 失败"))
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+
+    with pytest.raises(RuntimeError):
+        await hybrid.search("测试查询", kb_id="kb_001", top_k=5)
+
+
+@pytest.mark.asyncio
+async def test_h2_empty_results_not_degraded_no_raise():
+    """H2 不变式：三路均成功但都无结果 → route_degraded=False，返回空不抛错（区别于全失败）"""
+    vector_retriever = FakeRetriever([])
+    sparse_retriever = FakeRetriever([])
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+    results = await hybrid.search("无结果查询", kb_id="kb_001", top_k=5)
+
+    assert results == []
+    # 正常无结果不算降级，不抛错
+    assert hybrid._last_route_degraded is False
+
+
+@pytest.mark.asyncio
+async def test_h2_all_routes_success_no_degradation():
+    """H2 不变式：三路全成功 → route_degraded=False，结果与容错前一致"""
+    dense_results = [
+        RetrievalResult(chunk_id="c1", content="内容1", score=0.9, doc_id="d1", metadata={"parent_id": "", "chunk_index": 0}),
+        RetrievalResult(chunk_id="c2", content="内容2", score=0.8, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+    ]
+    sparse_results = [
+        RetrievalResult(chunk_id="c2", content="内容2", score=0.85, doc_id="d1", metadata={"parent_id": "", "chunk_index": 1}),
+        RetrievalResult(chunk_id="c3", content="内容3", score=0.7, doc_id="d2", metadata={"parent_id": "", "chunk_index": 0}),
+    ]
+
+    vector_retriever = FakeRetriever(dense_results)
+    sparse_retriever = FakeRetriever(sparse_results)
+    reranker = FakeRerankProvider()
+    db_factory = FakeSessionFactory()
+
+    hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
+    results = await hybrid.search("测试查询", kb_id="kb_001", top_k=3)
+
+    assert len(results) > 0
+    assert hybrid._last_route_degraded is False
+
+
+# ===== H2 属性测试（design.md Property 1：检索容错的结果组合）=====
+#
+# Property 1（Bug 2 / H2）：三路检索成功/失败任意组合下——
+#   ① 融合输入恰为「所有成功路结果」的并集（失败路贡献空）；
+#   ② 当且仅当所有参与路全失败时抛 RuntimeError；
+#   ③ 三路全成功时，容错版 search() 输出与「无容错直接 RRF 融合」逐条相同（不变式）。
+#
+# 复用任务 2 已建的 FakeRetriever / RaisingRetriever / FakeRerankProvider / FakeSessionFactory。
+# 为在大量 hypothesis 迭代下保持快速、确定且不触达 DB，向 HybridRetriever 注入轻量
+# fake 配置/平台 store（构造函数已支持注入），search() 的配置/TTL 读取因此恒定且无 IO。
+
+
+class _FakeConfigStore:
+    """返回全默认 RetrievalConfig 的检索配置 store（不打 DB）。"""
+
+    async def get_effective(self, tenant_id):  # noqa: ARG002 - 属性测试固定全默认
+        return RetrievalConfig()
+
+
+class _FakePlatformStore:
+    """返回固定 Load_Cache_TTL 的平台配置 store（不打 DB）。"""
+
+    async def get_load_cache_ttl(self):
+        return 30
+
+
+def _h2_make_result(chunk_id: str) -> RetrievalResult:
+    """构造一条 H2 属性测试用检索结果。
+
+    parent_id 置空避免触发父块 DB 查询；content 由 chunk_id 决定，保证同一 chunk_id
+    跨多路时内容一致（RRF 融合按 chunk_id 去重，要求同 id 内容一致）。
+    """
+    return RetrievalResult(
+        chunk_id=chunk_id,
+        content=f"内容-{chunk_id}",
+        score=0.5,
+        doc_id="d1",
+        metadata={"parent_id": "", "chunk_index": 0},
+    )
+
+
+# chunk_id 公共池：允许多路抽到重叠 id（RRF 去重），覆盖「交集/并集」融合语义。
+_H2_CHUNK_POOL = [f"c{i}" for i in range(6)]
+
+
+def _h2_build_hybrid(has_bm25: bool, routes: list) -> HybridRetriever:
+    """按 routes 组装注入 Fake/Raising 子检索器 + fake store 的 HybridRetriever。
+
+    routes 按 dense / sparse [/ bm25] 顺序给出，每项为
+    ("success", list[RetrievalResult]) 或 ("fail", None)。
+    """
+
+    def _sub(route):
+        kind, payload = route
+        if kind == "success":
+            return FakeRetriever(payload)
+        return RaisingRetriever(RuntimeError("模拟该路检索失败"))
+
+    vector_retriever = _sub(routes[0])
+    sparse_retriever = _sub(routes[1])
+    bm25_retriever = _sub(routes[2]) if has_bm25 else None
+    return HybridRetriever(
+        vector_retriever,
+        sparse_retriever,
+        FakeRerankProvider(),
+        FakeSessionFactory(),
+        bm25_retriever=bm25_retriever,
+        config_store=_FakeConfigStore(),
+        platform_store=_FakePlatformStore(),
+    )
+
+
+@st.composite
+def _h2_route_scenarios(draw):
+    """生成三路（dense/sparse/bm25）成功/失败任意组合。
+
+    - has_bm25：bm25 路是否参与（对应是否注入 bm25_retriever）。
+    - 每个参与路独立成功/失败。
+    - 成功路返回**非空**结果（从公共池抽取，允许跨路重叠）；失败路抛异常。
+      约束成功路非空使「iff 全失败抛错」边界清晰：成功但为空的退化场景已由
+      example 用例 test_h2_empty_results_not_degraded_no_raise 覆盖。
+    """
+    has_bm25 = draw(st.booleans())
+    n_routes = 3 if has_bm25 else 2
+
+    routes = []
+    for _ in range(n_routes):
+        if draw(st.booleans()):
+            ids = draw(
+                st.lists(st.sampled_from(_H2_CHUNK_POOL), min_size=1, max_size=4, unique=True)
+            )
+            routes.append(("success", [_h2_make_result(cid) for cid in ids]))
+        else:
+            routes.append(("fail", None))
+    return has_bm25, routes
+
+
+@settings(max_examples=150, deadline=None)
+@given(scenario=_h2_route_scenarios())
+def test_property1_fusion_combination_and_all_fail_raises(scenario):
+    """Property 1 ①②：融合输入 = 所有成功路结果的并集（失败路贡献空）；
+    当且仅当所有参与路全失败时抛 RuntimeError。
+
+    **Validates: Requirements Bug 2 (H2) — Property 1**
+    """
+    has_bm25, routes = scenario
+
+    # 期望融合输入 = 成功路 chunk_id 并集（失败路贡献空集）
+    expected_ids: set[str] = set()
+    any_fail = False
+    for kind, payload in routes:
+        if kind == "success":
+            expected_ids |= {r.chunk_id for r in payload}
+        else:
+            any_fail = True
+    all_fail = all(kind == "fail" for kind, _ in routes)
+
+    hybrid = _h2_build_hybrid(has_bm25, routes)
+
+    async def _run():
+        # skip_rerank 隔离「三路容错 + RRF 融合」段，直接观察融合输入集合
+        return await hybrid.search("查询", kb_id="kb_001", top_k=5, skip_rerank=True)
+
+    if all_fail:
+        # ② 当且仅当全失败 → 抛 RuntimeError（不静默返回空）
+        with pytest.raises(RuntimeError):
+            asyncio.run(_run())
+    else:
+        results = asyncio.run(_run())
+        # ① 融合输入恰为成功路结果的并集
+        assert {r.chunk_id for r in results} == expected_ids
+        # 存在失败路（未全失败）→ 标记降级；全成功 → 不降级（与 ③ 不变式一致）
+        assert hybrid._last_route_degraded is any_fail
+
+
+@st.composite
+def _h2_all_success_scenarios(draw):
+    """生成三路全成功场景（每路非空），用于全成功不变式校验。"""
+    has_bm25 = draw(st.booleans())
+    n_routes = 3 if has_bm25 else 2
+    route_results = []
+    for _ in range(n_routes):
+        ids = draw(st.lists(st.sampled_from(_H2_CHUNK_POOL), min_size=1, max_size=4, unique=True))
+        route_results.append([_h2_make_result(cid) for cid in ids])
+    return has_bm25, route_results
+
+
+@settings(max_examples=100, deadline=None)
+@given(scenario=_h2_all_success_scenarios())
+def test_property1_all_success_invariant(scenario):
+    """Property 1 ③：三路全成功时，容错版 search() 输出与「无容错直接 RRF 融合」逐条相同。
+
+    无容错版 = 直接对各路原始结果做 RRF 融合（容错包装 _safe 在全成功时应为无操作）。
+
+    **Validates: Requirements Bug 2 (H2) — Property 1**
+    """
+    has_bm25, route_results = scenario
+
+    routes = [("success", r) for r in route_results]
+    hybrid = _h2_build_hybrid(has_bm25, routes)
+
+    # 参考值（无容错版）：对各路原始结果深拷贝后直接 RRF 融合，避免 search 的 metadata 副作用。
+    config = RetrievalConfig()
+    ref_lists = [copy.deepcopy(r) for r in route_results]
+    expected = hybrid._rrf_fusion(ref_lists, k=config.rrf_k)
+
+    async def _run():
+        return await hybrid.search("查询", kb_id="kb_001", top_k=5, skip_rerank=True)
+
+    actual = asyncio.run(_run())
+
+    # 逐条相同：chunk_id 顺序一致 + RRF 分数一致
+    assert [r.chunk_id for r in actual] == [r.chunk_id for r in expected]
+    for a, e in zip(actual, expected):
+        assert a.chunk_id == e.chunk_id
+        assert abs(a.metadata.get("_rrf_score", 0.0) - e.metadata.get("_rrf_score", 0.0)) < 1e-9
+    # 不变式：三路全成功不降级
+    assert hybrid._last_route_degraded is False

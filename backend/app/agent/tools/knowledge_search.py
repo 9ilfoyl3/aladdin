@@ -13,6 +13,7 @@ from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 from app.retrieval.base import RetrievalResult
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.log_safety import sanitize_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +32,16 @@ class KnowledgeSearchTool(BaseTool):
         kb_id: str,
         state: AgentState,
         knowledge_base_ids: list[str] | None = None,
+        tenant_id: str | None = None,
     ):
         self._retriever = retriever
         self._kb_id = kb_id
         self._state = state
         # 多知识库 ID 列表（可选，用于跨库检索）
         self._knowledge_base_ids = knowledge_base_ids
+        # 显式租户 ID（H5）：透传给底层 hybrid.search，避免 agent 模式在流式响应中
+        # contextvar 已 reset 时丢失租户检索配置；None 时底层回退 contextvar。
+        self._tenant_id = tenant_id
 
     @property
     def name(self) -> str:
@@ -108,27 +113,39 @@ class KnowledgeSearchTool(BaseTool):
         )
 
         # 对每个 kb_id × query 组合并发检索
+        # H3：用 search_with_degraded 取本次各路是否路级降级（经返回结构承载，并发安全，
+        # 不读 HybridRetriever 实例标志以免并发请求互相串扰）。
         try:
             search_tasks = [
-                self._retriever.search(query=q, kb_id=kb, top_k=top_k)
+                self._retriever.search_with_degraded(
+                    query=q, kb_id=kb, top_k=top_k, tenant_id=self._tenant_id
+                )
                 for kb in kb_ids
                 for q in queries
             ]
-            all_results_nested: list[list[RetrievalResult]] = await asyncio.gather(
+            all_results_nested: list = await asyncio.gather(
                 *search_tasks, return_exceptions=True
             )
         except Exception as e:
-            logger.error("[KnowledgeSearch] Search failed: %s", e)
+            logger.error("[KnowledgeSearch] Search failed: %s", sanitize_for_log(e))
+            self._state.degraded = True
             return ToolResult(success=False, error=f"Search failed: {e}")
 
         # 合并所有结果，过滤异常
+        # 任一子检索抛异常（某 kb/query 失败）或返回 degraded=True（三路路级降级）→ 标记降级。
         merged: list[RetrievalResult] = []
-        for i, result in enumerate(all_results_nested):
-            if isinstance(result, Exception):
+        for i, item in enumerate(all_results_nested):
+            if isinstance(item, Exception):
                 logger.warning(
-                    "[KnowledgeSearch] Query '%s' failed: %s", queries[i], result
+                    "[KnowledgeSearch] Query '%s' failed: %s",
+                    sanitize_for_log(queries[i % len(queries)] if queries else ""),
+                    sanitize_for_log(item),
                 )
+                self._state.degraded = True
                 continue
+            result, route_degraded = item
+            if route_degraded:
+                self._state.degraded = True
             merged.extend(result)
 
         logger.info("[KnowledgeSearch] Merged %d raw results from %d queries", len(merged), len(queries))

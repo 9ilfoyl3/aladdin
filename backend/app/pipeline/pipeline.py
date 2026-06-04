@@ -478,13 +478,7 @@ class DocumentPipeline:
                 # 上一次处理若在本阶段分批写入途中被硬杀（OOM/SIGKILL），
                 # 已写入的批次会成为孤儿向量（DB 未 commit 故无对应 chunk 记录），
                 # 且本次 chunk_id 全新，不覆盖旧向量。先按 doc_id 删一次确保干净。
-                try:
-                    await self.milvus.delete_by_doc_id(kb_id, doc_id)
-                except Exception as e:
-                    logger.warning(
-                        "文档 %s 写入前清理旧向量失败（非致命，继续写入）: %s",
-                        doc_id, e,
-                    )
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
 
                 # 检查 collection schema 版本，兼容旧 schema
                 schema_info = await self.milvus.check_schema_version(kb_id)
@@ -496,6 +490,9 @@ class DocumentPipeline:
 
                 # 批量写入 Milvus
                 if milvus_data:
+                    # Index 写 Milvus 前再查一次取消（复用既有 _check_cancelled）
+                    await self._check_cancelled(doc_id)
+
                     batch_size = 1000
                     total = len(milvus_data)
                     if total <= batch_size:
@@ -504,6 +501,9 @@ class DocumentPipeline:
                     else:
                         print(f"[Pipeline] 文档 {doc_id} 分批写入 Milvus，共 {total} 条向量，每批 {batch_size} 条")
                         for i in range(0, total, batch_size):
+                            # 大批量分批写入时，批次间查取消（对齐 embed 阶段每 N 批查一次）
+                            if i > 0 and (i // batch_size) % 10 == 0:
+                                await self._check_cancelled(doc_id)
                             batch = milvus_data[i:i + batch_size]
                             await self.milvus.insert(kb_id, batch)
                             if (i // batch_size + 1) % 10 == 0:
@@ -524,6 +524,12 @@ class DocumentPipeline:
                 await session.commit()
                 await tracker.complete()
 
+                # 通知其他进程：该知识库有新文档入库（跨进程失效广播）
+                from app.storage.invalidation import get_invalidation_bus
+                bus = get_invalidation_bus()
+                if bus:
+                    await bus.publish("kb_data", kb_id)
+
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
 
@@ -540,13 +546,7 @@ class DocumentPipeline:
 
                 # 清理可能已写入 Milvus 的孤儿向量
                 # （Index 阶段分批写入时被取消，部分批次已写入 Milvus 但 DB 已 rollback）
-                try:
-                    await self._cleanup_milvus_on_cancel(kb_id, doc_id)
-                except Exception as cleanup_err:
-                    logger.warning(
-                        "文档 %s 取消后清理 Milvus 失败（非致命）: %s",
-                        doc_id, cleanup_err,
-                    )
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
                 # 不标记失败，不 re-raise（任务静默终止）
 
             except Exception as e:
@@ -554,6 +554,9 @@ class DocumentPipeline:
                 print(f"[Pipeline] 文档 {doc_id} 处理失败: {type(e).__name__}: {e}")
                 traceback.print_exc()
                 await session.rollback()
+
+                # 清理可能已写入 Milvus 的孤儿向量（与 CancelledError 分支一致）
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
 
                 # 进度追踪：标记失败（progress 值不变）
                 await tracker.fail(current_stage, f"{type(e).__name__}: {e}")
@@ -927,21 +930,29 @@ class DocumentPipeline:
                 return parent_idx
         return None
 
-    async def _cleanup_milvus_on_cancel(self, kb_id: str, doc_id: str) -> None:
-        """取消时清理 Milvus 中可能已写入的孤儿向量
+    async def _cleanup_milvus_orphans(self, kb_id: str, doc_id: str) -> None:
+        """按 doc_id 清理 Milvus 向量。拒绝空 kb_id/doc_id（防误删整库）。失败记 WARNING。
 
-        Index 阶段分批写入 Milvus，如果中途被取消，已写入的批次会成为孤儿。
-        通过 doc_id 过滤表达式删除该文档的所有向量。
+        统一用于：
+        - Index 阶段写入前先删旧（幂等，治本去孤儿）
+        - CancelledError 分支回滚后清理已写入的孤儿向量
+        - 普通 Exception 分支回滚后清理已写入的孤儿向量
         """
+        if not doc_id or not kb_id:
+            logger.warning("跳过孤儿清理：kb_id/doc_id 为空")
+            return
         try:
             if not await self.milvus.has_collection(kb_id):
                 return
-            # 使用 doc_id 表达式删除该文档的所有向量
             await self.milvus.delete_by_doc_id(kb_id, doc_id)
-            logger.info("文档 %s 取消后清理 Milvus 向量完成", doc_id)
-            print(f"[Pipeline] 文档 {doc_id} 取消后清理 Milvus 孤儿向量完成")
+            logger.info("文档 %s 孤儿向量清理完成", doc_id)
         except Exception as e:
-            logger.warning("文档 %s 取消后清理 Milvus 失败: %s", doc_id, e)
+            logger.warning("文档 %s 孤儿向量清理失败（非致命）: %s", doc_id, e)
+
+    # 保留旧名作为向后兼容别名
+    async def _cleanup_milvus_on_cancel(self, kb_id: str, doc_id: str) -> None:
+        """向后兼容别名，委托给 _cleanup_milvus_orphans"""
+        await self._cleanup_milvus_orphans(kb_id, doc_id)
 
     @staticmethod
     def _truncate_utf8(text: str, max_bytes: int = 60000) -> str:

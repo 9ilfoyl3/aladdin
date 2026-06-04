@@ -56,6 +56,62 @@ async def lifespan(app: FastAPI):
     from app.auth.apikey_usage import init_usage_tracker, shutdown_usage_tracker
     init_usage_tracker(async_session)
 
+    # 启动跨进程失效广播（InvalidationBus）
+    from app.startup import start_invalidation_bus
+    from app.storage.milvus import get_milvus_client, MilvusClient
+    from app.retrieval.cache import get_retrieval_cache
+
+    async def _handle_kb_data(kb_id: str):
+        """收到 kb_data 失效信号：清除对应知识库的 Milvus 加载缓存 + 检索结果缓存"""
+        # 失效 Milvus 加载缓存（使下次搜索强制重新 load）
+        milvus = get_milvus_client()
+        collection_name = MilvusClient._collection_name(kb_id)
+        milvus._loaded_at.pop(collection_name, None)
+        # 失效检索结果缓存
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
+        logger.info("InvalidationBus: kb_data 失效完成 kb_id=%s", kb_id)
+
+    async def _handle_tenant_config(tenant_id: str):
+        """收到 tenant_config 失效信号（M1 + M7）：
+        1. 失效该租户的检索配置缓存（M1 多进程热生效）
+        2. 失效该租户名下所有 KB 的检索结果缓存（M7 配置变更失效结果缓存）
+        """
+        from app.retrieval.config import get_retrieval_config_store
+        store = get_retrieval_config_store()
+        store.invalidate(tenant_id)
+
+        # M7: 额外失效该租户名下 KB 的检索结果缓存
+        cache = await get_retrieval_cache()
+        kb_ids: list[str] = []
+        if cache:
+            kb_ids = await _get_tenant_kb_ids(tenant_id)
+            for kb_id in kb_ids:
+                await cache.invalidate_kb(kb_id)
+        logger.info(
+            "InvalidationBus: tenant_config 失效完成 tenant_id=%s, 失效 %d 个 KB 缓存",
+            tenant_id, len(kb_ids),
+        )
+
+    async def _get_tenant_kb_ids(tenant_id: str) -> list[str]:
+        """查询数据库获取该租户名下的所有 kb_id（轻量 select 仅取 id 列）"""
+        try:
+            from app.schema.db import KnowledgeBase
+            async with async_session() as session:
+                result = await session.execute(
+                    select(KnowledgeBase.id).where(KnowledgeBase.tenant_id == tenant_id)
+                )
+                return [row[0] for row in result.all()]
+        except Exception as e:
+            logger.warning("查询租户 %s KB 列表失败（跳过结果缓存失效）: %s", tenant_id, e)
+            return []
+
+    await start_invalidation_bus({
+        "kb_data": _handle_kb_data,
+        "tenant_config": _handle_tenant_config,
+    })
+
     yield
 
     # 停止用量追踪器并落库剩余增量（优雅关闭，不丢最后一个区间）

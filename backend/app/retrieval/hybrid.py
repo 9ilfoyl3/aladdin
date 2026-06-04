@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.provider import RerankProvider
 from app.repositories.tenant_repo import current_tenant_scope
 from app.retrieval.base import BaseRetriever, RetrievalResult
+from app.retrieval.log_safety import sanitize_for_log
 from app.retrieval.config import (
     PlatformConfigStore,
     RetrievalConfig,
@@ -81,11 +82,39 @@ class HybridRetriever(BaseRetriever):
         self._config_store = config_store or get_retrieval_config_store()
         # 平台级配置（Load_Cache_TTL），单次检索取一次 TTL 快照透传给 Milvus 各搜索方法。
         self._platform_store = platform_store or get_platform_config_store()
+        # 最近一次 search() 是否发生三路路级降级（H2）——**非权威、仅调试/回归信号**。
+        # 任务 3 已把 degraded 改为经返回结构承载（见 search_with_degraded）：并发请求共享
+        # 同一 HybridRetriever 实例时，该实例标志会被并发调用互相覆盖（串扰），故生产消费方
+        # （chat._retrieve_chunks）一律读 search_with_degraded 的返回值，**不得**读此标志。
+        # 此处保留赋值仅为兼容既有单测对单线程下"最近一次降级"的断言。
+        self._last_route_degraded = False
 
     async def search(
-        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
+        tenant_id: str | None = None, **kwargs
     ) -> list[RetrievalResult]:
-        """执行混合检索
+        """执行混合检索，仅返回结果列表（向后兼容入口）。
+
+        degraded（本次三路是否路级降级）经返回结构承载以规避并发隐患——见
+        ``search_with_degraded``。需要 degraded 的调用方（chat._retrieve_chunks）改调
+        ``search_with_degraded``；其余既有调用点（agent grep/单库 direct/mcp 等）继续用
+        本方法,行为不变。
+
+        Args:
+            expr: Milvus pre-filter 表达式，传递给子检索器进行元数据过滤
+            tenant_id: 显式租户 ID（H5）。语义同 ``search_with_degraded``。
+            skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果
+        """
+        results, _degraded = await self.search_with_degraded(
+            query, kb_id, top_k=top_k, expr=expr, tenant_id=tenant_id, **kwargs
+        )
+        return results
+
+    async def search_with_degraded(
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
+        tenant_id: str | None = None, **kwargs
+    ) -> tuple[list[RetrievalResult], bool]:
+        """执行混合检索，返回 ``(结果列表, 本次是否路级降级)``。
 
         流程：并行三路检索 → RRF 融合 → Rerank 精排 → 父块扩展
 
@@ -97,15 +126,26 @@ class HybridRetriever(BaseRetriever):
         Rerank 候选池取 config.rerank_candidate_k 条（reranker 处理较少候选时性能最优）。
         最终返回 top_k 条精选结果。
 
+        **degraded 经返回结构承载（H3，规避并发隐患）**：``route_degraded`` 是本次调用的
+        局部变量，随返回值一并向上传递。并发请求各自持有独立的局部 ``route_degraded``，
+        互不串扰；不依赖 ``self._last_route_degraded`` 实例标志（该标志会被并发调用覆盖）。
+
         Args:
             expr: Milvus pre-filter 表达式，传递给子检索器进行元数据过滤
+            tenant_id: 显式租户 ID（H5）。传入非 None 时据此读该租户检索配置；
+                未传（None）时回退 ``_current_tenant_id()`` contextvar，保证既有调用点行为不变。
+                流式响应中 contextvar 已被依赖 reset，必须由 chat 端点显式下传以免静默降级。
             skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果
+
+        Returns:
+            ``(结果列表, degraded)``。degraded=True 表示三路中至少一路异常被降级为空
+            （其余路照常融合返回）；三路全失败则抛 RuntimeError 不返回。
         """
         skip_rerank = kwargs.pop("skip_rerank", False)
         # 单次检索取一次有效配置快照，整条链路（召回→融合→rerank→MMR）复用同一份，
-        # 保证单次检索参数一致性（Req 5.4）。按 Current_Tenant 读取该租户配置（Req 1.6/1.9）。
-        tenant_id = _current_tenant_id()
-        config = await self._config_store.get_effective(tenant_id)
+        # 保证单次检索参数一致性（Req 5.4）。租户优先级：显式 tenant_id > contextvar 回退（Req 1.3）。
+        effective_tenant = tenant_id if tenant_id is not None else _current_tenant_id()
+        config = await self._config_store.get_effective(effective_tenant)
         # 单次检索取一次 TTL 快照，透传给三路 Milvus 搜索（Req 15.1/17.3）。
         ttl = await self._platform_store.get_load_cache_ttl()
         # 每路召回数取自配置（默认 128），确保候选池足够大
@@ -121,11 +161,47 @@ class HybridRetriever(BaseRetriever):
         if has_bm25:
             tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs))
 
-        results_list = await asyncio.gather(*tasks)
+        # 三路容错（H2）：return_exceptions=True 收集各路结果 / 异常，逐路经 _safe 包装。
+        # 任一路抛异常 → 该路降级为空、其余路照常融合，与 search_with_trace() 行为一致
+        # （把调参链路已验证的 _safe 容错下沉到生产 search()）。
+        # 参考 open-webui query_collection 的 (result, err) partial-result 范式。
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
-        dense_results = results_list[0]
-        sparse_results = results_list[1]
-        bm25_results = results_list[2] if has_bm25 else []
+        # 本次检索是否发生路级降级（任一路抛异常被当空）。供任务 3 向上透传至 SSE meta。
+        route_degraded = False
+
+        def _safe(idx: int, route: str) -> list[RetrievalResult]:
+            """取第 idx 路结果；该路抛异常则记 WARNING、降级为空并置 route_degraded=True。
+
+            索引 idx 严格对齐上方 tasks 构建顺序：dense=0 / sparse=1 / bm25=2
+            （bm25 仅 has_bm25 时存在于 tasks 与 results_list）。
+            route 路名为固定字面量（非用户输入）；异常文本经 CR/LF/Tab 替换脱敏后再入日志，
+            防日志注入（脱敏统一走 app.retrieval.log_safety.sanitize_for_log）。
+            """
+            nonlocal route_degraded
+            if idx >= len(results_list):
+                return []
+            r = results_list[idx]
+            if isinstance(r, Exception):
+                safe_err = sanitize_for_log(r)
+                logger.warning("[Retrieval] 第 %d 路(%s)检索异常，降级为空: %s", idx, route, safe_err)
+                route_degraded = True
+                return []
+            return r
+
+        # 索引映射严格对齐 tasks 构建顺序：dense=0 / sparse=1 / bm25=2。
+        dense_results = _safe(0, "dense")
+        sparse_results = _safe(1, "sparse")
+        bm25_results = _safe(2, "bm25") if has_bm25 else []
+
+        # 三路全失败（确有降级且 dense/sparse/bm25 融合输入全空）→ 抛 RuntimeError 交上层降级，
+        # 区别于"正常无结果"返回空：后者 route_degraded=False 不抛错（Req H2-4）。
+        if route_degraded and not dense_results and not sparse_results and not bm25_results:
+            raise RuntimeError("检索三路全部失败，无可用结果")
+
+        # 实例标志仅作单线程下"最近一次降级"的兼容信号（既有单测断言用）；**权威 degraded
+        # 经返回结构向上传**（见下方各 return 的元组第二位），并发安全。生产消费方读返回值。
+        self._last_route_degraded = route_degraded
 
         print(f"[Retrieval] 稠密检索: {len(dense_results)} 条, "
               f"稀疏检索: {len(sparse_results)} 条, "
@@ -140,11 +216,11 @@ class HybridRetriever(BaseRetriever):
         print(f"[Retrieval] RRF 融合后: {len(fused)} 条")
 
         if not fused:
-            return []
+            return [], route_degraded
 
         # 快速模式：跳过 rerank，直接返回 RRF 融合结果
         if skip_rerank:
-            return fused
+            return fused, route_degraded
 
         # 3. Rerank 精排（取 top-rerank_candidate_k 送入 rerank，平衡精度和性能）
         rerank_candidates = fused[:config.rerank_candidate_k]
@@ -166,16 +242,21 @@ class HybridRetriever(BaseRetriever):
         expanded = await self._expand_parent(reranked)
 
         logger.debug("HybridRetriever 在 kb=%s 中检索到 %d 条结果", kb_id, len(expanded))
-        return expanded
+        return expanded, route_degraded
 
     async def search_with_trace(
-        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
+        tenant_id: str | None = None, **kwargs
     ) -> tuple[list[RetrievalResult], dict]:
         """带链路追踪的混合检索，供检索测试页展示各阶段中间信号
 
         复用与生产 search() 相同的阶段方法（_rrf_fusion / _rerank /
         _apply_composite_scoring / _apply_mmr / _expand_parent），仅在阶段之间
         捕获中间结果，因此调参看到的链路与线上实际行为一致。
+
+        Args:
+            tenant_id: 显式租户 ID（H5）。传入非 None 时据此读该租户检索配置；
+                未传（None）时回退 ``_current_tenant_id()`` contextvar（向后兼容调参页等既有调用点）。
 
         Returns:
             (最终结果列表, trace dict)
@@ -188,9 +269,9 @@ class HybridRetriever(BaseRetriever):
             }
         """
         # 单次检索取一次有效配置快照，保证评测链路与线上 search() 行为一致（Req 5.4）。
-        # 按 Current_Tenant 读取该租户配置（Req 1.6/1.9）。
-        tenant_id = _current_tenant_id()
-        config = await self._config_store.get_effective(tenant_id)
+        # 租户优先级：显式 tenant_id > contextvar 回退（Req 1.3）。
+        effective_tenant = tenant_id if tenant_id is not None else _current_tenant_id()
+        config = await self._config_store.get_effective(effective_tenant)
         # 单次检索取一次 TTL 快照，透传给三路 Milvus 搜索（Req 15.1/17.3）。
         ttl = await self._platform_store.get_load_cache_ttl()
         recall_k = config.recall_k
@@ -211,7 +292,7 @@ class HybridRetriever(BaseRetriever):
                 return []
             r = results_list[idx]
             if isinstance(r, Exception):
-                logger.warning("[Trace] 第 %d 路检索异常: %s", idx, r)
+                logger.warning("[Trace] 第 %d 路检索异常: %s", idx, sanitize_for_log(r))
                 return []
             return r
 
@@ -295,7 +376,8 @@ class HybridRetriever(BaseRetriever):
         return expanded, trace
 
     async def rerank_and_expand(
-        self, query: str, results: list[RetrievalResult], top_k: int = 10
+        self, query: str, results: list[RetrievalResult], top_k: int = 10,
+        tenant_id: str | None = None
     ) -> list[RetrievalResult]:
         """对已合并的结果执行 rerank 精排 + 父块扩展
 
@@ -303,14 +385,19 @@ class HybridRetriever(BaseRetriever):
 
         多库联合路径同样需要应用 rerank 软阈值过滤（B2），故在此取一次有效配置快照
         传入 ``_rerank``，与单库 search / trace 三路统一。
+
+        Args:
+            tenant_id: 显式租户 ID（H5）。多库路径的 rerank 阶段同样读 config，
+                必须由 ``MultiKBRetriever.search`` 显式下传，否则 rerank 阶段丢租户配置；
+                未传（None）时回退 ``_current_tenant_id()`` contextvar（向后兼容）。
         """
         if not results:
             return []
 
         # 多库路径取一次有效配置快照，使阈值过滤在多库联合检索上同样生效（Req 5.4）。
-        # 按 Current_Tenant 读取该租户配置（Req 1.6/1.9）。多库路径只 rerank 不直接召回，不涉及 TTL。
-        tenant_id = _current_tenant_id()
-        config = await self._config_store.get_effective(tenant_id)
+        # 租户优先级：显式 tenant_id > contextvar 回退（Req 1.3）。多库路径只 rerank 不直接召回，不涉及 TTL。
+        effective_tenant = tenant_id if tenant_id is not None else _current_tenant_id()
+        config = await self._config_store.get_effective(effective_tenant)
 
         rerank_candidates = results[: top_k * 2]
         try:

@@ -38,15 +38,47 @@ class MultiKBRetriever:
     """多知识库联合检索器
 
     并行检索多个知识库，按优先级加权合并 RRF 分数后统一 Rerank。
+
+    注意:应用层 asyncio.Semaphore 限制的是同时发起的源检索协程数，
+    ≠ Milvus 连接池上限（后者由 pymilvus connection pool 参数单独配置）。
+    两层都需要合理设置以避免资源耗尽。
     """
 
     def __init__(
         self,
         hybrid_retriever: HybridRetriever,
-        max_concurrency: int = 5,
+        max_concurrency: int = 4,
+        per_source_timeout: float = 30.0,
     ):
+        """
+        Args:
+            hybrid_retriever: 混合检索器实例
+            max_concurrency: 同时检索的最大源数量（默认 4，对齐 weknora defaultMultiStoreFanoutLimit）
+            per_source_timeout: 每个检索源的超时秒数（默认 30s，对齐 weknora defaultMultiStoreRetrieveTimeout）
+        """
         self.retriever = hybrid_retriever
         self.max_concurrency = max_concurrency
+        self.per_source_timeout = per_source_timeout
+
+    @staticmethod
+    def _compute_source_top_k(top_k: int, num_sources: int) -> int:
+        """计算每个检索源的召回数量，随库数增多适当收敛以保护总召回量。
+
+        公式设计:
+        - 单库/少库（≤4）: 返回 top_k * 3（充分召回，不劣化）
+        - 多库（>4）: top_k * 3 * 4 // num_sources，但不低于 top_k
+          即把"4 库时的总召回量"作为软上界，多库时均摊。
+
+        保证:
+        - num_sources=1 → top_k*3（与修复前一致）
+        - num_sources=4 → top_k*3（fast-path 无劣化临界点）
+        - num_sources=8 → top_k*3*4//8 = top_k*1.5，但不低于 top_k
+        - num_sources=20 → 约 top_k*0.6 → 兜底 top_k
+        """
+        if num_sources <= 4:
+            return top_k * 3
+        scaled = top_k * 3 * 4 // num_sources
+        return max(top_k, scaled)
 
     async def search(
         self,
@@ -54,43 +86,74 @@ class MultiKBRetriever:
         kb_configs: list[KBRetrievalConfig],
         top_k: int = 10,
         filters: RetrievalFilter | None = None,
+        tenant_id: str | None = None,
     ) -> MultiKBSearchResult:
         """并行检索多个知识库，加权合并后统一 Rerank
 
         单个知识库检索失败时返回空结果，不影响其他库的正常检索。
         当任何知识库检索失败时，返回结果中 degraded=True。
 
+        并发控制:
+        - asyncio.Semaphore(max_concurrency) 限制同时执行的源检索数
+        - asyncio.wait_for(per_source_timeout) 限制单源最大耗时
+        - 超时产生 TimeoutError，按异常处理（该源空 + failed_kb_ids）
+
+        注意:此处 Semaphore 是应用层并发控制，≠ Milvus 连接池上限，
+        后者需通过 pymilvus 连接池参数单独配置。
+
         Args:
             query: 用户查询文本
             kb_configs: 知识库配置列表，包含 kb_id 和优先级
             top_k: 最终返回结果数量
             filters: 可选的检索过滤条件
+            tenant_id: 显式租户 ID（H5）。透传给每个 ``hybrid_retriever.search`` 与
+                统一 ``rerank_and_expand``，使多库召回与 rerank 两个阶段都按该租户配置执行；
+                未传（None）时各底层调用回退 contextvar（向后兼容）。
 
         Returns:
             MultiKBSearchResult，包含检索结果和降级状态信息
         """
         expr = filters.to_milvus_expr() if filters else None
 
-        # 并行检索所有知识库（skip_rerank=True，合并后统一 rerank）
-        tasks = [
-            self.retriever.search(
-                query, cfg.kb_id, top_k=top_k * 3, skip_rerank=True, expr=expr
-            )
-            for cfg in kb_configs
-        ]
+        # 总召回量保护:库数多时每库召回数适当收敛
+        num_sources = len(kb_configs)
+        source_top_k = self._compute_source_top_k(top_k, num_sources)
+
+        # 并发限流:Semaphore 限制同时打到 Milvus 的源检索并发数
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def _guarded_search(cfg: KBRetrievalConfig) -> list[RetrievalResult]:
+            """带并发限流和超时保护的单源检索"""
+            async with sem:
+                return await asyncio.wait_for(
+                    self.retriever.search(
+                        query, cfg.kb_id, top_k=source_top_k, skip_rerank=True,
+                        expr=expr, tenant_id=tenant_id,
+                    ),
+                    timeout=self.per_source_timeout,
+                )
+
+        tasks = [_guarded_search(cfg) for cfg in kb_configs]
         results_by_kb = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 处理结果（异常的库返回空列表，记录失败信息）
+        # 处理结果（异常/超时的库返回空列表，记录失败信息）
         valid_results: dict[str, list[RetrievalResult]] = {}
         failed_kb_ids: list[str] = []
 
         for cfg, result in zip(kb_configs, results_by_kb):
             if isinstance(result, Exception):
-                logger.warning(
-                    "知识库 '%s' 检索失败，返回空结果: %s",
-                    cfg.kb_id,
-                    str(result),
-                )
+                if isinstance(result, TimeoutError):
+                    logger.warning(
+                        "知识库 '%s' 检索超时（超过 %.1fs），返回空结果",
+                        cfg.kb_id,
+                        self.per_source_timeout,
+                    )
+                else:
+                    logger.warning(
+                        "知识库 '%s' 检索失败，返回空结果: %s",
+                        cfg.kb_id,
+                        str(result),
+                    )
                 valid_results[cfg.kb_id] = []
                 failed_kb_ids.append(cfg.kb_id)
             else:
@@ -101,8 +164,8 @@ class MultiKBRetriever:
         # 加权合并
         merged = self._weighted_merge(valid_results, kb_configs)
 
-        # 统一 Rerank + 父块扩展
-        results = await self.retriever.rerank_and_expand(query, merged, top_k)
+        # 统一 Rerank + 父块扩展（显式下传 tenant_id，避免 rerank 阶段丢租户配置）
+        results = await self.retriever.rerank_and_expand(query, merged, top_k, tenant_id=tenant_id)
 
         return MultiKBSearchResult(
             results=results,

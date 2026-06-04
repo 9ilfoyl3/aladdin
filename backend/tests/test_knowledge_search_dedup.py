@@ -16,6 +16,10 @@ class FakeRetriever:
     async def search(self, query: str, kb_id: str, top_k: int = 10, **kwargs):
         return self._results[:top_k]
 
+    async def search_with_degraded(self, query: str, kb_id: str, top_k: int = 10, **kwargs):
+        # 测试用 fake 永不降级；返回结构与 HybridRetriever.search_with_degraded 对齐。
+        return self._results[:top_k], False
+
 
 def _make_result(chunk_id: str, content: str, score: float = 0.9) -> RetrievalResult:
     return RetrievalResult(

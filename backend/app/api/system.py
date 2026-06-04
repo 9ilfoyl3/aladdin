@@ -22,6 +22,7 @@ from app.retrieval.config import (
     validate_patch,
     validate_platform_patch,
 )
+from app.storage.invalidation import get_invalidation_bus
 from app.storage.milvus import MilvusClient
 
 logger = logging.getLogger(__name__)
@@ -414,6 +415,11 @@ async def update_config(
                 request=request,
             )
             await db.commit()
+            # 广播失效信号：通知其他进程失效该租户配置缓存（M1 多进程热生效）
+            # 本进程已由 store.update 内联失效，广播只负责通知其他进程
+            bus = get_invalidation_bus()
+            if bus:
+                await bus.publish("tenant_config", tenant_id)
 
     # 3) 响应回读该租户最新有效检索参数（确保返回更新后的值，Req 6.1），并回显本次变更明细
     eff = await store.get_effective(tenant_id)
@@ -460,6 +466,11 @@ async def reset_retrieval_config(
             request=request,
         )
         await db.commit()
+        # 广播失效信号：通知其他进程失效该租户配置缓存（M1 多进程热生效）
+        # 本进程已由 store.reset_defaults 内联失效，广播只负责通知其他进程
+        bus = get_invalidation_bus()
+        if bus:
+            await bus.publish("tenant_config", tenant_id)
 
     return _build_config_response(
         settings, RetrievalConfigSection.from_config(eff), changes

@@ -3,6 +3,7 @@
 API 服务和 Worker 进程共用的初始化函数，避免代码重复。
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -144,3 +145,17 @@ async def load_ocr_manager() -> OCRManager | None:
     except Exception as e:
         logger.warning("加载 OCR 配置失败: %s", e)
         return None
+
+
+async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
+    """初始化并启动 InvalidationBus 后台订阅（subOnce 防重）。
+
+    API 和 Worker 进程启动时调用，传入各自的 handler 映射。
+    """
+    from app.storage.invalidation import init_invalidation_bus
+
+    bus = await init_invalidation_bus()
+    if bus and bus._redis is not None:
+        # 后台协程，不阻塞启动
+        asyncio.create_task(bus.subscribe_loop(handlers))
+        logger.info("InvalidationBus 后台订阅已启动")

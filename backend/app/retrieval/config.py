@@ -366,9 +366,18 @@ class RetrievalConfigStore:
         - 缓存[tenant_id] 命中（未过期）直接返回。
         - 否则读 DB 行（主键 = tenant_id）→ ``effective_from_raw`` → 写缓存[tenant_id]。
         - DB 读失败降级返回全 Safe_Default（不抛错、不缓存），并记一条 WARNING。
+
+        WHEN ``tenant_id`` 为 None 时记一条 WARNING（H5 可观测性）：正常的离线评测 /
+        Worker 无上下文 / 超管 platform 态会命中此分支，但**租户用户的检索请求若也走到这里**，
+        即说明租户上下文未被正确传递（如流式响应中 contextvar 已 reset），漏传从此可观测。
+        日志不改变返回值（仍返回全 Safe_Default、不抛错）。
         """
         # 无租户上下文（离线/Worker/超管 platform 态）：全默认，不打 DB（Req 1.11）。
         if tenant_id is None:
+            logger.warning(
+                "RetrievalConfig.get_effective 收到 tenant_id=None，回退全默认检索配置；"
+                "若发生在租户用户的检索请求中，说明租户上下文未正确传递（H5）"
+            )
             return RetrievalConfig()
 
         cached = self._cache_get(tenant_id)

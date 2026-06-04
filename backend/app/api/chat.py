@@ -41,6 +41,7 @@ from app.retrieval.base import RetrievalResult
 from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.filter import RetrievalFilter
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.log_safety import sanitize_for_log
 from app.retrieval.multi_kb import KBRetrievalConfig, MultiKBRetriever, MultiKBSearchResult
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.vector import VectorRetriever
@@ -404,11 +405,19 @@ async def _retrieve_multi_kb(
     query: str,
     kb_ids: list[str],
     filter_obj: RetrievalFilter | None = None,
-) -> tuple[list[RetrievalResult], bool]:
+    tenant_id: str | None = None,
+) -> tuple[list[RetrievalResult], bool, list[str]]:
     """多知识库联合检索
 
     第一个 kb_id 为主库 (priority=1.0)，其余为辅助库 (priority=0.8)。
-    返回 (检索结果, 是否降级)。
+    返回 ``(检索结果, 是否降级, 失败知识库 ID 列表)``。
+
+    H3：完整透传降级信息——不再丢弃 ``failed_kb_ids``，供上层填充 SSE meta 的
+    ``failed_source_count`` 并据此向用户提示结果不完整。
+
+    Args:
+        tenant_id: 显式租户 ID（H5）。透传给 ``MultiKBRetriever.search``，确保流式响应中
+            contextvar 已 reset 时仍能取到正确租户检索配置；None 时底层回退 contextvar。
     """
     # 构建知识库配置
     kb_configs = []
@@ -425,13 +434,15 @@ async def _retrieve_multi_kb(
 
     # 使用 MultiKBRetriever 执行联合检索
     multi_kb = MultiKBRetriever(hybrid_retriever)
-    multi_result: MultiKBSearchResult = await multi_kb.search(query, kb_configs, top_k=10, filters=filter_obj)
-    return multi_result.results, multi_result.degraded
+    multi_result: MultiKBSearchResult = await multi_kb.search(
+        query, kb_configs, top_k=10, filters=filter_obj, tenant_id=tenant_id
+    )
+    return multi_result.results, multi_result.degraded, multi_result.failed_kb_ids
 
 
 async def _retrieve_chunks(
     query: str, kb_id: str, mode: str, llm: LLMProvider, progress_queue: asyncio.Queue | None = None,
-    expr: str | None = None,
+    expr: str | None = None, tenant_id: str | None = None,
 ) -> tuple[list[RetrievalResult], bool]:
     """根据模式执行检索，返回 (检索结果, 是否降级)
 
@@ -442,6 +453,8 @@ async def _retrieve_chunks(
 
     Args:
         progress_queue: 可选的异步队列，用于推送 Agent 进度事件
+        tenant_id: 显式租户 ID（H5）。透传给 hybrid 检索与 agent 模式的 KnowledgeSearchTool，
+            确保流式响应中 contextvar 已 reset 时仍能取到正确租户检索配置；None 时底层回退 contextvar。
     """
     from app.retrieval.cache import get_retrieval_cache
 
@@ -479,7 +492,7 @@ async def _retrieve_chunks(
         event_bus = EventBus()
 
         # 3. 注册工具
-        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
+        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
         tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
         tool_registry.register(ListKnowledgeChunksTool())
         tool_registry.register(FinalAnswerTool(state, event_bus, ""))
@@ -513,17 +526,22 @@ async def _retrieve_chunks(
         # 7. 执行 Agent
         result_state = await engine.execute("", query)
 
-        # 8. 返回 knowledge_refs 作为 chunks
-        return result_state.knowledge_refs, False
+        # 8. 返回 knowledge_refs 作为 chunks；degraded 取工具写入的真实降级状态（H3）。
+        #    KnowledgeSearchTool 持有此处构造的 state（与引擎内部 state 不同），检索降级写入其中，
+        #    故 degraded 读本地 state.degraded（不再恒 False）。
+        return result_state.knowledge_refs, state.degraded
 
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
         hybrid_retriever = _build_hybrid_retriever()
-        results = await hybrid_retriever.search(query, kb_id, top_k=10, expr=expr)
+        # H3：用 search_with_degraded 取真实路级降级（经返回结构承载，并发安全），不再硬编码 False。
+        results, degraded = await hybrid_retriever.search_with_degraded(
+            query, kb_id, top_k=10, expr=expr, tenant_id=tenant_id
+        )
         # 写入缓存
         if cache:
             await cache.set(kb_id, query, mode, results)
-        return results, False
+        return results, degraded
 
 
 def _build_messages(
@@ -639,6 +657,7 @@ async def _stream_response(
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
     degraded = False
+    failed_source_count = 0
     agent_steps_collected: list[dict] = []
 
     if kb_ids:
@@ -648,10 +667,17 @@ async def _stream_response(
             if skip_retrieval:
                 chunks = []
             else:
-                chunks, degraded = await _retrieve_multi_kb(retrieval_query, kb_ids, filter_obj)
+                # H3：完整接收 (results, degraded, failed_kb_ids)，不丢弃失败列表。
+                chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
+                    retrieval_query, kb_ids, filter_obj, tenant_id=tenant_id
+                )
+                failed_source_count = len(failed_kb_ids)
         except Exception as e:
-            logger.error("多知识库联合检索失败: %s", e)
+            # H3：except 分支异常导致结果缺失 → degraded=True（不硬编码 False）。
+            logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             chunks = []
+            degraded = True
+            failed_source_count = len(kb_ids)
 
     elif kb_id and mode == "agent":
         # Agent 模式：使用 EventBus→SSE 桥接
@@ -687,7 +713,7 @@ async def _stream_response(
             return tool_name in preset_allowed
 
         if _tool_enabled("knowledge_search"):
-            tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state))
+            tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
         if _tool_enabled("grep_chunks"):
             tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
         if _tool_enabled("list_knowledge_chunks"):
@@ -767,6 +793,9 @@ async def _stream_response(
         # 注意：工具持有的 state 对象和引擎内部的 state 是不同的
         # knowledge_refs 被 KnowledgeSearchTool 写入到传给工具的 state 中
         chunks = state.knowledge_refs
+        # H3：agent 模式 degraded 取工具写入的真实降级状态（不再恒 False）。
+        # KnowledgeSearchTool 持有此 state，检索源失败/路级降级时置 state.degraded=True。
+        degraded = state.degraded
         full_response = result_state.final_answer or ""
 
         # 发送引用来源和元数据
@@ -775,7 +804,8 @@ async def _stream_response(
             "references": [ref.model_dump() for ref in references],
             "metadata": {
                 "retrieval_mode": mode,
-                "degraded": False,
+                "degraded": degraded,
+                "failed_source_count": failed_source_count,
                 "llm_degraded": False,
             },
         }
@@ -803,10 +833,13 @@ async def _stream_response(
             chunks = []
         else:
             try:
-                chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr)
+                chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
             except Exception as e:
-                logger.error("检索失败: %s", e)
+                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False），单库失败计 1 源。
+                logger.error("检索失败: %s", sanitize_for_log(e))
                 chunks = []
+                degraded = True
+                failed_source_count = 1
 
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
@@ -873,6 +906,7 @@ async def _stream_response(
         "metadata": {
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
+            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
         },
     }
@@ -972,6 +1006,7 @@ async def chat_completions(
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
     degraded = False
+    failed_source_count = 0
 
     # 流式响应（检索和生成一体化，支持进度推送）
     if request.stream:
@@ -987,15 +1022,19 @@ async def chat_completions(
     elif use_multi_kb:
         # 多知识库联合检索
         try:
-            chunks, degraded = await _retrieve_multi_kb(retrieval_query, request.kb_ids, filter_obj)
+            # H3：完整接收 (results, degraded, failed_kb_ids)，failed_source_count 计入失败源数。
+            chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
+                retrieval_query, request.kb_ids, filter_obj, tenant_id=tenant_id
+            )
+            failed_source_count = len(failed_kb_ids)
         except Exception as e:
-            logger.error("多知识库联合检索失败: %s", e)
+            logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
     elif request.knowledge_base_id:
         try:
-            chunks, degraded = await _retrieve_chunks(retrieval_query, request.knowledge_base_id, mode, llm, expr=expr)
+            chunks, degraded = await _retrieve_chunks(retrieval_query, request.knowledge_base_id, mode, llm, expr=expr, tenant_id=tenant_id)
         except Exception as e:
-            logger.error("检索失败: %s", e)
+            logger.error("检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
@@ -1039,6 +1078,7 @@ async def chat_completions(
         metadata={
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
+            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
         },
     )
