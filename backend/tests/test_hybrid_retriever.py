@@ -424,25 +424,17 @@ class TestApplyCompositeScoring:
 
 
 class TestJaccardTokens:
-    """_jaccard_tokens() 单元测试"""
+    """_jaccard_tokens() 单元测试（词级分词 + Jaccard）"""
 
     def test_identical_texts(self):
         """完全相同的文本 Jaccard = 1.0"""
-        result = HybridRetriever._jaccard_tokens("你好世界", "你好世界")
+        result = HybridRetriever._jaccard_tokens("检索结果分析", "检索结果分析")
         assert result == 1.0
 
     def test_completely_different(self):
         """完全不同的文本 Jaccard = 0.0"""
-        result = HybridRetriever._jaccard_tokens("abc", "xyz")
+        result = HybridRetriever._jaccard_tokens("apple banana", "orange grape")
         assert result == 0.0
-
-    def test_partial_overlap(self):
-        """部分重叠的文本"""
-        # set_a = {'a', 'b', 'c', 'd'}  set_b = {'c', 'd', 'e', 'f'}
-        # intersection = {'c', 'd'} = 2, union = {'a','b','c','d','e','f'} = 6
-        # Jaccard = 2/6 = 1/3
-        result = HybridRetriever._jaccard_tokens("abcd", "cdef")
-        assert abs(result - 2.0 / 6.0) < 1e-9
 
     def test_both_empty(self):
         """两个空字符串返回 0.0"""
@@ -451,107 +443,116 @@ class TestJaccardTokens:
 
     def test_one_empty(self):
         """一个空字符串返回 0.0"""
-        result = HybridRetriever._jaccard_tokens("hello", "")
+        result = HybridRetriever._jaccard_tokens("hello world", "")
         assert result == 0.0
 
-    def test_chinese_character_level(self):
-        """中文文本使用字符级分词"""
-        # "检索结果" vs "检索优化" → intersection={'检','索'}, union={'检','索','结','果','优','化'}
-        result = HybridRetriever._jaccard_tokens("检索结果", "检索优化")
-        assert abs(result - 2.0 / 6.0) < 1e-9
+    def test_symmetric(self):
+        """Jaccard 对称：sim(a,b) == sim(b,a)"""
+        a = "合同违约责任条款说明"
+        b = "合同违约金额计算方式"
+        assert HybridRetriever._jaccard_tokens(a, b) == HybridRetriever._jaccard_tokens(b, a)
+
+    def test_range_bounded(self):
+        """相似度恒落在 [0, 1]"""
+        a = "这是一段用于测试的中文文本内容"
+        b = "这是另一段不太一样的中文文本"
+        sim = HybridRetriever._jaccard_tokens(a, b)
+        assert 0.0 <= sim <= 1.0
+
+    def test_word_order_invariant_more_robust_than_char_level(self):
+        """词级分词对仅语序不同的文本给出高相似度（词集合相同）"""
+        # 「甲诉乙」与「乙诉甲」：词集合一致，应判为高度相似
+        sim = HybridRetriever._jaccard_tokens("原告甲公司起诉被告乙公司", "被告乙公司起诉原告甲公司")
+        assert sim > 0.8
 
     def test_high_overlap(self):
-        """高度重叠的文本 Jaccard > 0.7"""
-        # 两段文本只有少量字符不同
-        text_a = "这是一段很长的测试文本内容用于验证"
-        text_b = "这是一段很长的测试文本内容用于检验"
+        """高度重叠的文本相似度较高"""
+        text_a = "这是一段很长的测试文本内容用于验证去冗余"
+        text_b = "这是一段很长的测试文本内容用于检验去冗余"
         result = HybridRetriever._jaccard_tokens(text_a, text_b)
-        assert result > 0.7
+        assert result > 0.5
 
 
 # ===== MMR 去冗余测试 =====
 
 
 class TestApplyMmr:
-    """_apply_mmr() 单元测试"""
+    """_apply_mmr() 单元测试（标准迭代式 MMR：重排序而非丢弃）"""
 
     def test_empty_input(self):
         """空列表直接返回"""
         result = HybridRetriever._apply_mmr([])
         assert result == []
 
-    def test_no_redundancy(self):
-        """无冗余时保留所有结果"""
+    def test_preserves_all_results(self):
+        """标准 MMR 重排序，不丢弃任何候选（长度不变）"""
         results = [
-            RetrievalResult(chunk_id="c1", content="完全不同的内容ABC", score=0.9, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c2", content="另一段完全不同XYZ", score=0.8, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c1", content="完全不同的内容ABC apple", score=0.9, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c2", content="另一段完全不同XYZ orange", score=0.8, doc_id="d1", metadata={}),
         ]
-        filtered = HybridRetriever._apply_mmr(results)
-        assert len(filtered) == 2
+        out = HybridRetriever._apply_mmr(results)
+        assert len(out) == 2
+        assert {r.chunk_id for r in out} == {"c1", "c2"}
 
-    def test_removes_highly_overlapping_chunks(self):
-        """去除高度重叠的 chunk"""
-        # c1 和 c2 内容几乎相同（只差一个字符）
+    def test_demotes_highly_overlapping_chunk(self):
+        """高度重叠的候选被排到不同独特内容之后（去冗余通过排序体现）"""
         base_content = "这是一段用于测试MMR去冗余功能的长文本内容，包含足够多的字符来确保高度重叠"
         results = [
             RetrievalResult(chunk_id="c1", content=base_content, score=0.9, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c2", content=base_content + "额", score=0.8, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c3", content="完全不同的内容，与前两段没有任何关系", score=0.7, doc_id="d2", metadata={}),
+            RetrievalResult(chunk_id="c2", content=base_content + "额外补充", score=0.85, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c3", content="完全不同的内容，讨论另一个独立主题的事项", score=0.7, doc_id="d2", metadata={}),
         ]
-        filtered = HybridRetriever._apply_mmr(results)
-        # c2 与 c1 高度重叠，应被去除
-        assert len(filtered) == 2
-        chunk_ids = [r.chunk_id for r in filtered]
-        assert "c1" in chunk_ids
-        assert "c3" in chunk_ids
-        assert "c2" not in chunk_ids
+        out = HybridRetriever._apply_mmr(results, lambda_param=0.5)
+        # 全部保留
+        assert len(out) == 3
+        # c1 相关性最高先选；随后 c3（与 c1 不冗余）应优先于 c2（与 c1 高度冗余）
+        order = [r.chunk_id for r in out]
+        assert order[0] == "c1"
+        assert order.index("c3") < order.index("c2")
 
-    def test_preserves_order(self):
-        """保持原始分数顺序"""
+    def test_no_redundancy_keeps_relevance_order(self):
+        """无冗余时按相关性（score）顺序选择"""
         results = [
-            RetrievalResult(chunk_id="c1", content="内容A独特的文本", score=0.9, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c2", content="内容B不同的文本", score=0.8, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c3", content="内容C另外的文本", score=0.7, doc_id="d2", metadata={}),
+            RetrievalResult(chunk_id="c1", content="内容甲 苹果 香蕉 橙子", score=0.9, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c2", content="内容乙 电脑 手机 平板", score=0.8, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c3", content="内容丙 高山 河流 海洋", score=0.7, doc_id="d2", metadata={}),
         ]
-        filtered = HybridRetriever._apply_mmr(results)
-        # 无冗余，顺序不变
-        assert filtered[0].chunk_id == "c1"
-        assert filtered[1].chunk_id == "c2"
-        assert filtered[2].chunk_id == "c3"
-
-    def test_custom_threshold(self):
-        """自定义 threshold 参数"""
-        # 使用极低的 threshold，几乎所有有重叠的都会被过滤
-        results = [
-            RetrievalResult(chunk_id="c1", content="abcdef", score=0.9, doc_id="d1", metadata={}),
-            RetrievalResult(chunk_id="c2", content="abcxyz", score=0.8, doc_id="d1", metadata={}),
-        ]
-        # threshold=0.1 → 只要有少量重叠就过滤
-        filtered = HybridRetriever._apply_mmr(results, threshold=0.1)
-        # 'abc' 重叠，Jaccard > 0.1，c2 应被过滤
-        assert len(filtered) == 1
-        assert filtered[0].chunk_id == "c1"
+        out = HybridRetriever._apply_mmr(results)
+        assert [r.chunk_id for r in out] == ["c1", "c2", "c3"]
 
     def test_single_result(self):
         """单个结果直接返回"""
         results = [
             RetrievalResult(chunk_id="c1", content="唯一内容", score=0.9, doc_id="d1", metadata={}),
         ]
-        filtered = HybridRetriever._apply_mmr(results)
-        assert len(filtered) == 1
-        assert filtered[0].chunk_id == "c1"
+        out = HybridRetriever._apply_mmr(results)
+        assert len(out) == 1
+        assert out[0].chunk_id == "c1"
 
-    def test_all_identical_keeps_first(self):
-        """所有内容完全相同时只保留第一个"""
-        same_content = "完全相同的内容"
+    def test_all_identical_preserved_but_reordered(self):
+        """所有内容完全相同时仍全部保留（重排序，不丢弃）"""
+        same_content = "完全相同的内容用于测试去冗余排序行为"
         results = [
             RetrievalResult(chunk_id="c1", content=same_content, score=0.9, doc_id="d1", metadata={}),
             RetrievalResult(chunk_id="c2", content=same_content, score=0.8, doc_id="d1", metadata={}),
             RetrievalResult(chunk_id="c3", content=same_content, score=0.7, doc_id="d1", metadata={}),
         ]
-        filtered = HybridRetriever._apply_mmr(results)
-        assert len(filtered) == 1
-        assert filtered[0].chunk_id == "c1"
+        out = HybridRetriever._apply_mmr(results)
+        assert len(out) == 3
+        # 内容相同时按相关性排序，最高分先选
+        assert out[0].chunk_id == "c1"
+
+    def test_lambda_one_is_pure_relevance(self):
+        """λ=1 时退化为纯相关性排序（冗余项权重为 0）"""
+        same = "完全相同的内容"
+        results = [
+            RetrievalResult(chunk_id="c1", content=same, score=0.5, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c2", content="独特的不同内容文本", score=0.9, doc_id="d1", metadata={}),
+            RetrievalResult(chunk_id="c3", content=same, score=0.7, doc_id="d1", metadata={}),
+        ]
+        out = HybridRetriever._apply_mmr(results, lambda_param=1.0)
+        # 纯相关性：按 score 降序 c2(0.9) > c3(0.7) > c1(0.5)
+        assert [r.chunk_id for r in out] == ["c2", "c3", "c1"]
 
 
 @pytest.mark.asyncio
@@ -573,12 +574,13 @@ async def test_mmr_integrated_in_search():
     hybrid = HybridRetriever(vector_retriever, sparse_retriever, reranker, db_factory)
     results = await hybrid.search("测试查询", kb_id="kb_001", top_k=10)
 
-    # c2 与 c1 高度重叠，应被 MMR 过滤
+    # 标准 MMR 重排序而非丢弃：三条全部保留
     chunk_ids = [r.chunk_id for r in results]
     assert "c1" in chunk_ids
+    assert "c2" in chunk_ids
     assert "c3" in chunk_ids
-    # c2 应该被过滤掉
-    assert "c2" not in chunk_ids
+    # c2 与 c1 高度重叠，应被排到与 c1 不冗余的 c3 之后
+    assert chunk_ids.index("c3") < chunk_ids.index("c2")
 
 
 @pytest.mark.asyncio

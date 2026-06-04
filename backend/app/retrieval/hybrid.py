@@ -19,6 +19,8 @@ from app.models.provider import RerankProvider
 from app.repositories.tenant_repo import current_tenant_scope
 from app.retrieval.base import BaseRetriever, RetrievalResult
 from app.retrieval.log_safety import sanitize_for_log
+from app.retrieval.textutil import jaccard as _jaccard_word_sets
+from app.retrieval.textutil import tokenize as _tokenize
 from app.retrieval.config import (
     PlatformConfigStore,
     RetrievalConfig,
@@ -486,21 +488,17 @@ class HybridRetriever(BaseRetriever):
 
     @staticmethod
     def _jaccard_tokens(text_a: str, text_b: str) -> float:
-        """基于字符级 token set 的 Jaccard 相似度
+        """两段文本的词级 Jaccard 相似度
 
-        对中文文本使用字符级分词（每个字符作为一个 token），
-        适合检测高度重叠的 chunk 对。
+        先用词级分词器切词（中文 jieba 搜索模式，不可用时退化字符 bigram；
+        纯非中文按空白切分，统一过滤单字 token 与纯标点），再算 token 集合的
+        Jaccard。相比字符级分词，词级能更好反映语义单元、抑制单字噪声，并能
+        区分仅语序不同的文本。
 
         Returns:
             Jaccard 相似度 [0.0, 1.0]，两个空集返回 0.0
         """
-        set_a = set(text_a)
-        set_b = set(text_b)
-        if not set_a and not set_b:
-            return 0.0
-        intersection = set_a & set_b
-        union = set_a | set_b
-        return len(intersection) / len(union)
+        return _jaccard_word_sets(_tokenize(text_a), _tokenize(text_b))
 
     @staticmethod
     def _apply_mmr(
@@ -508,37 +506,63 @@ class HybridRetriever(BaseRetriever):
         lambda_param: float = 0.7,
         threshold: float = 0.7,
     ) -> list[RetrievalResult]:
-        """Maximal Marginal Relevance 去冗余
+        """Maximal Marginal Relevance 去冗余（标准迭代式 MMR）
 
-        迭代选择结果，跳过与已选结果 Jaccard 相似度超过 threshold 的候选，
-        确保返回结果多样性。
+        每轮从未选候选中挑选 MMR 分数最高者，迭代直至选满或无候选：
+
+            mmr(d) = λ · relevance(d) − (1 − λ) · max_{s ∈ selected} sim(d, s)
+
+        - relevance：候选的 composite score（``result.score``，调用前已按其降序）。
+        - sim：候选与「已选集合」中各结果的词级 Jaccard，取最大值作为冗余度。
+        - λ 越大越偏相关性、越小越偏多样性（默认 0.7，平衡值）。
+
+        相比旧实现「相似度超阈值即跳过」，标准 MMR 在相关性与多样性之间做加权
+        权衡，会把「稍弱相关但带来新信息」的结果适当提前，而非简单丢弃近似项；
+        因此本方法对所有候选重排序并全部保留（去冗余通过排序体现，配合上游
+        rerank_top_k 截断），不再因阈值丢结果。
+
+        Token 集合按 chunk 预计算一次并缓存，避免 O(k²) 重复分词。
 
         Args:
-            results: 按 composite score 排序的检索结果
-            lambda_param: MMR lambda 参数，平衡相关性和多样性（WeKnora 验证值 0.7）
-            threshold: Jaccard 相似度阈值，超过此值的候选被跳过
+            results: 按 composite score 降序的检索结果
+            lambda_param: MMR λ 参数，平衡相关性与多样性（默认 0.7）
+            threshold: 保留参数仅为向后兼容签名，标准 MMR 不使用阈值；
+                当前实现忽略此参数。
 
         Returns:
-            去冗余后的结果列表
+            按 MMR 顺序重排后的结果列表（长度与输入一致）
         """
         if not results:
             return results
+        if len(results) == 1:
+            return list(results)
 
-        selected: list[RetrievalResult] = []
+        # 预计算每条候选的词级 token 集合（按 content），避免选择循环内重复分词。
+        token_sets = [_tokenize(r.content) for r in results]
 
-        for candidate in results:
-            # 检查候选与所有已选结果的 Jaccard 相似度
-            is_redundant = False
-            for sel in selected:
-                sim = HybridRetriever._jaccard_tokens(candidate.content, sel.content)
-                if sim > threshold:
-                    is_redundant = True
-                    break
+        n = len(results)
+        selected_idx: list[int] = []
+        remaining: set[int] = set(range(n))
 
-            if not is_redundant:
-                selected.append(candidate)
+        while remaining:
+            best_i = -1
+            best_mmr = float("-inf")
+            for i in remaining:
+                relevance = results[i].score
+                # 冗余度 = 与已选集合中各结果的最大 Jaccard（无已选时为 0）。
+                redundancy = 0.0
+                for s in selected_idx:
+                    sim = _jaccard_word_sets(token_sets[i], token_sets[s])
+                    if sim > redundancy:
+                        redundancy = sim
+                mmr = lambda_param * relevance - (1.0 - lambda_param) * redundancy
+                if mmr > best_mmr:
+                    best_mmr = mmr
+                    best_i = i
+            selected_idx.append(best_i)
+            remaining.discard(best_i)
 
-        return selected
+        return [results[i] for i in selected_idx]
 
     def _apply_composite_scoring(
         self, results: list[RetrievalResult], config=None
