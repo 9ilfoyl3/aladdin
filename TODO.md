@@ -255,15 +255,15 @@
 
 ---
 
-## 七、对标 WeKnora 的新方向（参考腾讯开源 WeKnora v0.6）
+## 七、检索与 Agent 能力的新方向
 
-> WeKnora（维娜拉）是腾讯开源的 LLM 知识管理框架，围绕 RAG 快速问答、ReAct Agent 智能推理、Wiki 自动生成三大核心能力构建。
-> 以下方向基于对 WeKnora 架构和特性的分析，结合 Artoo 现状提炼出可借鉴的改进点。
+> 以下方向围绕 RAG 快速问答、ReAct Agent 智能推理、Wiki 自动生成等能力，
+> 结合 Artoo 现状提炼出可借鉴的改进点。
 
 ### 15. Rerank 分数阈值 + 兜底回复机制
 - **文件**: `backend/app/retrieval/hybrid.py`、`backend/app/api/chat.py`
 - **现状**: rerank 后无分数阈值过滤，即使所有结果与 query 完全不相关，仍返回 top_k 条结果给 LLM，容易产生幻觉
-- **WeKnora 做法**:
+- **参考做法**:
   - 检索阈值可在对话策略中配置（知识库级别），低于阈值的结果直接丢弃
   - 当有效结果为空时，返回预设的"兜底回复"（如"知识库中未找到相关信息，请尝试换个问法"）
   - 兜底回复支持自定义模板，可按知识库配置不同的兜底话术
@@ -279,7 +279,7 @@
 ### 16. BM25 全文检索（第三路召回）
 - **文件**: `backend/app/storage/milvus.py`、`backend/app/retrieval/`、`backend/app/pipeline/pipeline.py`
 - **现状**: 检索只有 Dense + Sparse（BGE-M3 sparse vector）两路。Sparse vector 基于 subword tokenizer，对中文精确关键词匹配（人名、案号、合同编号）效果不如传统 BM25
-- **WeKnora 做法**:
+- **参考做法**:
   - 三路检索架构：BM25 稀疏召回 + Dense 稠密召回 + GraphRAG 图谱增强
   - BM25 通过 Elasticsearch 实现，使用 jieba 中文分词器，对精确关键词匹配效果显著优于 subword 级别的 sparse vector
   - 三路结果通过可配置权重的 RRF 融合，不同知识库可以调整各路权重（如法律文档加大 BM25 权重，技术文档加大 Dense 权重）
@@ -296,7 +296,7 @@
 ### 17. 端到端检索评测体系
 - **文件**: 新建 `backend/app/evaluation/`、修改 `backend/app/api/retrieval.py`
 - **现状**: 只有 `/api/retrieval/test` 单条测试接口，无批量评测、无量化指标
-- **WeKnora 做法**:
+- **参考做法**:
   - 内置端到端测试模块，支持检索+生成全链路可视化评估
   - 评估指标：召回命中率（Recall@K）、BLEU、ROUGE 生成质量指标
   - 支持上传 QA 测试集（问题 + 期望命中的文档/chunk），自动计算各项指标
@@ -315,7 +315,7 @@
 ### 18. 分块调试面板（可视化）
 - **文件**: 前端新建 `frontend/src/pages/ChunkDebug.tsx`、后端增强 `/api/documents/{doc_id}/chunks`
 - **现状**: 有 ChunkViewer 展示切片列表，但无法直观看到分块策略效果、元数据分布、embedding 质量
-- **WeKnora 做法**:
+- **参考做法**:
   - v0.5.2 引入"自适应三层分块 + 实时调试面板"
   - 调试面板功能：上传文档后实时预览分块结果，每个 chunk 展示元数据（章节路径、页码、元素类型）
   - 支持调整分块参数（chunk size、overlap）后重新预览，无需重新入库
@@ -333,7 +333,7 @@
 ### 19. Langfuse 全链路可观测性集成
 - **文件**: 新建 `backend/app/observability/`、修改 `backend/app/agent/orchestrator.py`、`backend/app/retrieval/hybrid.py`
 - **现状**: 有 PipelineLogger 结构化日志 + trace_id，但缺少 Token 消耗追踪、Agent 决策链路可视化、检索延迟分布统计
-- **WeKnora 做法**:
+- **参考做法**:
   - 无缝集成 Langfuse（开源可观测性平台），通过 Docker Profile 一键启动
   - 追踪维度：ReAct 循环每一步（路由/改写/检索/反思）、每次 LLM 调用的 input/output tokens、工具调用耗时、任务流水线各阶段
   - 提供 Trace 视图：完整展示一次对话从 query 到 answer 的全链路，包括中间的检索结果、LLM prompt、Agent 决策
@@ -353,7 +353,7 @@
 ### 20. 轻量级 GraphRAG（知识图谱增强检索）
 - **文件**: 新建 `backend/app/pipeline/graph_extractor.py`、`backend/app/retrieval/graph.py`、修改 `backend/app/schema/db.py`
 - **现状**: 纯向量检索，无法回答跨文档关联问题（如"A 公司和 B 公司的关系"）和全局性问题（如"这批合同涉及哪些方？"）
-- **WeKnora 做法**:
+- **参考做法**:
   - 完整的 GraphRAG 实现，基于 Neo4j 知识图谱
   - 入库阶段：用 LLM 从文档中提取实体（人名、机构、金额、日期等）和关系（属于、签署、涉及等），构建知识图谱
   - 检索阶段：三路之一，通过图遍历找到与 query 相关的实体及其关联节点，补充向量检索可能遗漏的跨文档信息
@@ -375,10 +375,10 @@
 - **优先级**: P3（长期方向，Phase 1 可作为中期目标）
 - **预估工作量**: Phase 1: 3-4 天，Phase 2: 5-7 天，Phase 3: 7-10 天
 
-### 22. ReAct Agent 模式（完整 Tool Calling 架构，对标 WeKnora v0.6）
+### 22. ReAct Agent 模式（完整 Tool Calling 架构）
 - **文件**: 新建 `backend/app/agent/react_engine.py`、修改 `backend/app/agent/orchestrator.py`、`backend/app/api/chat.py`
 - **现状**: Agent 模式使用固定管道（Planner→Executor→Reflector），虽然 v2 已支持意图拆分和分组检索，但检索策略仍由管道预设，LLM 无法动态决定搜索次数和角度
-- **WeKnora 做法**:
+- **参考做法**:
   - 完整的 ReAct（Reasoning + Acting）循环：LLM 作为 Agent 自主决定调用什么工具
   - `knowledge_search` 是一个 Tool，Agent 可以传入 1-5 个语义查询，自己决定搜什么
   - Agent 可以在一次对话中多次调用 `knowledge_search`，每次用不同角度
@@ -394,7 +394,7 @@
     - 定义 `knowledge_search`、`list_chunks`、`final_answer` 三个核心 Tool Schema
     - 实现 ReAct 循环引擎：解析 LLM 的 tool_call → 执行 → 将结果注入上下文 → 继续生成
   - **Phase 2: Progressive RAG Agent**
-    - 移植 WeKnora 的 Progressive RAG 系统提示词（适配中文法律场景）
+    - 设计 Progressive RAG 系统提示词（适配中文法律场景）
     - 实现"侦察→规划→执行→反思"的 Agent 工作流
     - 支持 Agent 动态决定检索策略（语义 vs 关键词 vs 混合）
     - 增加 MMR 多样性控制
@@ -407,10 +407,10 @@
 - **预估工作量**: Phase 1: 3-4 天，Phase 2: 4-5 天，Phase 3: 5-7 天
 - **前置依赖**: LLM 需支持 function calling（Ollama qwen2.5 已支持，vLLM 原生支持）
 
-### 23. 多轮对话 Query Rewrite（指代消解 + 意图分类，参考 WeKnora）
+### 23. 多轮对话 Query Rewrite（指代消解 + 意图分类）
 - **文件**: 新建 `backend/app/agent/query_rewrite.py`、修改 `backend/app/api/chat.py`
 - **现状**: 多轮对话中用户说"它的第25条是什么"，系统无法理解"它"指代的是上一轮提到的法律名称，导致检索失败
-- **WeKnora 做法**:
+- **参考做法**:
   - 在对话入口（chat API 层）增加 Query Rewrite 步骤，在消息进入 Agent 之前先做指代消解
   - 结合对话历史，将代词（它、这个、那个）替换为明确的实体
   - 同时做意图分类（greeting / kb_search / follow_up / chitchat 等），非检索意图直接跳过 Agent
@@ -438,7 +438,7 @@
 ### 25. MMR 多样性去重（Maximal Marginal Relevance）
 - **文件**: 修改 `backend/app/retrieval/hybrid.py`
 - **现状**: Rerank 后直接按分数取 top-K，当知识库有大量相似 chunk（如同一段话被切成多个重叠 chunk）时，返回结果高度重复
-- **WeKnora 做法**:
+- **参考做法**:
   - 在 Rerank 之后、返回最终结果之前，应用 MMR 算法
   - lambda=0.7（平衡相关性和多样性）
   - 基于 Jaccard 相似度计算 chunk 间的冗余度
@@ -507,7 +507,7 @@
 ### 21. 数据源连接器（飞书/Notion/语雀自动同步）
 - **文件**: 新建 `backend/app/connectors/`
 - **现状**: 只支持手动上传文件，不支持从外部平台自动同步知识
-- **WeKnora 做法**:
+- **参考做法**:
   - 支持飞书、Notion、语雀等外部平台的知识库自动同步
   - 支持增量同步和全量同步两种模式
   - 连接器凭据使用 AES-256-GCM 加密存储

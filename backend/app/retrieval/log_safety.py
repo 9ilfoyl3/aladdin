@@ -4,7 +4,7 @@
 回车 / 换行 / 制表符，攻击者可借此伪造日志行（CR/LF 日志注入）。统一经
 ``sanitize_for_log`` 将 ``\\r`` / ``\\n`` / ``\\t`` 替换为空格后再入日志。
 
-借 weknora ``SanitizeForLog`` 思路。原为任务 2 在 ``hybrid.py`` 内联的
+采用日志脱敏的通用思路。原为任务 2 在 ``hybrid.py`` 内联的
 ``replace`` 链，任务 3 抽取为公共函数供 hybrid / multi_kb / chat 复用。
 """
 

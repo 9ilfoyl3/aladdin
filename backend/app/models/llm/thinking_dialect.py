@@ -1,8 +1,8 @@
 """思考链（thinking）请求方言分派
 
 不同模型厂商通过不同的请求字段控制「是否输出思考链」。前端只暴露一个布尔开关
-（thinking_enabled），后端据厂商自动选择正确的字段格式注入到请求体。这等价于
-WeKnora 的 per-provider RequestCustomizer 表（chat_provider_spec.go）。
+（thinking_enabled），后端据厂商自动选择正确的字段格式注入到请求体。采用
+per-provider RequestCustomizer 的分派表实现。
 
 设计要点：
 - 每个 customizer 接收 (payload, enable, model)，**就地修改并返回 payload**。

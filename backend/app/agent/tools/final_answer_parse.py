@@ -4,7 +4,7 @@ LLM 生成 final_answer 工具调用的 arguments 时，偶尔会产出不合法
 未转义的引号、尾随逗号、截断的右括号、把正则元字符（\\d、\\+）当字面量写入等。
 若直接 json.loads 失败就把整段原始 JSON 当答案保存，用户会看到一坨 `{"answer":"..."}`。
 
-本模块移植自 WeKnora internal/agent/tools 的三级容错策略：
+本模块采用三级容错策略：
   1. 严格 json.loads
   2. repair_json（修复尾随逗号、非法转义、括号配平）后再 loads
   3. 正则兜底抽取 "answer": "..." 字段

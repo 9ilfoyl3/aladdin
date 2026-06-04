@@ -3,8 +3,6 @@
 部分模型（DeepSeek、Qwen 等）会把思维链直接以 <think>...</think> 块嵌进
 content 字段。这类内容属于推理过程，不应出现在展示给用户的答案里。本模块在
 答案发射前统一剥离，使最终答案干净、与模型无关。
-
-移植自 WeKnora internal/agent/tools/strip_think.go。
 """
 
 from __future__ import annotations

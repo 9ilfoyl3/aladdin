@@ -4,14 +4,13 @@
 用于将 final_answer 工具的 answer 字段逐 token 流式输出为正文（answer），
 或将 thinking 工具的 thought 字段流式输出为思考（thought）。
 
-移植自 WeKnora internal/models/chat/json_field_extractor.go：使用状态机
-跳过 JSON 前缀（如 `{"answer":"`）后定位值内容起点，再按 JSON 转义规则
+使用状态机跳过 JSON 前缀（如 `{"answer":"`）后定位值内容起点，再按 JSON 转义规则
 安全地处理跨 chunk 的转义序列，避免把半个 `\\uXXXX` 或末尾悬挂的 `\\` 当作
 普通字符吐给前端（这正是此前手写 `.replace()` 链产生斜杠/横杠乱码的根因）。
 
-与 Go 版本的差异：Python str 是 Unicode，每个码点占一个下标，httpx 解码后
-逐 chunk 拿到的都是完整 str，不会出现半个多字节 UTF-8 字符，因此无需 Go 中的
-字节级 UTF-8 边界处理；唯一需要跨 chunk 防护的是 JSON 转义序列。
+Python str 是 Unicode，每个码点占一个下标，httpx 解码后逐 chunk 拿到的都是完整
+str，不会出现半个多字节 UTF-8 字符，因此无需字节级 UTF-8 边界处理；唯一需要
+跨 chunk 防护的是 JSON 转义序列。
 """
 
 from __future__ import annotations

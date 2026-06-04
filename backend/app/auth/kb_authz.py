@@ -4,7 +4,7 @@
 设计为「纯函数 + 注入数据」——所有依赖（KB 关键字段、适用的 user-grants）由调用方
 查好后注入，本函数不触库、不触 Milvus，因而可被属性测试高频驱动。
 
-权限模型为 WeKnora 式「固定角色（admin/member）+ 归属轴（owner）」，不再有任何权限点字典。
+权限模型为「固定角色（admin/member）+ 归属轴（owner）」，不再有任何权限点字典。
 
 判定顺序（**跨租户前置永远第一**，owner 先于一切角色判定）：
   1. 跨租户硬隔离前置：kb.tenant_id != identity.tenant_id -> (deny, 404)，先于一切。

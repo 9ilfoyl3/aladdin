@@ -3,7 +3,7 @@
 结合三路检索：稠密向量 + 稀疏向量 + BM25 全文检索，
 通过 RRF 融合排序，再经 Rerank 精排，最后执行父块扩展以返回完整上下文。
 
-参考 WeKnora / RAGFlow 的三路检索架构：
+参考主流 RAG 的三路检索架构：
 - Dense（语义相似度）：擅长理解意图和语义匹配
 - Sparse（BGE-M3 稀疏向量）：擅长 subword 级别的模糊匹配
 - BM25（全文检索）：擅长精确关键词匹配（条款编号、人名、案号等）
@@ -48,7 +48,7 @@ def _current_tenant_id() -> str | None:
 
 # ============================================================
 # Rerank_Filter 常量（B2 软阈值多重兜底，禁止魔法值）
-# 对照 design.md Components C3 常量表与 weknora rerank.go 三层。
+# 对照 design.md Components C3 常量表的 rerank 三层软阈值。
 # ============================================================
 
 # 阈值降级触发线：仅当 rerank_threshold 严格大于此值才允许降级（Req 8.1/8.2）。
@@ -120,7 +120,7 @@ class HybridRetriever(BaseRetriever):
 
         流程：并行三路检索 → RRF 融合 → Rerank 精排 → 父块扩展
 
-        三路检索（参考 WeKnora / RAGFlow），每路取 config.recall_k 条候选：
+        三路检索（参考主流 RAG），每路取 config.recall_k 条候选：
         - Dense：语义相似度
         - Sparse：BGE-M3 稀疏向量
         - BM25：全文检索（精确关键词匹配）
@@ -615,7 +615,7 @@ class HybridRetriever(BaseRetriever):
     def _apply_rerank_filter(
         self, reranked: list[RetrievalResult], config: RetrievalConfig
     ) -> list[RetrievalResult]:
-        """rerank 软阈值过滤 + 多重兜底（B2，对照 weknora rerank.go 三层）。
+        """rerank 软阈值过滤 + 多重兜底（B2，对照 design.md rerank 三层）。
 
         作用在 **rerank 原始分数** 上（输入 ``reranked`` 的 ``score`` 必须是 rerank 原始分，
         即在 ``_apply_composite_scoring`` 改写 score 之前调用）。输出保持降序、score 不变。

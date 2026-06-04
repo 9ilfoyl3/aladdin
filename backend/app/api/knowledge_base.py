@@ -1,6 +1,6 @@
 """知识库 CRUD 接口（kb-sharing-refinement：固定角色 + 归属 + owner 实体专属）。
 
-权限模型为 WeKnora 式「固定角色（admin/member）+ 归属轴」，本次细化：
+权限模型为「固定角色（admin/member）+ 归属轴」，本次细化：
 - create 用 ``require_member()`` 盖 ``owner_user_id``，默认 visibility=private；
 - list/get 读、文档/文件夹内容读写经 ``kb_authorization_decision``（admin 只读他人库、
   组织读写档成员可写）；

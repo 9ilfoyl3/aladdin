@@ -5,8 +5,7 @@ VllmLLM 通过 OpenAI 兼容协议承载众多厂商端点（vLLM 自部署、�
 开关的请求字段格式各不相同，必须按厂商分派（见 thinking_dialect.py）。
 
 本模块仅负责「这是哪家厂商」的识别，输入是 base_url（主）与 model 名（辅），
-输出统一的 LLMProviderName 枚举。前端无需配置厂商——后端据 base_url 自动判定，
-与 WeKnora internal/models/provider/provider.go 的 DetectProvider 思路一致。
+输出统一的 LLMProviderName 枚举。前端无需配置厂商——后端据 base_url 自动判定。
 """
 
 from __future__ import annotations
@@ -70,7 +69,7 @@ def detect_provider(base_url: str, model: str = "") -> LLMProviderName:
 def is_qwen_thinking_model(model: str) -> bool:
     """是否为支持思维链、需特殊处理 enable_thinking 的 Qwen 模型。
 
-    对齐 WeKnora IsQwenThinkingModel：Qwen3 全系，以及 qwen-plus/max/turbo。
+    覆盖 Qwen3 全系，以及 qwen-plus/max/turbo。
     """
     name = (model or "").lower()
     return (

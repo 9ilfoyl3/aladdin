@@ -577,14 +577,14 @@ class TestMultiKBConcurrencyLimit:
 
     @pytest.mark.asyncio
     async def test_default_max_concurrency_is_4(self):
-        """默认 max_concurrency 为 4（对齐 weknora）"""
+        """默认 max_concurrency 为 4"""
         mock_hybrid = AsyncMock()
         retriever = MultiKBRetriever(hybrid_retriever=mock_hybrid)
         assert retriever.max_concurrency == 4
 
     @pytest.mark.asyncio
     async def test_default_per_source_timeout_is_30(self):
-        """默认 per_source_timeout 为 30s（对齐 weknora）"""
+        """默认 per_source_timeout 为 30s"""
         mock_hybrid = AsyncMock()
         retriever = MultiKBRetriever(hybrid_retriever=mock_hybrid)
         assert retriever.per_source_timeout == 30.0

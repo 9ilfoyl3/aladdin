@@ -53,8 +53,8 @@ class MultiKBRetriever:
         """
         Args:
             hybrid_retriever: 混合检索器实例
-            max_concurrency: 同时检索的最大源数量（默认 4，对齐 weknora defaultMultiStoreFanoutLimit）
-            per_source_timeout: 每个检索源的超时秒数（默认 30s，对齐 weknora defaultMultiStoreRetrieveTimeout）
+            max_concurrency: 同时检索的最大源数量（默认 4）
+            per_source_timeout: 每个检索源的超时秒数（默认 30s）
         """
         self.retriever = hybrid_retriever
         self.max_concurrency = max_concurrency

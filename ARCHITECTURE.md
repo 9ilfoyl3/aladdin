@@ -133,7 +133,7 @@ Chat API 通过 `asyncio.Queue` 桥接 EventBus 与 SSE，把事件转为 OpenAI
 
 ## Progressive RAG 系统提示词
 
-默认系统提示词（`prompts/progressive_rag.py`）改编自 WeKnora 的 "Assess-Reconnaissance-Plan-Execute" 工作流，核心是 **Evidence-First**：
+默认系统提示词（`prompts/progressive_rag.py`）采用 "Assess-Reconnaissance-Plan-Execute"（评估-侦察-规划-执行）工作流，核心是 **Evidence-First**：
 
 1. **Intent Assessment** —— 纯对话（问候 / 致谢）直接 `final_answer`，否则进入检索。
 2. **Phase 1 侦察** —— grep_chunks（关键词）+ knowledge_search（语义）初探，命中后**必须** list_knowledge_chunks 深读。
