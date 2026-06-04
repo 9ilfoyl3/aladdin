@@ -707,7 +707,6 @@ async def _stream_response(
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
     degraded = False
-    failed_source_count = 0
     failed_kb_ids: list[str] = []  # 哪些源失败（含 SESSION_FILES_KB_ID 时为会话源失败），供前端区分提示
     agent_steps_collected: list[dict] = []
 
@@ -725,16 +724,14 @@ async def _stream_response(
                     retrieval_query, kb_ids, filter_obj, tenant_id=tenant_id,
                     session_id=session_id,
                 )
-                failed_source_count = len(failed_kb_ids)
         except Exception as e:
             # H3：except 分支异常导致结果缺失 → degraded=True（不硬编码 False）。
             logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             chunks = []
             degraded = True
-            # 仅会话源时 kb_ids=[]，failed_source_count 至少计 1（会话源）。
-            failed_source_count = max(len(kb_ids), 1)
             # 整体异常无法区分具体失败源；若本次含会话源（kb_ids 为空即仅会话源，
             # 或有 session_id 且该会话有文件），把会话源标记为失败以便前端区分提示。
+            # failed_kb_ids 失败源列表由 _build_degraded_metadata 据此派生 failed_source_count。
             failed_kb_ids = list(kb_ids) if kb_ids else [SESSION_FILES_KB_ID]
 
     elif kb_id and mode == "agent":
@@ -893,11 +890,10 @@ async def _stream_response(
             try:
                 chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
             except Exception as e:
-                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False），单库失败计 1 源。
+                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False）。
                 logger.error("检索失败: %s", sanitize_for_log(e))
                 chunks = []
                 degraded = True
-                failed_source_count = 1
                 # 单库 direct/hybrid 路径只有正式知识库源（无会话源），失败即知识库源失败。
                 failed_kb_ids = [kb_id]
 
@@ -1082,7 +1078,6 @@ async def chat_completions(
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
     degraded = False
-    failed_source_count = 0
     failed_kb_ids: list[str] = []  # 失败源（含 SESSION_FILES_KB_ID 时为会话源），供前端区分提示
 
     # 流式响应（检索和生成一体化，支持进度推送）
@@ -1102,12 +1097,11 @@ async def chat_completions(
     elif use_multi_kb:
         # 多知识库联合检索（含"仅会话文件"场景，kb_ids 可能为空列表）
         try:
-            # H3：完整接收 (results, degraded, failed_kb_ids)，failed_source_count 计入失败源数。
+            # H3：完整接收 (results, degraded, failed_kb_ids)；失败源经 _build_degraded_metadata 透传前端。
             chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
                 retrieval_query, request.kb_ids or [], filter_obj, tenant_id=tenant_id,
                 session_id=request.session_id,
             )
-            failed_source_count = len(failed_kb_ids)
         except Exception as e:
             logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
