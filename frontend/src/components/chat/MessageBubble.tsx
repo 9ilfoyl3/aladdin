@@ -202,7 +202,7 @@ function AgentStreamContent({
   const answerSegments = segments.filter((s) => s.type === 'answer')
 
   return (
-    <div className="px-4 pb-3 space-y-3">
+    <div className="px-4 py-3 space-y-3">
       {/* 步骤统计面板 */}
       {processSegments.length > 0 && (
         <StepSummaryPanel
