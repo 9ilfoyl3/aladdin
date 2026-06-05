@@ -74,9 +74,19 @@ function Chat() {
     enabled: !!currentSessionId,
   })
 
-  // 切换会话时清掉本地占位（避免 A 会话上传中切到 B 仍显示）
+  // 切换会话时清掉本地占位（避免 A 会话上传中切到 B 仍显示）。
+  // 用 ref 跟踪上一次会话：跳过「null -> 新建会话」首建场景——该场景是新对话首次
+  // 上传时由 ensureSessionId() 创建会话触发的，此刻 handleUploadSessionFiles 正要
+  // 加上传占位，若在此清空会把刚加的「处理中」占位冲掉，导致看不到上传进度。
+  const prevSessionForPendingRef = useRef<string | null>(currentSessionId)
   useEffect(() => {
-    setPendingFiles([])
+    const prev = prevSessionForPendingRef.current
+    prevSessionForPendingRef.current = currentSessionId
+    // 仅在「从一个已存在会话切到另一个会话」或「切回无会话」时清空；
+    // 「null -> 新建会话」不清（保留上传发起时刚加的占位）。
+    if (prev !== null) {
+      setPendingFiles([])
+    }
   }, [currentSessionId])
 
   // 默认选中 is_default 的 Agent 预设
@@ -644,11 +654,18 @@ function Chat() {
   }
 
   async function handleUploadSessionFiles(files: FileList) {
+    // 关键：在任何 await 之前同步拷贝 FileList。files 是 input.files 的实时引用，
+    // ChatInput 在调用本函数后会立即执行 e.target.value=''（为支持重复选同名文件），
+    // 该操作会清空这个 FileList。若等到 await ensureSessionId() 之后再读，files 已为空，
+    // 导致上传循环不执行（表现为：会话建了、列表查了，但上传 POST 永不发出）。
+    const fileArr = Array.from(files)
+    if (fileArr.length === 0) return
+
     const sessionId = await ensureSessionId()
     if (!sessionId) return
 
     // 逐个串行上传（同步建索引耗时较长，避免并发打爆 API 进程的 embed 信号量）
-    for (const file of Array.from(files)) {
+    for (const file of fileArr) {
       const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`
       setPendingFiles((prev) => [
         ...prev,

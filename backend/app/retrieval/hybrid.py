@@ -401,7 +401,11 @@ class HybridRetriever(BaseRetriever):
         effective_tenant = tenant_id if tenant_id is not None else _current_tenant_id()
         config = await self._config_store.get_effective(effective_tenant)
 
-        rerank_candidates = results[: top_k * 2]
+        # 候选池取 config.rerank_candidate_k（默认 50），与单库 search 路径对齐。
+        # 此前用 top_k*2（20）过小：多库 + 会话文件合并后候选可达上百条，只送 20 条进
+        # reranker 会把真正相关但 RRF 排名靠后的 chunk（如另一来源的精确条文）截断在
+        # rerank 之前，导致"选了知识库却答不出其内容"。reranker 本就擅长从较大候选池精选。
+        rerank_candidates = results[: config.rerank_candidate_k]
         try:
             reranked = await self._rerank(query, rerank_candidates, top_k, config)
             print(f"[Retrieval] 统一 Rerank 后: {len(reranked)} 条")

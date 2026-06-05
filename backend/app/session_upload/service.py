@@ -365,12 +365,13 @@ class SessionUploadService:
                 raise
 
             # 7b) 写 SessionFile + SessionChunk（单事务，commit 失败 with 自动回滚）
+            #     顺序关键：SessionChunk.file_id 外键指向 session_files.id，PostgreSQL 强制
+            #     外键约束，必须先插入父行 SessionFile 再插入子行 SessionChunk，否则触发
+            #     IntegrityError（外键违反）。SessionChunk 用裸 file_id 列（无 ORM
+            #     relationship），SQLAlchemy 工作单元不会自动为其排序，故显式 add 父行 +
+            #     flush 后再 add 子行。（SQLite 默认不强制外键，故单测未暴露此问题。）
             try:
                 async with self._db_session_factory() as session:
-                    for row in parent_chunk_records:
-                        session.add(row)
-                    for row in child_chunk_records:
-                        session.add(row)
                     session.add(
                         SessionFile(
                             id=file_id,
@@ -384,6 +385,12 @@ class SessionUploadService:
                             status="completed",
                         )
                     )
+                    # 先 flush 父行，确保 session_files 行已存在，满足子行外键约束。
+                    await session.flush()
+                    for row in parent_chunk_records:
+                        session.add(row)
+                    for row in child_chunk_records:
+                        session.add(row)
                     await session.commit()
             except Exception:
                 # DB 写失败 → Milvus 已写入需清理（with 已回滚 DB 事务）。
