@@ -272,24 +272,25 @@ class _FakeAsyncSessionCtx:
 
 
 @pytest.mark.asyncio
-async def test_get_effective_none_emits_warning_and_returns_defaults(caplog):
-    """get_effective(None) 记一条 WARNING（H5 可观测性），仍返回全 Safe_Default 不抛错、不打 DB。"""
+async def test_get_effective_none_reads_platform_row(caplog):
+    """全平台一份：get_effective(None) 读平台单行（不再短路、不再警告），返回平台配置/全默认。
+
+    capability-config-to-platform：检索/分块参数已上收为平台底座，任意入参（含 None）
+    都读同一平台单行；行缺失时返回全 Safe_Default。
+    """
+    from app.retrieval.config import PLATFORM_RETRIEVAL_KEY
+
     session = MagicMock()
     session.get = AsyncMock(return_value=None)
     factory = MagicMock(return_value=_FakeAsyncSessionCtx(session))
 
     store = RetrievalConfigStore(factory)
 
-    with caplog.at_level(logging.WARNING, logger="app.retrieval.config"):
-        config = await store.get_effective(None)
+    config = await store.get_effective(None)
 
-    # 仍返回全默认配置
+    # 行缺失 → 全默认配置
     assert config == RetrievalConfig()
-    # 不打 DB（None 直接短路）
-    assert session.get.await_count == 0
-    # 产生 WARNING，且消息指向 tenant_id=None / 全默认回退
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "tenant_id=None" in w.getMessage() or "全默认" in w.getMessage()
-        for w in warnings
-    ), f"未捕获到 get_effective(None) 的 WARNING：{[w.getMessage() for w in warnings]}"
+    # 全平台一份：None 入参也读平台单行（主键为平台键）
+    assert session.get.await_count == 1
+    args, _ = session.get.call_args
+    assert args[1] == PLATFORM_RETRIEVAL_KEY

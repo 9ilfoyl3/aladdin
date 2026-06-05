@@ -309,25 +309,33 @@ def validate_patch(patch: dict) -> list[FieldError]:
 # 单一事实源里全部字段名，行 ↔ dict 转换只取这些列（忽略 tenant_id / updated_at）。
 _CONFIG_FIELD_NAMES: tuple[str, ...] = tuple(RETRIEVAL_FIELD_SPECS.keys())
 
+# 全平台一份固定主键（capability-config-to-platform）：检索/切片参数为平台底座，
+# 不再按租户分行，统一存于该 sentinel 主键的单行，仅超级管理员维护、对全平台生效。
+# Store 入口把任意传入 tenant_id（含 None / kb.tenant_id / contextvar 租户）规范化为
+# 该键，保证「写哪行 = 读哪行」恒一致，运行时调用点（hybrid/pipeline/kb/limits）无需改动。
+PLATFORM_RETRIEVAL_KEY = "__platform__"
+
 
 class RetrievalConfigStore:
-    """检索配置读取/写入层（**按租户分键**），绕过 ``get_settings()`` 的 ``@lru_cache``，
-    支持即时热生效。
+    """检索配置读取/写入层（**全平台一份**，capability-config-to-platform），绕过
+    ``get_settings()`` 的 ``@lru_cache``，支持即时热生效。
 
-    每进程一个实例（API / Worker 各自持有）。内存缓存按 ``tenant_id`` 分键
-    （``dict[tenant_id, (RetrievalConfig, cached_at)]``），短 TTL + 写后失效：
+    历史上按 ``tenant_id`` 分键；现检索/切片参数已上收为平台底座（全平台共用一份，
+    仅超管维护）。为零改动运行时调用点，方法仍保留 ``tenant_id`` 形参，但内部一律
+    规范化为 ``PLATFORM_RETRIEVAL_KEY``：无论调用方传 None / kb.tenant_id / contextvar
+    租户，都落到同一平台单行。
 
-    - ``get_effective(tenant_id)``：``tenant_id`` 为 None（离线评测 / Worker 无上下文 /
-      超管 platform 态）→ 直接返回全 Safe_Default，**不打 DB、不缓存**（Req 1.11）。
-      否则缓存[tenant_id] 命中（未过期）直接返回；缺失则读 DB 行（主键 = tenant_id）→
-      ``RetrievalConfig.effective_from_raw`` → 写缓存[tenant_id]。DB 读失败时**不抛错**，
-      降级返回全 Safe_Default 并记 WARNING（检索可用性优先；不缓存降级结果）。
-    - ``update(tenant_id, patch)``：UPSERT 该租户行 → 失效缓存[tenant_id] → 返回新的有效配置。
-      ``tenant_id`` 必须非空（写操作必须指定目标租户）。调用前应已通过 ``validate_patch``。
-    - ``reset_defaults(tenant_id)``：将该租户行所有字段写为各自 Safe_Default → 失效缓存 → 返回全默认。
-    - ``invalidate(tenant_id=None)``：失效某租户缓存（None 时清空全部，用于测试）。
+    每进程一个实例（API / Worker 各自持有）。内存缓存为单键，短 TTL + 写后失效：
 
-    设计依据：design.md Components C2；Architecture（租户级即时热生效数据流）。
+    - ``get_effective(tenant_id=None)``：缓存命中（未过期）直接返回；否则读 DB 平台单行
+      （主键 = ``PLATFORM_RETRIEVAL_KEY``）→ ``RetrievalConfig.effective_from_raw`` → 写缓存。
+      DB 读失败时**不抛错**，降级返回全 Safe_Default 并记 WARNING（检索可用性优先；不缓存降级结果）。
+    - ``update(tenant_id, patch)``：UPSERT 平台单行 → 失效缓存 → 返回新的有效配置。
+      调用前应已通过 ``validate_patch``。
+    - ``reset_defaults(tenant_id)``：将平台单行所有字段写为各自 Safe_Default → 失效缓存 → 返回全默认。
+    - ``invalidate(tenant_id=None)``：失效平台单键缓存。
+
+    设计依据：design.md Components C2；Architecture（即时热生效数据流）。
     """
 
     # 短 TTL：未命中失效时最多 5s 收敛；同进程写后立即失效（不等 TTL）。
@@ -345,11 +353,8 @@ class RetrievalConfigStore:
         self._cache: dict[str, tuple[RetrievalConfig, float]] = {}
 
     def invalidate(self, tenant_id: str | None = None) -> None:
-        """失效内存缓存：给定 tenant_id 则失效该租户；None 时清空全部（写后立即生效的关键）。"""
-        if tenant_id is None:
-            self._cache.clear()
-        else:
-            self._cache.pop(tenant_id, None)
+        """失效内存缓存（全平台一份：忽略传入 tenant_id，统一失效平台单键）。"""
+        self._cache.pop(PLATFORM_RETRIEVAL_KEY, None)
 
     def _cache_get(self, tenant_id: str) -> RetrievalConfig | None:
         """读某租户缓存，命中且未过期则返回，否则 None。"""
@@ -370,28 +375,21 @@ class RetrievalConfigStore:
         """把 ORM 行转为 raw dict，只取 ``RETRIEVAL_FIELD_SPECS`` 中的字段（忽略 tenant_id / updated_at）。"""
         return {name: getattr(row, name) for name in _CONFIG_FIELD_NAMES}
 
-    async def get_effective(self, tenant_id: str | None) -> RetrievalConfig:
-        """读某租户有效配置（按租户分键缓存）。
+    async def get_effective(self, tenant_id: str | None = None) -> RetrievalConfig:
+        """读平台有效检索配置（全平台一份）。
 
-        - ``tenant_id`` 为 None → 直接返回全 Safe_Default（不打 DB、不缓存，Req 1.11）。
-        - 缓存[tenant_id] 命中（未过期）直接返回。
-        - 否则读 DB 行（主键 = tenant_id）→ ``effective_from_raw`` → 写缓存[tenant_id]。
+        历史形参 ``tenant_id`` 保留以兼容运行时调用点（hybrid/pipeline/kb/limits），
+        但一律规范化为 ``PLATFORM_RETRIEVAL_KEY``：无论传 None / kb.tenant_id / contextvar
+        租户，都读同一平台单行。
+
+        - 缓存命中（未过期）直接返回。
+        - 否则读 DB 平台单行（主键 = ``PLATFORM_RETRIEVAL_KEY``）→ ``effective_from_raw``
+          → 写缓存。行缺失（首次未配）→ 全 Safe_Default。
         - DB 读失败降级返回全 Safe_Default（不抛错、不缓存），并记一条 WARNING。
-
-        WHEN ``tenant_id`` 为 None 时记一条 WARNING（H5 可观测性）：正常的离线评测 /
-        Worker 无上下文 / 超管 platform 态会命中此分支，但**租户用户的检索请求若也走到这里**，
-        即说明租户上下文未被正确传递（如流式响应中 contextvar 已 reset），漏传从此可观测。
-        日志不改变返回值（仍返回全 Safe_Default、不抛错）。
         """
-        # 无租户上下文（离线/Worker/超管 platform 态）：全默认，不打 DB（Req 1.11）。
-        if tenant_id is None:
-            logger.warning(
-                "RetrievalConfig.get_effective 收到 tenant_id=None，回退全默认检索配置；"
-                "若发生在租户用户的检索请求中，说明租户上下文未正确传递（H5）"
-            )
-            return RetrievalConfig()
+        key = PLATFORM_RETRIEVAL_KEY
 
-        cached = self._cache_get(tenant_id)
+        cached = self._cache_get(key)
         if cached is not None:
             return cached
 
@@ -399,47 +397,46 @@ class RetrievalConfigStore:
             from app.schema.db import RetrievalConfigRow
 
             async with self._session_factory() as session:
-                row = await session.get(RetrievalConfigRow, tenant_id)
+                row = await session.get(RetrievalConfigRow, key)
                 raw = self._row_to_raw(row) if row is not None else None
         except Exception as e:
             # 检索可用性优先：DB 读失败降级为全 Safe_Default，不抛错、不缓存。
-            logger.warning("读取租户 %s 检索配置失败（降级为全默认值）: %s", tenant_id, e)
+            logger.warning("读取平台检索配置失败（降级为全默认值）: %s", e)
             return RetrievalConfig.effective_from_raw(None)
 
         config = RetrievalConfig.effective_from_raw(raw)
-        self._cache_put(tenant_id, config)
+        self._cache_put(key, config)
         return config
 
-    async def update(self, tenant_id: str, patch: dict) -> RetrievalConfig:
-        """UPSERT 该租户行（仅写 patch 中的检索字段）→ 失效该租户缓存 → 返回新的有效配置。
+    async def update(self, tenant_id: str | None, patch: dict) -> RetrievalConfig:
+        """UPSERT 平台单行（仅写 patch 中的检索字段）→ 失效缓存 → 返回新的有效配置。
 
-        ``tenant_id`` 必须非空（写操作必须指定目标租户）。调用前应已通过 ``validate_patch``。
-        只接受 ``RETRIEVAL_FIELD_SPECS`` 中的字段，其余键忽略，避免把未知字段写入。
+        全平台一份：忽略传入 ``tenant_id``，统一写 ``PLATFORM_RETRIEVAL_KEY`` 单行。
+        调用前应已通过 ``validate_patch``。只接受 ``RETRIEVAL_FIELD_SPECS`` 中的字段，
+        其余键忽略，避免把未知字段写入。
         """
-        if not tenant_id:
-            raise ValueError("update 必须指定非空 tenant_id（写操作须定位目标租户）")
-
         from app.schema.db import RetrievalConfigRow
 
+        key = PLATFORM_RETRIEVAL_KEY
         clean_patch = {k: v for k, v in patch.items() if k in RETRIEVAL_FIELD_SPECS}
 
         async with self._session_factory() as session:
-            row = await session.get(RetrievalConfigRow, tenant_id)
+            row = await session.get(RetrievalConfigRow, key)
             if row is None:
-                row = RetrievalConfigRow(tenant_id=tenant_id, **clean_patch)
+                row = RetrievalConfigRow(tenant_id=key, **clean_patch)
                 session.add(row)
             else:
                 for name, value in clean_patch.items():
                     setattr(row, name, value)
             await session.commit()
 
-        self.invalidate(tenant_id)
-        return await self.get_effective(tenant_id)
+        self.invalidate()
+        return await self.get_effective()
 
-    async def reset_defaults(self, tenant_id: str) -> RetrievalConfig:
-        """将该租户行所有字段写为各自 Safe_Default → 失效缓存 → 返回全默认有效配置（Req 4.1）。"""
+    async def reset_defaults(self, tenant_id: str | None = None) -> RetrievalConfig:
+        """将平台单行所有字段写为各自 Safe_Default → 失效缓存 → 返回全默认有效配置（Req 4.1）。"""
         defaults = {name: spec.default for name, spec in RETRIEVAL_FIELD_SPECS.items()}
-        return await self.update(tenant_id, defaults)
+        return await self.update(None, defaults)
 
 
 # ============================================================

@@ -31,17 +31,19 @@ import SettingsDialog from '@/components/SettingsDialog'
 
 // 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
 // - content：内容菜单，member/admin 均可见；
-// - manage：租户管理菜单，仅 admin 可见；
+// - manage：租户管理菜单（管人/管资产），仅 admin 可见；
+// - capability：平台能力配置菜单（模型/Embedding/OCR/检索测试/API Key），属平台底座，
+//   全平台一份，仅 Super_Admin 可见可改（capability-config-to-platform）；
 // - platform：平台菜单（租户管理），仅 Super_Admin 可见。
 // 审计日志归 manage（admin 可见），但 Super_Admin 经下方 SUPER_ADMIN_MENUS 单独放行。
 const navItems = [
   { to: '/knowledge-bases', label: '知识库', icon: Database, group: 'content' },
   { to: '/agent-config', label: '智能体', icon: Bot, group: 'content' },
-  { to: '/retrieval', label: '检索测试', icon: Search, group: 'manage' },
-  { to: '/models', label: '模型管理', icon: Cpu, group: 'manage' },
-  { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'manage' },
-  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'manage' },
-  { to: '/api-keys', label: 'API Key', icon: Key, group: 'manage' },
+  { to: '/retrieval', label: '检索测试', icon: Search, group: 'capability' },
+  { to: '/models', label: '模型管理', icon: Cpu, group: 'capability' },
+  { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'capability' },
+  { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'capability' },
+  { to: '/api-keys', label: 'API Key', icon: Key, group: 'capability' },
   { to: '/tenants', label: '租户管理', icon: Building2, group: 'platform' },
   { to: '/users', label: '用户管理', icon: UsersIcon, group: 'manage' },
   { to: '/invitations', label: '邀请链接', icon: Mail, group: 'manage' },
@@ -61,14 +63,24 @@ function Layout() {
   const { isSuperAdmin, isAdmin, logout, profile } = useAuth()
 
   // 菜单可见性（固定角色模型，取代权限点）：
-  // - Super_Admin（平台级）：仅保留"租户管理 + 审计日志"（平台菜单），
-  //   不显示租户级管理与内容菜单（超管无租户上下文、不该管）。
-  // - admin（租户管理员）：管理菜单（manage）+ 内容菜单（content）。
+  // - Super_Admin（平台级）：平台菜单（租户管理）+ 平台能力配置（capability）+ 审计日志。
+  //   不显示租户级管理（用户/邀请）与内容菜单（超管无租户上下文、不参与内容）。
+  // - admin（租户管理员）：租户管理菜单（manage，管人/管资产）+ 内容菜单（content）。
+  //   不再显示能力配置（capability，已上收平台）。
   // - member（普通成员）：仅内容菜单（content）。
-  const SUPER_ADMIN_MENUS = new Set(['/tenants', '/audit-logs'])
+  const SUPER_ADMIN_MENUS = new Set([
+    '/tenants',
+    '/audit-logs',
+    '/models',
+    '/embed-config',
+    '/ocr-services',
+    '/retrieval',
+    '/api-keys',
+  ])
   const visibleNavItems = navItems.filter((item) => {
     if (isSuperAdmin) return SUPER_ADMIN_MENUS.has(item.to)
     if (item.group === 'platform') return false // 平台菜单仅 Super_Admin
+    if (item.group === 'capability') return false // 能力配置仅 Super_Admin（已上收平台）
     if (item.group === 'content') return true // 内容菜单 admin/member 均可见
     return isAdmin // manage 菜单仅 admin
   })
@@ -86,7 +98,18 @@ function Layout() {
   // 菜单弹窗（非路由），不在此列。直接命中知识库/对话等页面时，重定向回
   // "租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
   // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
-  const SUPER_ADMIN_ALLOWED_PATHS = new Set(['/tenants', '/audit-logs', '/change-password'])
+  // 超管可访问：平台菜单（租户管理/审计日志）、平台能力配置（模型/Embedding/OCR/检索测试/
+  // API Key，capability-config-to-platform）、账号自助页（改密）。
+  const SUPER_ADMIN_ALLOWED_PATHS = new Set([
+    '/tenants',
+    '/audit-logs',
+    '/change-password',
+    '/models',
+    '/embed-config',
+    '/ocr-services',
+    '/retrieval',
+    '/api-keys',
+  ])
   if (isSuperAdmin && !SUPER_ADMIN_ALLOWED_PATHS.has(location.pathname)) {
     return <Navigate to="/tenants" replace />
   }
@@ -352,11 +375,12 @@ function Layout() {
       {/* 个人资料弹窗 */}
       <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
 
-      {/* 系统设置弹窗（账号菜单打开，配自身租户；超管可管平台配置） */}
+      {/* 系统设置弹窗（账号菜单打开）：外观分项所有人可见；切片/检索/平台配置为平台
+          能力配置，仅超级管理员可见可改（capability-config-to-platform）。 */}
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
-        canManageChunk={isAdmin}
+        canManageChunk={isSuperAdmin}
         isSuperAdmin={isSuperAdmin}
       />
     </div>

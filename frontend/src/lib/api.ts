@@ -291,10 +291,13 @@ export const retrievalApi = {
 }
 
 // API Key 相关接口
+// capability-config-to-platform：API Key 为平台能力出口（外部系统凭 Key + 自身用户标识
+// 在 External 租户内维护并查询自己的知识库），仅超级管理员签发/撤销。创建走代理 Key 端点
+// （external_agent，require_platform）。
 export const apiKeyApi = {
   list: () => request<{ items: unknown[]; total: number }>('/api-keys').then(res => res.items),
   create: (data: { name?: string }) =>
-    request<unknown>('/api-keys', {
+    request<unknown>('/api-keys/external-agent', {
       method: 'POST',
       body: JSON.stringify(data),
     }),

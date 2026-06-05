@@ -11,13 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
 
-from app.api.deps import require_authenticated, require_tenant_admin
+from app.api.deps import require_authenticated, require_platform
 from app.schema.db import LLMConfig
 from app.storage.database import get_db
 
-# 配置面：增删改/测试属管理操作（require_tenant_admin，禁 api_key）；
-# 列表为只读，对任意登录用户开放（require_authenticated），供成员对话时选择
-# 管理员配置且 chat_visible 的模型。逐端点声明守卫（不再整路由级 Guard）。
+# 配置面：增删改/测试属能力配置（平台底座，全平台一份，require_platform，禁 api_key，
+# 仅超级管理员维护 —— capability-config-to-platform）；列表为只读，对任意登录用户开放
+# （require_authenticated），供成员对话时选择 chat_visible 的模型。LLMConfig 表本就无
+# tenant_id（全局单份），此处仅收紧管理端点守卫。逐端点声明守卫（不再整路由级 Guard）。
 router = APIRouter(
     prefix="/api/llm-configs",
     tags=["LLM Config"],
@@ -115,7 +116,7 @@ async def list_llm_configs(
 async def create_llm_config(
     body: LLMConfigCreate,
     db: AsyncSession = Depends(get_db),
-    _identity=Depends(require_tenant_admin()),
+    _identity=Depends(require_platform()),
 ):
     """创建 LLM 模型配置"""
     config_id = str(uuid.uuid4())
@@ -164,7 +165,7 @@ async def update_llm_config(
     config_id: str,
     body: LLMConfigUpdate,
     db: AsyncSession = Depends(get_db),
-    _identity=Depends(require_tenant_admin()),
+    _identity=Depends(require_platform()),
 ):
     """更新 LLM 模型配置"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
@@ -206,7 +207,7 @@ async def update_llm_config(
 async def delete_llm_config(
     config_id: str,
     db: AsyncSession = Depends(get_db),
-    _identity=Depends(require_tenant_admin()),
+    _identity=Depends(require_platform()),
 ):
     """删除 LLM 模型配置"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
@@ -237,7 +238,7 @@ class LLMTestResponse(BaseModel):
 async def test_llm_connection(
     body: LLMTestRequest,
     db: AsyncSession = Depends(get_db),
-    _identity=Depends(require_tenant_admin()),
+    _identity=Depends(require_platform()),
 ):
     """测试 LLM 模型连通性，发送一条简单消息验证配置是否正确"""
     api_key = body.api_key or ""
@@ -272,7 +273,7 @@ async def test_llm_connection(
 async def test_llm_config(
     config_id: str,
     db: AsyncSession = Depends(get_db),
-    _identity=Depends(require_tenant_admin()),
+    _identity=Depends(require_platform()),
 ):
     """测试已保存的模型配置连通性"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))

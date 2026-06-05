@@ -1,14 +1,18 @@
-"""RetrievalConfigStore 租户隔离测试（任务 16.4 / 16.6）
+"""RetrievalConfigStore 全平台一份语义测试（capability-config-to-platform）
 
-覆盖：
-- 16.4 属性测试 P9：租户隔离的配置读写（两租户互不影响；reset 只影响目标租户；
-  get_effective(None) 恒全默认且不读 DB）。
-- 16.6 单元测试（检索侧）：按租户 update→get_effective 往返（含分块档字段）；
-  DB 读失败时降级全默认且记 WARNING。
+历史上检索/分块参数按租户分键（每租户一行）。现已上收为平台底座：**全平台一份**，
+仅超级管理员维护、对全平台生效。Store 内部把任意传入 tenant_id（含 None / kb.tenant_id /
+contextvar 租户）规范化为固定平台键 ``PLATFORM_RETRIEVAL_KEY``，保证「写哪行 = 读哪行」。
+
+本文件覆盖：
+- 全平台一份：不同 tenant_id 入参读写的是同一份配置（写 A 后读 B 能看到 A 的值）。
+- get_effective(None) 与显式 tenant_id 等价（都读平台单行）。
+- update→get_effective 往返（含分块档字段）持久化到平台单行。
+- DB 读失败时降级全默认且记 WARNING。
 
 用 sqlite+aiosqlite 内存库建表后构造真实 RetrievalConfigStore（不连 PostgreSQL）。
 
-Feature: kb-retrieval-optimization
+Feature: capability-config-to-platform
 """
 
 import asyncio
@@ -33,6 +37,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from app.retrieval.config import (  # noqa: E402
     KIND_BOOL,
     KIND_INT,
+    PLATFORM_RETRIEVAL_KEY,
     RETRIEVAL_FIELD_SPECS,
     RetrievalConfig,
     RetrievalConfigStore,
@@ -97,69 +102,52 @@ def _legal_patch(draw, min_size: int = 1) -> dict:
 
 
 @st.composite
-def _two_tenants_and_patches(draw):
-    """生成 (tenant_a, tenant_b, patch_a, patch_b)，保证 A != B。"""
+def _two_tenants_and_patch(draw):
+    """生成 (tenant_a, tenant_b, patch_a)，保证 A != B。"""
     a = draw(_tenant_id())
     b = draw(_tenant_id())
     if a == b:
         b = b + "x"  # 强制不同
-    return a, b, draw(_legal_patch()), draw(_legal_patch())
+    return a, b, draw(_legal_patch())
 
 
 # ============================================================
-# 16.4 属性测试 P9：租户隔离的配置读写
+# 全平台一份：不同 tenant_id 入参共享同一份配置
 # ============================================================
 
 
 @settings(max_examples=100, deadline=None)
-@given(data=_two_tenants_and_patches())
-def test_property_tenant_isolation(data):
-    """Feature: kb-retrieval-optimization, Property 9: 租户隔离的配置读写
+@given(data=_two_tenants_and_patch())
+def test_property_all_tenants_share_one_config(data):
+    """Feature: capability-config-to-platform — 全平台一份共享配置
 
-    For any 两个不同租户 A、B 与各自合法 patch：
-    - update(A, patch_A) 后，get_effective(A) 反映 patch_A；
-    - get_effective(B) 不受 patch_A 影响（仍为 B 既有值或全默认）；
-    - update(B, patch_B) 后 A 仍保持其 patch_A；
-    - reset_defaults(A) 只影响 A（A 全默认），B 不变；
-    - get_effective(None) 恒为全 Safe_Default。
+    For any 两个不同 tenant_id 入参 A、B 与任意合法 patch：
+    - update(A, patch) 后，get_effective(B) 与 get_effective(None) 都能看到该 patch
+      （因为内部都落到同一平台单行 PLATFORM_RETRIEVAL_KEY）；
+    - reset_defaults(任意入参) 后，所有入参读出的都是全默认。
 
-    Validates: Requirements 1.8, 1.9, 4.3
+    Validates: 能力配置上收平台、全平台一份。
     """
-    tenant_a, tenant_b, patch_a, patch_b = data
+    tenant_a, tenant_b, patch = data
 
     async def scenario():
         store, engine = await _make_store()
         try:
-            # B 初始：尚无行 → 全默认
-            b_initial = await store.get_effective(tenant_b)
-            assert b_initial == RetrievalConfig()
+            # 写 A 入参
+            eff_a = await store.update(tenant_a, patch)
+            for name, value in patch.items():
+                assert getattr(eff_a, name) == value, f"{name} 未反映 patch"
 
-            # 写 A
-            eff_a = await store.update(tenant_a, patch_a)
-            for name, value in patch_a.items():
-                assert getattr(eff_a, name) == value, f"A 的 {name} 未反映 patch"
+            # 用 B 入参 / None 入参读，都应看到 A 写入的值（全平台一份）
+            eff_b = await store.get_effective(tenant_b)
+            eff_none = await store.get_effective(None)
+            for name, value in patch.items():
+                assert getattr(eff_b, name) == value, f"B 入参未读到平台共享值（{name}）"
+                assert getattr(eff_none, name) == value, f"None 入参未读到平台共享值（{name}）"
 
-            # B 不受 A 影响（仍全默认）
-            assert await store.get_effective(tenant_b) == RetrievalConfig()
-
-            # 写 B
-            eff_b = await store.update(tenant_b, patch_b)
-            for name, value in patch_b.items():
-                assert getattr(eff_b, name) == value
-
-            # A 仍保持 patch_a（未被 B 的写覆盖）
-            eff_a_again = await store.get_effective(tenant_a)
-            for name, value in patch_a.items():
-                assert getattr(eff_a_again, name) == value, f"A 的 {name} 被 B 写入污染"
-
-            # reset A：只影响 A
-            await store.reset_defaults(tenant_a)
+            # reset（任意入参）后所有入参读出全默认
+            await store.reset_defaults(tenant_b)
             assert await store.get_effective(tenant_a) == RetrievalConfig()
-            eff_b_after_reset_a = await store.get_effective(tenant_b)
-            for name, value in patch_b.items():
-                assert getattr(eff_b_after_reset_a, name) == value, "reset(A) 影响了 B"
-
-            # get_effective(None) 恒全默认
             assert await store.get_effective(None) == RetrievalConfig()
         finally:
             await engine.dispose()
@@ -167,18 +155,24 @@ def test_property_tenant_isolation(data):
     asyncio.run(scenario())
 
 
-def test_property_none_tenant_never_reads_db():
-    """get_effective(None) 不触碰 session_factory（不读 DB），恒返回全默认（Req 1.11）。"""
-    factory = MagicMock(side_effect=AssertionError("get_effective(None) 不应构造 session"))
-    store = RetrievalConfigStore(factory)
+def test_store_reads_platform_key():
+    """get_effective(任意入参) 读 DB 平台单行（主键 = PLATFORM_RETRIEVAL_KEY）。"""
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=_FakeAsyncSessionCtx(session))
 
-    config = asyncio.run(store.get_effective(None))
+    store = RetrievalConfigStore(factory)
+    config = asyncio.run(store.get_effective("any-tenant"))
+
     assert config == RetrievalConfig()
-    factory.assert_not_called()
+    assert session.get.await_count == 1
+    args, _ = session.get.call_args
+    assert args[0] is RetrievalConfigRow
+    assert args[1] == PLATFORM_RETRIEVAL_KEY
 
 
 # ============================================================
-# 16.6 单元测试（检索侧）：写读往返（含分块档） + DB 失败降级
+# 写读往返（含分块档） + DB 失败降级
 # ============================================================
 
 
@@ -197,12 +191,11 @@ async def sqlite_store():
 
 @pytest.mark.asyncio
 async def test_update_roundtrip_includes_chunk_tier(sqlite_store):
-    """按租户 update→get_effective 往返，含分块档字段（parent/child/overlap）。"""
+    """update→get_effective 往返，含分块档字段（parent/child/overlap），落到平台单行。"""
     store, factory = sqlite_store
-    tenant = "tenant-chunk"
 
     eff = await store.update(
-        tenant,
+        None,
         {"parent_chunk_size": 3000, "child_chunk_size": 600, "chunk_overlap": 120, "recall_k": 200},
     )
     assert eff.parent_chunk_size == 3000
@@ -210,9 +203,9 @@ async def test_update_roundtrip_includes_chunk_tier(sqlite_store):
     assert eff.chunk_overlap == 120
     assert eff.recall_k == 200
 
-    # 直接读 DB 验证持久化
+    # 直接读 DB 验证持久化到平台单行
     async with factory() as session:
-        row = await session.get(RetrievalConfigRow, tenant)
+        row = await session.get(RetrievalConfigRow, PLATFORM_RETRIEVAL_KEY)
     assert row is not None
     assert row.parent_chunk_size == 3000
     assert row.child_chunk_size == 600
@@ -221,7 +214,7 @@ async def test_update_roundtrip_includes_chunk_tier(sqlite_store):
 
 @pytest.mark.asyncio
 async def test_get_effective_degrades_on_db_failure(caplog):
-    """DB 读失败时按租户 get_effective 降级全默认且记 WARNING（Req 5.3）。"""
+    """DB 读失败时 get_effective 降级全默认且记 WARNING（Req 5.3）。"""
     session = MagicMock()
     session.get = AsyncMock(side_effect=RuntimeError("db down"))
     factory = MagicMock(return_value=_FakeAsyncSessionCtx(session))
@@ -233,11 +226,3 @@ async def test_get_effective_degrades_on_db_failure(caplog):
     assert config == RetrievalConfig()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("检索配置" in w.getMessage() or "降级" in w.getMessage() for w in warnings)
-
-
-@pytest.mark.asyncio
-async def test_update_requires_non_empty_tenant(sqlite_store):
-    """update 必须指定非空 tenant_id，否则抛 ValueError（写须定位目标租户）。"""
-    store, _factory = sqlite_store
-    with pytest.raises(ValueError):
-        await store.update("", {"recall_k": 100})

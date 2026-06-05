@@ -114,14 +114,10 @@ def test_config_face_requires_auth(env):
     assert client.get("/api/system/config").status_code == 401
     # 健康检查公开
     assert client.get("/api/system/health").status_code == 200
-    # 配置（分块/检索）本期改为租户级：超管不带 X-Tenant-ID 须指定目标租户 -> 400
+    # 能力配置（分块/检索）已上收平台、全平台一份：超管直接访问 200，无需 X-Tenant-ID
+    # （capability-config-to-platform）。
     sa = _super_token(client)
-    assert client.get("/api/system/config", headers=_bearer(sa)).status_code == 400
-    # 超管经 X-Tenant-ID 指定目标租户可访问；密钥脱敏（含 *** 或为空）
-    r = client.get(
-        "/api/system/config",
-        headers={**_bearer(sa), "X-Tenant-ID": "t-any"},
-    )
+    r = client.get("/api/system/config", headers=_bearer(sa))
     assert r.status_code == 200
     key_display = r.json().get("llm_api_key", "")
     assert "***" in key_display or key_display == ""
@@ -167,24 +163,27 @@ def test_api_key_lifecycle(env):
 
     client = _client([auth_router, admin_router, apikey_router])
     sa = _super_token(client)
-    tid, tadmin = _make_tenant_admin(client, sa, "法院A", "adm")
-    # 创建租户级 Key：返回一次明文
-    r = client.post("/api/api-keys", headers=_bearer(tadmin),
-                    json={"name": "k1", "scope": {"all_public_kbs": True, "explicit_kb_ids": []}})
+    # API Key 已上收平台（capability-config-to-platform）：超管签发代理 Key（external_agent），
+    # 作为平台能力出口。返回一次明文。
+    r = client.post("/api/api-keys/external-agent", headers=_bearer(sa), json={"name": "k1"})
     assert r.status_code == 200
     raw = r.json()["key"]
     key_id = r.json()["id"]
     assert raw.startswith("sk-")
-    # 列表仅前缀，不含完整明文
-    lst = client.get("/api/api-keys", headers=_bearer(tadmin)).json()
+    # 列表仅前缀，不含完整明文（超管可列全部）
+    lst = client.get("/api/api-keys", headers=_bearer(sa)).json()
     assert lst["total"] >= 1
     assert all("prefix" in it and "key" not in it for it in lst["items"])
     # 撤销 -> 软删除
-    assert client.delete(f"/api/api-keys/{key_id}", headers=_bearer(tadmin)).status_code == 200
+    assert client.delete(f"/api/api-keys/{key_id}", headers=_bearer(sa)).status_code == 200
     # 撤销后列表中该 key is_active=False
-    lst2 = client.get("/api/api-keys", headers=_bearer(tadmin)).json()
+    lst2 = client.get("/api/api-keys", headers=_bearer(sa)).json()
     revoked = [it for it in lst2["items"] if it["id"] == key_id]
     assert revoked and revoked[0]["is_active"] is False
+
+    # 租户管理员不再能列出/撤销 API Key（已上收平台，require_platform -> 403）
+    tid, tadmin = _make_tenant_admin(client, sa, "法院A", "adm")
+    assert client.get("/api/api-keys", headers=_bearer(tadmin)).status_code == 403
 
 
 # ============================================================

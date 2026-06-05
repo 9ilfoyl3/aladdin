@@ -1,4 +1,4 @@
-"""RetrievalConfigStore（检索配置读取/写入层，按租户分键）测试
+"""RetrievalConfigStore（检索配置读取/写入层，全平台一份）测试
 
 覆盖 tasks 子任务：
 - 2.3 进程内单例 get_retrieval_config_store()。
@@ -8,12 +8,13 @@
       update 正常写入路径。
 - 2.7 集成测试：update 写入的行可从 DB 读回（sqlite+aiosqlite 内存库）。
 
-第二期（任务 16）store 改为按 tenant_id 分键：``get_effective`` / ``update`` /
-``reset_defaults`` 均带 tenant_id；本文件随之迁移到租户化签名（保持既有覆盖不破）。
-租户隔离（P9）与平台配置（P11）见 test_retrieval_config_store_tenant.py /
-test_platform_config.py。
+capability-config-to-platform：检索/分块参数已上收为平台底座，**全平台一份**。Store
+内部把任意传入 tenant_id（含 None / kb.tenant_id / contextvar 租户）规范化为固定平台键
+``PLATFORM_RETRIEVAL_KEY``，写读同一行。本文件入参仍传 ``_TENANT`` 等任意值以保持既有
+覆盖，但断言围绕「全平台一份」语义（读写落到平台单行）。全平台共享语义的属性测试见
+test_retrieval_config_store_tenant.py；平台配置（P11）见 test_platform_config.py。
 
-Feature: kb-retrieval-optimization
+Feature: capability-config-to-platform
 """
 
 import asyncio
@@ -43,6 +44,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from app.retrieval.config import (  # noqa: E402
     KIND_BOOL,
     KIND_INT,
+    PLATFORM_RETRIEVAL_KEY,
     RETRIEVAL_FIELD_SPECS,
     RetrievalConfig,
     RetrievalConfigStore,
@@ -50,7 +52,7 @@ from app.retrieval.config import (  # noqa: E402
 )
 from app.schema.db import Base, RetrievalConfigRow  # noqa: E402
 
-# 测试用租户 ID（任意非空字符串即可定位行）。
+# 测试用租户 ID 入参（全平台一份：任意入参都落到平台单行）。
 _TENANT = "tenant-A"
 
 
@@ -234,7 +236,7 @@ class _FakeAsyncSessionCtx:
 
 @pytest.mark.asyncio
 async def test_store_reads_db_not_get_settings(monkeypatch):
-    """store.get_effective(tenant) 读 DB 行（session.get(RetrievalConfigRow, tenant)），不经 get_settings。"""
+    """store.get_effective 读 DB 平台单行（session.get(RetrievalConfigRow, 平台键）），不经 get_settings。"""
     import app.config as config_module
 
     settings_spy = MagicMock(side_effect=config_module.get_settings)
@@ -247,11 +249,11 @@ async def test_store_reads_db_not_get_settings(monkeypatch):
     store = RetrievalConfigStore(factory)
     config = await store.get_effective(_TENANT)
 
-    # 确实读了 DB 行，主键即 tenant_id
+    # 确实读了 DB 行，主键为平台键（全平台一份）
     assert session.get.await_count == 1
     args, _ = session.get.call_args
     assert args[0] is RetrievalConfigRow
-    assert args[1] == _TENANT
+    assert args[1] == PLATFORM_RETRIEVAL_KEY
     # 行不存在 → 全 Safe_Default
     assert config == RetrievalConfig()
     # 未通过 get_settings 读取检索配置
@@ -290,8 +292,8 @@ async def test_store_get_effective_uses_cache_within_ttl():
 
 
 @pytest.mark.asyncio
-async def test_store_get_effective_none_tenant_skips_db():
-    """tenant_id 为 None（无上下文）时直接返回全默认，不打 DB（Req 1.11）。"""
+async def test_store_get_effective_none_tenant_reads_platform_row():
+    """tenant_id 为 None（无上下文）时仍读平台单行（全平台一份），返回平台配置/全默认。"""
     session = MagicMock()
     session.get = AsyncMock(return_value=None)
     factory = MagicMock(return_value=_FakeAsyncSessionCtx(session))
@@ -300,7 +302,10 @@ async def test_store_get_effective_none_tenant_skips_db():
     config = await store.get_effective(None)
 
     assert config == RetrievalConfig()
-    assert session.get.await_count == 0  # 未读 DB
+    # 全平台一份：None 入参也读平台单行（主键为平台键），而非短路跳过 DB
+    assert session.get.await_count == 1
+    args, _ = session.get.call_args
+    assert args[1] == PLATFORM_RETRIEVAL_KEY
 
 
 # ============================================================
@@ -340,19 +345,19 @@ async def test_store_update_normal_write_path(sqlite_store):
 
 @pytest.mark.asyncio
 async def test_store_update_persists_row_readable_from_db(sqlite_store):
-    """集成：update 写入的行可从 DB 直接读回（Req 5.1）。"""
+    """集成：update 写入的行可从 DB 直接读回（Req 5.1）。全平台一份：行存于平台单行。"""
     store, factory = sqlite_store
 
     await store.update(
         _TENANT, {"recall_k": 300, "hnsw_ef": 512, "threshold_degradation_enabled": False}
     )
 
-    # 直接从 DB 读行，绕过 store 缓存，验证持久化生效
+    # 直接从 DB 读平台单行，绕过 store 缓存，验证持久化生效
     async with factory() as session:
-        row = await session.get(RetrievalConfigRow, _TENANT)
+        row = await session.get(RetrievalConfigRow, PLATFORM_RETRIEVAL_KEY)
 
     assert row is not None
-    assert row.tenant_id == _TENANT
+    assert row.tenant_id == PLATFORM_RETRIEVAL_KEY
     assert row.recall_k == 300
     assert row.hnsw_ef == 512
     assert row.threshold_degradation_enabled is False
@@ -368,7 +373,7 @@ async def test_store_reset_defaults_persists_all_defaults(sqlite_store):
     await store.reset_defaults(_TENANT)
 
     async with factory() as session:
-        row = await session.get(RetrievalConfigRow, _TENANT)
+        row = await session.get(RetrievalConfigRow, PLATFORM_RETRIEVAL_KEY)
 
     assert row is not None
     for name, spec in RETRIEVAL_FIELD_SPECS.items():

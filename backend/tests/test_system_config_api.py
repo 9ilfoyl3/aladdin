@@ -1,22 +1,22 @@
-"""System_Config_API 租户化 + Platform_Config_API 测试（Task 20）
+"""System_Config_API（全平台一份）+ Platform_Config_API 测试（Task 20）
 
-覆盖：
-- 检索/分块配置按调用方租户隔离读写（GET/PUT/reset）：
-  - 普通租户管理员（tenant_id=T）读写落到 T 行；另一租户不受影响（Req 6.6）。
+capability-config-to-platform：检索/分块配置已上收为平台底座，**全平台一份**，仅超级
+管理员可读写（require_platform）。本文件覆盖：
+- 检索/分块配置（GET/PUT/reset）由超管读写，落到平台单行（不再按租户区分）：
   - 分块字段（parent_chunk_size 等）经 retrieval 分档读写，并在顶层兼容平铺（Req 6.1/6.4）。
-  - 超级管理员经 X-Tenant-ID 指定租户读写生效（Req 6.7）；未指定 → 400（Req 6.8）。
+  - 全平台一份：不同 tenant_id 入参读写的是同一份配置。
   - 越界字段返回 422 且 store 未写（Req 3.2/3.3/3.4）。
-  - api_key 通道被拒（沿用 require_tenant_admin，Req 6.5）。
+  - 租户管理员 / api_key 通道被拒（require_platform）。
 - Platform_Config_API（超管 Load_Cache_TTL）：
   - GET/PUT load_cache_ttl 即时反映；越界 → 422 不写库（Req 17.1/17.3/17.4）。
   - 非超管（普通租户管理员）/ api_key 通道被拒（require_platform，Req 18.1/18.2）。
   - GET /config 响应不含 load_cache_ttl（Req 18.3）。
 - 模型层：RetrievalConfigSection/Update 含分块三字段。
 
-注：沿用进程隔离旁路鉴权模式（把 deps._resolve_identity 替换为可切换身份），并把
+注：沿用进程隔离旁路鉴权模式（把 deps._resolve_identity 替换为可切换身份，默认超管），并把
 RetrievalConfigStore / PlatformConfigStore 单例临时指向 sqlite 内存库。
 
-Feature: kb-retrieval-optimization
+Feature: capability-config-to-platform
 """
 
 import os
@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 
 from app.retrieval.config import (  # noqa: E402
     PLATFORM_FIELD_SPECS,
+    PLATFORM_RETRIEVAL_KEY,
     RETRIEVAL_FIELD_SPECS,
     PlatformConfigStore,
     RetrievalConfigStore,
@@ -146,7 +147,7 @@ async def ctx():
     import app.api.deps as deps
 
     _orig_resolve = deps._resolve_identity
-    holder = {"identity": _tenant_admin_identity(_TENANT_A), "factory": factory}
+    holder = {"identity": _super_admin_identity(), "factory": factory}
 
     async def _fake_resolve(request, session):
         return holder["identity"], False
@@ -319,89 +320,89 @@ class TestPutConfigRetrieval:
 
 
 # ============================================================
-# 租户隔离 —— 不同租户读写互不影响（Req 6.6）
+# 全平台一份 —— 不同 tenant_id 入参读写同一份配置
 # ============================================================
 
 
-class TestTenantIsolation:
+class TestPlatformWideSingleConfig:
     @pytest.mark.asyncio
-    async def test_writes_isolated_between_tenants(self, ctx):
-        """租户 A 写入不影响租户 B（B 仍为默认）。"""
-        client, store, _pstore, holder = ctx
-        # A 写
-        holder["identity"] = _tenant_admin_identity(_TENANT_A)
+    async def test_writes_shared_across_tenant_inputs(self, ctx):
+        """全平台一份：以任意 tenant_id 入参写入，另一入参读出的是同一份配置。"""
+        client, store, _pstore, _holder = ctx
+        # API 写入（超管，平台单份）
         await client.put("/api/system/config", json={"retrieval": {"recall_k": 256}})
-        # 切到 B 读
-        holder["identity"] = _tenant_admin_identity(_TENANT_B)
-        resp = await client.get("/api/system/config")
-        assert resp.json()["retrieval"]["recall_k"] == RETRIEVAL_FIELD_SPECS["recall_k"].default
-        # store 校验
+        # store 以不同 tenant_id 入参读，都应看到同一平台值
         eff_a = await store.get_effective(_TENANT_A)
         eff_b = await store.get_effective(_TENANT_B)
+        eff_none = await store.get_effective(None)
         assert eff_a.recall_k == 256
-        assert eff_b.recall_k == RETRIEVAL_FIELD_SPECS["recall_k"].default
+        assert eff_b.recall_k == 256
+        assert eff_none.recall_k == 256
 
     @pytest.mark.asyncio
-    async def test_reset_only_affects_target_tenant(self, ctx):
-        """reset 只重置目标租户，另一租户配置不受影响。"""
-        client, store, _pstore, holder = ctx
-        await store.update(_TENANT_A, {"recall_k": 256})
-        await store.update(_TENANT_B, {"recall_k": 300})
-        # A 触发 reset
-        holder["identity"] = _tenant_admin_identity(_TENANT_A)
+    async def test_reset_affects_platform_single_config(self, ctx):
+        """reset 重置平台单份；任意 tenant_id 入参读出的都是默认。"""
+        client, store, _pstore, _holder = ctx
+        await store.update(None, {"recall_k": 300})
         resp = await client.post("/api/system/config/retrieval/reset")
         assert resp.status_code == 200
-        # A 恢复默认，B 保持
         eff_a = await store.get_effective(_TENANT_A)
         eff_b = await store.get_effective(_TENANT_B)
         assert eff_a.recall_k == RETRIEVAL_FIELD_SPECS["recall_k"].default
-        assert eff_b.recall_k == 300
+        assert eff_b.recall_k == RETRIEVAL_FIELD_SPECS["recall_k"].default
 
 
 # ============================================================
-# 超管经 X-Tenant-ID 指定租户（Req 6.7/6.8）
+# 超管读写（全平台一份，无需 X-Tenant-ID）
 # ============================================================
 
 
-class TestSuperAdminTargetTenant:
+class TestSuperAdminPlatformConfig:
     @pytest.mark.asyncio
-    async def test_super_admin_with_header_reads_writes_target(self, ctx):
-        """超管带 X-Tenant-ID 指定租户读写生效。"""
+    async def test_super_admin_reads_writes_without_header(self, ctx):
+        """超管无需 X-Tenant-ID 即可读写平台单份配置（全平台一份）。"""
         client, store, _pstore, holder = ctx
         holder["identity"] = _super_admin_identity()
         resp = await client.put(
             "/api/system/config",
             json={"retrieval": {"recall_k": 222}},
-            headers={"X-Tenant-ID": _TENANT_B},
         )
         assert resp.status_code == 200
         assert resp.json()["retrieval"]["recall_k"] == 222
-        eff_b = await store.get_effective(_TENANT_B)
-        assert eff_b.recall_k == 222
+        eff = await store.get_effective(None)
+        assert eff.recall_k == 222
 
     @pytest.mark.asyncio
-    async def test_super_admin_without_header_get_400(self, ctx):
-        """超管未指定 X-Tenant-ID → GET 400。"""
+    async def test_super_admin_get_ok_without_header(self, ctx):
+        """超管无 X-Tenant-ID 直接 GET 平台配置 200（不再要求 header）。"""
         client, _store, _pstore, holder = ctx
         holder["identity"] = _super_admin_identity()
         resp = await client.get("/api/system/config")
-        assert resp.status_code == 400
+        assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_super_admin_without_header_put_400(self, ctx):
-        """超管未指定 X-Tenant-ID → PUT 400。"""
+    async def test_tenant_admin_rejected_get(self, ctx):
+        """租户管理员访问能力配置 GET 被拒（能力配置已上收平台，require_platform）。"""
         client, _store, _pstore, holder = ctx
-        holder["identity"] = _super_admin_identity()
+        holder["identity"] = _tenant_admin_identity(_TENANT_A)
+        resp = await client.get("/api/system/config")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_tenant_admin_rejected_put(self, ctx):
+        """租户管理员 PUT 能力配置被拒（require_platform）。"""
+        client, _store, _pstore, holder = ctx
+        holder["identity"] = _tenant_admin_identity(_TENANT_A)
         resp = await client.put("/api/system/config", json={"retrieval": {"recall_k": 200}})
-        assert resp.status_code == 400
+        assert resp.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_super_admin_without_header_reset_400(self, ctx):
-        """超管未指定 X-Tenant-ID → reset 400。"""
+    async def test_tenant_admin_rejected_reset(self, ctx):
+        """租户管理员 reset 能力配置被拒（require_platform）。"""
         client, _store, _pstore, holder = ctx
-        holder["identity"] = _super_admin_identity()
+        holder["identity"] = _tenant_admin_identity(_TENANT_A)
         resp = await client.post("/api/system/config/retrieval/reset")
-        assert resp.status_code == 400
+        assert resp.status_code == 403
 
 
 # ============================================================
@@ -731,8 +732,8 @@ class TestConfigChangeAudit:
         assert await _count_audit(factory, "system.config_update") == 1
         row = await _latest_audit(factory, "system.config_update")
         assert row.target_type == "system_config"
-        assert row.target_id == _TENANT_A
-        assert row.detail["tenant_id"] == _TENANT_A
+        assert row.target_id == PLATFORM_RETRIEVAL_KEY
+        assert row.detail["tenant_id"] == PLATFORM_RETRIEVAL_KEY
         assert row.detail["changes"] == [
             {"field": "recall_k", "old": RETRIEVAL_FIELD_SPECS["recall_k"].default, "new": 256}
         ]
@@ -783,7 +784,7 @@ class TestConfigChangeAudit:
         ]
         assert await _count_audit(factory, "system.config_reset") == 1
         row = await _latest_audit(factory, "system.config_reset")
-        assert row.detail["tenant_id"] == _TENANT_A
+        assert row.detail["tenant_id"] == PLATFORM_RETRIEVAL_KEY
 
     @pytest.mark.asyncio
     async def test_reset_no_change_skips_audit(self, ctx):

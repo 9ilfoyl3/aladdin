@@ -273,10 +273,11 @@ async def create_proxy_key(
 
 @router.get("", response_model=ApiKeyListResponse)
 async def list_api_keys(
-    identity: IdentityContext = Depends(require_tenant_admin()),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """列出本租户 API Key（仅前缀）。Super_Admin 可列全部（platform 不过滤）。"""
+    """列出 API Key（仅前缀）。API Key 属平台能力出口，仅超级管理员可管
+    （capability-config-to-platform）。"""
     stmt = select(ApiKey).order_by(ApiKey.created_at.desc())
     if not identity.is_super_admin:
         stmt = stmt.where(ApiKey.tenant_id == identity.tenant_id)
@@ -320,13 +321,11 @@ async def list_my_keys(
 async def revoke_api_key(
     key_id: str,
     request: Request,
-    identity: IdentityContext = Depends(require_tenant_admin()),
+    identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """撤销 API Key（软删除，校验归属本租户）。
-
-    代理 Key（External_Agent）属 Platform 操作，仅 Super_Admin 可撤销。
-    """
+    """撤销 API Key（软删除）。API Key 属平台能力出口，仅超级管理员可撤销
+    （capability-config-to-platform）。"""
     api_key = await db.get(ApiKey, key_id)
     if api_key is None:
         raise CrossTenantError()

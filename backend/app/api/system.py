@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session, require_platform, require_tenant_admin
 from app.auth.audit import add_audit
-from app.auth.constants import AuditActionEnum, HEADER_TENANT_ID
+from app.auth.constants import AuditActionEnum
 from app.auth.identity import IdentityContext
 from app.config import get_settings
 from app.pipeline.queue import QueueStats
 from app.retrieval.config import (
+    PLATFORM_RETRIEVAL_KEY,
     RETRIEVAL_FIELD_SPECS,
     RetrievalConfig,
     get_platform_config_store,
@@ -250,33 +251,14 @@ def _mask_ocr_api_key(key: str) -> str:
 
 
 def _resolve_target_tenant(identity: IdentityContext, request: Request) -> str:
-    """解析分块/检索配置读写的目标租户（Req 6.6/6.7/6.8）。
+    """解析分块/检索配置读写的目标键。
 
-    - 普通租户管理员：``identity.tenant_id``（不可跨租户读写，Req 6.6）。
-    - 超级管理员：必须经 ``X-Tenant-ID`` 指定目标租户（Req 6.7）；未指定 → 400（Req 6.8）。
-      （``deps._enforce_target_tenant`` 已对超管放行经该头指定任意租户。）
-
-    Args:
-        identity: 已通过 ``require_tenant_admin`` 鉴权的身份（admin 或 super_admin）。
-        request: 当前请求，用于读取 ``X-Tenant-ID`` 头。
-
-    Returns:
-        目标租户 id（非空字符串）。
-
-    Raises:
-        HTTPException: 超管未指定 X-Tenant-ID，或无法确定目标租户时返回 400。
+    capability-config-to-platform：检索/分块参数已上收为平台底座，全平台一份
+    （仅超级管理员维护）。不再按租户分行，故统一返回平台 sentinel 键
+    ``PLATFORM_RETRIEVAL_KEY``，不再读取 ``X-Tenant-ID`` 或 ``identity.tenant_id``。
+    保留函数签名以最小化端点改动。
     """
-    if identity.is_super_admin:
-        target = request.headers.get(HEADER_TENANT_ID)
-        if not target:
-            raise HTTPException(
-                status_code=400,
-                detail="超级管理员须经 X-Tenant-ID 指定目标租户",
-            )
-        return target
-    if not identity.tenant_id:
-        raise HTTPException(status_code=400, detail="无法确定目标租户")
-    return identity.tenant_id
+    return PLATFORM_RETRIEVAL_KEY
 
 
 def _diff_changes(before: dict, after_patch: dict) -> list[dict]:
@@ -343,12 +325,12 @@ def _build_config_response(
 @router.get("/config", response_model=SystemConfigResponse)
 async def get_config(
     request: Request,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    _identity: IdentityContext = Depends(require_platform()),
 ):
-    """获取系统配置（密钥脱敏；租户管理员，禁 api_key 通道）。
+    """获取系统配置（密钥脱敏；能力配置属平台底座，仅超级管理员，禁 api_key 通道）。
 
-    分块与检索参数为租户级配置：普通租户管理员读自身租户，超级管理员经 X-Tenant-ID
-    指定目标租户（未指定则 400，Req 6.6/6.7/6.8）。
+    分块与检索参数为平台级配置（全平台一份，capability-config-to-platform），
+    不再按租户区分。
     """
     settings = get_settings()
     tenant_id = _resolve_target_tenant(_identity, request)
@@ -362,17 +344,17 @@ async def get_config(
 async def update_config(
     body: SystemConfigUpdate,
     request: Request,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    _identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """更新系统配置
 
     注意：LLM/OCR 为运行时修改，重启后会恢复 .env 中的值；如需持久化请改 .env。
-    分块与检索参数走 RetrievalConfigStore（DB，按租户），即时热生效且持久化（Req 5.2）。
-    目标租户解析同 GET（普通管理员=自身租户；超管经 X-Tenant-ID 指定）。
+    分块与检索参数走 RetrievalConfigStore（DB，全平台一份），即时热生效且持久化（Req 5.2）。
+    能力配置属平台底座，仅超级管理员可改（capability-config-to-platform）。
 
     检索/分块字段若产生实际变更，写一条 ``system.config_update`` 审计（detail 仅含
-    tenant_id 与字段级 changes 元数据）；提交值与现状全相同则视为幂等，不写库也不留痕。
+    字段级 changes 元数据）；提交值与现状全相同则视为幂等，不写库也不留痕。
     """
     settings = get_settings()
     tenant_id = _resolve_target_tenant(_identity, request)
@@ -440,14 +422,14 @@ async def update_config(
 @router.post("/config/retrieval/reset", response_model=SystemConfigResponse)
 async def reset_retrieval_config(
     request: Request,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    _identity: IdentityContext = Depends(require_platform()),
     db: AsyncSession = Depends(get_db_session),
 ):
     """恢复检索参数默认值（Req 4.1/4.2/6.9）。
 
-    将目标租户的全部分块与检索参数重置为各自 Safe_Default，并返回包含 settings 当前值与
-    重置后检索分区的完整系统配置响应。沿用 require_tenant_admin 鉴权（禁 api_key 通道）。
-    目标租户解析同 GET/PUT（普通管理员=自身租户；超管经 X-Tenant-ID 指定）。
+    将平台级（全平台一份）的全部分块与检索参数重置为各自 Safe_Default，并返回包含
+    settings 当前值与重置后检索分区的完整系统配置响应。能力配置属平台底座，仅超级
+    管理员可重置（capability-config-to-platform，禁 api_key 通道）。
 
     重置若产生实际变更（现状与默认值不同的字段），写一条 ``system.config_reset`` 审计；
     本就是全默认（无变更）则不写审计。
