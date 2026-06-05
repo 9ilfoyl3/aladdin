@@ -77,6 +77,21 @@ start-dev.ps1
 # Tests（本地测试文件，不纳入版本管理）
 backend/tests/
 
+# E2E 调试脚本
+backend/_e2e_*.py
+
+# 内部评估/性能测试脚本
+backend/app/scripts/
+
+# 代码审查文档
+backend/AGENT_REVIEW.md
+
+# AI 辅助工具资源
+.shared/
+
+# 根目录 data（运行时上传数据）
+data/
+
 # Deploy packages（打包后的部署产物目录，不入库）
 deploy-*/
 deploy-package/
