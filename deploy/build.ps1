@@ -60,9 +60,32 @@ Copy-Item .env.example "$OUT\"
 New-Item -ItemType Directory -Force -Path "$OUT\deploy" | Out-Null
 Copy-Item deploy\milvus-user.yaml "$OUT\deploy\"
 Copy-Item deploy\install.sh "$OUT\"
+Copy-Item deploy\install-v1.sh "$OUT\"
 
 Write-Host ""
 Write-Host "=== 完成 ===" -ForegroundColor Green
 $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)
 Write-Host "输出: $OUT\ ($size GB)"
-Write-Host "将 $OUT\ 整体拷到服务器，执行 ./install.sh"
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Yellow
+Write-Host " 部署步骤" -ForegroundColor Yellow
+Write-Host "========================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "1. 在开发机压缩:" -ForegroundColor Cyan
+Write-Host "   tar -czf artoo-deploy.tar.gz -C dist ."
+Write-Host ""
+Write-Host "2. 上传 artoo-deploy.tar.gz 到服务器" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "3. 服务器端解压:" -ForegroundColor Cyan
+Write-Host "   mkdir artoo && tar -xzf artoo-deploy.tar.gz -C artoo && cd artoo"
+Write-Host ""
+Write-Host "4. 授权（Windows 打包会丢失 Linux 执行权限）:" -ForegroundColor Cyan
+Write-Host "   chmod -R 755 ."
+Write-Host ""
+Write-Host "5. 首次部署:" -ForegroundColor Cyan
+Write-Host "   Docker Compose V2:  bash install.sh"
+Write-Host "   Docker Compose V1:  bash install-v1.sh"
+Write-Host ""
+Write-Host "6. 后续更新（替换 app-images.tar 后）:" -ForegroundColor Cyan
+Write-Host "   bash install-v1.sh restart"
+Write-Host ""
