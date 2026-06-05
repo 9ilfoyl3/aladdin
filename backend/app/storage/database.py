@@ -110,6 +110,17 @@ async def _migrate_db() -> None:
         "ALTER TABLE agent_presets ADD COLUMN is_shared BOOLEAN NOT NULL DEFAULT FALSE",
         "CREATE INDEX IF NOT EXISTS ix_agent_presets_tenant_id ON agent_presets (tenant_id)",
         "CREATE INDEX IF NOT EXISTS ix_agent_presets_owner_user_id ON agent_presets (owner_user_id)",
+        # ===== session-file-upload：上传限制配置新增列 =====
+        # 这两张配置表在 kb-retrieval-optimization / tenant-auth 时期已存在，create_all 只建
+        # 缺失的整表、不会给存量表补列，故存量库需在此 ALTER 补列。全部 nullable（缺失语义
+        # 由 RetrievalConfig / PlatformConfig.effective_from_raw 读时逐字段兜底 Safe_Default）。
+        # 租户级（retrieval_configs，Upload_Tier 三字段）：
+        "ALTER TABLE retrieval_configs ADD COLUMN upload_max_file_mb INTEGER",
+        "ALTER TABLE retrieval_configs ADD COLUMN session_max_files INTEGER",
+        "ALTER TABLE retrieval_configs ADD COLUMN session_chunk_cap INTEGER",
+        # 平台级（platform_configs，单库 chunk 硬上限 + 会话 chunk 天花板）：
+        "ALTER TABLE platform_configs ADD COLUMN kb_chunk_cap INTEGER",
+        "ALTER TABLE platform_configs ADD COLUMN session_chunk_ceiling INTEGER",
     ]
     for sql in migrations:
         try:
