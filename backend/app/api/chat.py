@@ -386,6 +386,18 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
         for row in result:
             doc_filenames[row.id] = row.filename
 
+        # 会话临时文件的 doc_id 是 SessionFile.id（在 session_files 表，不在 documents 表），
+        # 上面查不到。对未匹配到的 doc_id 再查 SessionFile 补齐文件名，否则前端会回退显示
+        # doc_id 前 8 位（如 "101bed7c"）而非真实文件名。
+        missing_ids = [d for d in doc_ids if d not in doc_filenames]
+        if missing_ids:
+            from app.schema.db import SessionFile
+            sf_result = await session.execute(
+                select(SessionFile.id, SessionFile.filename).where(SessionFile.id.in_(missing_ids))
+            )
+            for row in sf_result:
+                doc_filenames[row.id] = row.filename
+
     refs = []
     for chunk in chunks:
         child = chunk.child_content[:500] if chunk.child_content else ""
@@ -470,9 +482,9 @@ async def _retrieve_multi_kb(
 
     第一个 kb_id 为主库 (priority=1.0)，其余为辅助库 (priority=0.8)。
     若 ``session_id`` 给定且该会话有上传文件，则把会话文件源（kb_id=
-    ``SESSION_FILES_KB_ID``、priority=1.2、expr=``session_id == "{sid}"``）作为
-    一个额外检索源接入，使刚上传的会话文件在合并 rerank 中更易靠前（Req 2.1/2.3/2.4/
-    2.6）。会话源由此自动纳入 bugfix H6 的 ``Semaphore`` 并发限流（占一个并发位，
+    ``SESSION_FILES_KB_ID``、priority=1.0、expr=``session_id == "{sid}"``）作为
+    一个额外检索源接入，与主库同权参与合并，最终顺序由统一 rerank 按真实语义相关性
+    决定（Req 2.1/2.3/2.4/2.6）。会话源由此自动纳入 bugfix H6 的 ``Semaphore`` 并发限流（占一个并发位，
     总源数 = ``len(kb_ids) + 1``）；失败按 bugfix H3 经 ``failed_kb_ids`` 透传
     （含 ``"session_files"``）供前端区分"会话文件检索失败"与"知识库检索失败"。
     返回 ``(检索结果, 是否降级, 失败知识库 ID 列表)``。
@@ -502,7 +514,13 @@ async def _retrieve_multi_kb(
                 kb_configs.append(
                     KBRetrievalConfig(
                         kb_id=SESSION_FILES_KB_ID,
-                        priority=1.2,
+                        # 与主库同权（1.0）：会话文件与所选知识库公平竞争，最终顺序交由
+                        # 统一 rerank 按真实语义相关性决定。此前用 1.2 加权会让会话文件
+                        # chunk 在合并排序时整体抬到 KB 之前，叠加 rerank 候选窗口截断
+                        # （top_k*2）与软阈值过滤后，KB 候选被挤出 / 砍掉，导致"选了知识库
+                        # 仍只答临时文件"。会话文件"刚上传即可被检索"已保证其可见性，
+                        # 无需再人为加权垄断候选池。
+                        priority=1.0,
                         expr=build_session_id_expr(session_id),
                     )
                 )
@@ -1171,10 +1189,12 @@ async def chat_completions(
     failed_kb_ids: list[str] = []  # 失败源（含 SESSION_FILES_KB_ID 时为会话源），供前端区分提示
 
     # 流式响应（检索和生成一体化，支持进度推送）
-    # use_multi_kb=True 但 request.kb_ids 为空（仅会话文件）→ 传 [] 让
-    # _stream_response 进入多源分支做单源处理；use_multi_kb=False → 传 None。
+    # use_multi_kb=True 时把"选中的全部库"（单选 knowledge_base_id 或多选 kb_ids，
+    # 已由 requested_kb_ids 统一）传入；仅会话文件场景为 []；use_multi_kb=False → None。
+    # 注意：此前用 request.kb_ids 会在"单选库 + 会话有临时文件"时丢掉选中的单库
+    # （单选走 knowledge_base_id，kb_ids 为空），导致多源检索只查会话文件、漏掉知识库。
     if request.stream:
-        stream_kb_ids = (request.kb_ids or []) if use_multi_kb else None
+        stream_kb_ids = list(requested_kb_ids) if use_multi_kb else None
         return EventSourceResponse(
             _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval),
             media_type="text/event-stream",
@@ -1223,11 +1243,13 @@ async def chat_completions(
         # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
         chunks = []
     elif use_multi_kb:
-        # 多知识库联合检索（含"仅会话文件"场景，kb_ids 可能为空列表）
+        # 多知识库联合检索（含"仅会话文件"场景，kb_ids 可能为空列表）。
+        # 用 requested_kb_ids（已统一单选 knowledge_base_id 与多选 kb_ids），避免
+        # "单选库 + 会话有临时文件"时丢掉选中的单库、只查会话文件。
         try:
             # H3：完整接收 (results, degraded, failed_kb_ids)；失败源经 _build_degraded_metadata 透传前端。
             chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
-                retrieval_query, request.kb_ids or [], filter_obj, tenant_id=tenant_id,
+                retrieval_query, list(requested_kb_ids), filter_obj, tenant_id=tenant_id,
                 session_id=request.session_id,
             )
         except Exception as e:

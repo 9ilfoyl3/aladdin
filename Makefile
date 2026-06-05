@@ -150,12 +150,12 @@ docker-export-arm:
 	docker save artoo-frontend:$(VERSION) -o $(DEPLOY_DIR_ARM)/artoo-frontend.tar
 	@echo "拉取并导出基础设施镜像（ARM64）..."
 	docker pull --platform linux/arm64 postgres:16-alpine
-	docker pull --platform linux/arm64 milvusdb/milvus:v2.4.6
+	docker pull --platform linux/arm64 milvusdb/milvus:v2.5.4
 	docker pull --platform linux/arm64 quay.io/coreos/etcd:v3.5.25
 	docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_ARM)/postgres_16-alpine.tar
-	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_ARM)/milvusdb_milvus_v2.4.6.tar
-	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save milvusdb/milvus:v2.5.4 -o $(DEPLOY_DIR_ARM)/milvusdb_milvus_v2.5.4.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.25.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_ARM)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	docker pull --platform linux/arm64 redis:7-alpine
 	docker save redis:7-alpine -o $(DEPLOY_DIR_ARM)/redis_7-alpine.tar
@@ -216,12 +216,12 @@ docker-export-amd64:
 	docker save artoo-frontend:$(VERSION)-amd64 -o $(DEPLOY_DIR_AMD64)/artoo-frontend.tar
 	@echo "拉取并导出基础设施镜像（AMD64）..."
 	docker pull --platform linux/amd64 postgres:16-alpine
-	docker pull --platform linux/amd64 milvusdb/milvus:v2.4.6
+	docker pull --platform linux/amd64 milvusdb/milvus:v2.5.4
 	docker pull --platform linux/amd64 quay.io/coreos/etcd:v3.5.25
 	docker pull --platform linux/amd64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_AMD64)/postgres_16-alpine.tar
-	docker save milvusdb/milvus:v2.4.6 -o $(DEPLOY_DIR_AMD64)/milvusdb_milvus_v2.4.6.tar
-	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save milvusdb/milvus:v2.5.4 -o $(DEPLOY_DIR_AMD64)/milvusdb_milvus_v2.5.4.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.25.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_AMD64)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	docker pull --platform linux/amd64 redis:7-alpine
 	docker save redis:7-alpine -o $(DEPLOY_DIR_AMD64)/redis_7-alpine.tar

@@ -60,9 +60,10 @@ $images = @(
     "artoo-backend:latest",
     "artoo-frontend:latest",
     "postgres:16-alpine",
-    "milvusdb/milvus:v2.4.6",
-    "quay.io/coreos/etcd:v3.5.18",
-    "minio/minio:RELEASE.2023-03-20T20-16-18Z"
+    "milvusdb/milvus:v2.5.4",
+    "quay.io/coreos/etcd:v3.5.25",
+    "minio/minio:RELEASE.2024-05-28T17-19-04Z",
+    "redis:7-alpine"
 )
 
 foreach ($img in $images) {
@@ -78,10 +79,21 @@ Write-Host "`n[5/5] 复制部署配置..." -ForegroundColor Cyan
 
 Copy-Item docker-compose-production.yml "$DEPLOY_DIR\docker-compose.yml"
 Copy-Item backend\.env.example "$DEPLOY_DIR\.env.example"
+Copy-Item frontend\nginx.conf "$DEPLOY_DIR\nginx.conf"
+Copy-Item scripts\deploy-intranet.sh "$DEPLOY_DIR\"
+# 中间件 compose + Milvus mmap 配置：放 middleware/ 子目录，与 package-amd64 产物一致。
+# compose 内以 ./milvus-user.yaml 挂载，二者须同目录。
+New-Item -ItemType Directory -Force -Path "$DEPLOY_DIR\middleware" | Out-Null
+Copy-Item deploy-middleware\docker-compose.yml "$DEPLOY_DIR\middleware\docker-compose.yml"
+Copy-Item deploy-middleware\milvus-user.yaml "$DEPLOY_DIR\middleware\milvus-user.yaml"
 
 # 生成部署说明
 @"
 # Artoo 内网部署步骤
+
+> 推荐直接执行 ``bash deploy-intranet.sh``，它会自动完成：加载镜像 → 引导编辑 .env →
+> 建网络 → 起中间件（含 Milvus mmap）→ 等就绪 → 起应用（backend 多进程）。
+> 下面是手动分步等价命令。
 
 ## 1. 加载 Docker 镜像
 ```bash
@@ -91,36 +103,48 @@ for f in *.tar; do docker load -i `$f; done
 ## 2. 配置环境变量
 ```bash
 cp .env.example .env
-# 编辑 .env，配置 LLM 地址和密钥
+# 必填：JWT_SECRET、SUPER_ADMIN_USERNAME/PASSWORD、LLM_*、EMBED_BASE_URL、RERANK_BASE_URL
+# 可调：BACKEND_WORKERS（默认 2）、POSTGRES_PASSWORD
 ```
 
-## 3. 启动所有服务
+## 3. 创建共享网络（仅首次）
+```bash
+docker network create arag-network
+```
+
+## 4. 启动中间件（etcd/minio/milvus/postgres/redis），等全部 healthy
+```bash
+cd middleware && docker compose --env-file ../.env up -d && cd ..
+# 查看状态：cd middleware && docker compose --env-file ../.env ps
+```
+
+## 5. 启动应用（backend / worker / frontend）
 ```bash
 docker compose up -d
 ```
 
-## 4. 访问
-- 前端: http://服务器IP
-- 后端 API: http://服务器IP:8000
-- API 文档: http://服务器IP:8000/docs
+## 6. 访问
+- 前端: http://服务器IP:8888
+- 后端 API: http://服务器IP:8088
 
-## 5. 停止
+## 7. 停止
 ```bash
-docker compose down
+docker compose down                                          # 停应用
+cd middleware && docker compose --env-file ../.env down       # 停中间件（数据卷保留）
 ```
 
-## 环境变量说明
+## 关键环境变量
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
+| JWT_SECRET | （必填） | JWT 签名密钥，缺失则启动失败 |
+| SUPER_ADMIN_USERNAME/PASSWORD | （必填） | 初始超管账号 |
 | POSTGRES_PASSWORD | postgres | 数据库密码 |
-| EMBED_DEVICE | cpu | 嵌入模型设备 (cpu/cuda) |
-| RERANK_DEVICE | cpu | 重排序设备 (cpu/cuda) |
-| LLM_PROVIDER | vllm | LLM 提供方 |
-| LLM_BASE_URL | - | LLM API 地址 |
-| LLM_MODEL | - | LLM 模型名 |
-| LLM_API_KEY | - | LLM 密钥 |
+| BACKEND_WORKERS | 2 | backend 进程数（单机建议 2~4） |
+| LLM_BASE_URL / LLM_MODEL / LLM_API_KEY | - | LLM 服务 |
+| EMBED_BASE_URL / RERANK_BASE_URL | - | Embedding / Rerank 远程服务 |
 
-如果服务器有 NVIDIA GPU，设置 EMBED_DEVICE=cuda 和 RERANK_DEVICE=cuda 可加速 3-5 倍。
+> Milvus 已默认开启 mmap（middleware/milvus-user.yaml）控常驻内存；内存仍紧张可把
+> 其中 vectorIndex 也设为 true。
 "@ | Out-File -Encoding utf8 "$DEPLOY_DIR\README.md"
 
 # ============================================================
