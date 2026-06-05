@@ -16,10 +16,6 @@ from dataclasses import dataclass
 from app.agent.config import AgentConfig
 from app.agent.content_router import ContentStreamRouter
 from app.agent.events import AgentEvent, EventBus, EventType
-from app.agent.memory.context_manager import (
-    ContextManager,
-    estimate_tokens,
-)
 from app.agent.memory.compress import compress_context
 from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
@@ -174,8 +170,6 @@ class AgentEngine:
         self._event_bus = event_bus
         # 用于 stuck loop 检测
         self._previous_responses: list[str] = []
-        # 上下文窗口管理器（已废弃，保留字段不再调用 compress_messages）
-        self._context_manager = ContextManager()
         # 三层递进式上下文管理组件
         # ① BPE Token 估算器 ② API Usage 追踪器 ③ LLM 摘要合并器
         self._token_estimator = TokenEstimator()

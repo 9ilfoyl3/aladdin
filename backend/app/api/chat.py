@@ -28,7 +28,6 @@ from app.agent.tools.final_answer import FinalAnswerTool
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
-from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.prompts.progressive_rag import render_system_prompt
@@ -262,18 +261,54 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
     # 回退到系统全局配置
     settings = get_settings()
     if settings.llm_provider == "vllm":
-        return VllmLLM(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key), True, None, False
-    return OllamaLLM(base_url=settings.llm_base_url, model=settings.llm_model), True, None, False
+        return _get_cached_llm("vllm", settings.llm_base_url, settings.llm_model, settings.llm_api_key), True, None, False
+    return _get_cached_llm("ollama", settings.llm_base_url, settings.llm_model, ""), True, None, False
+
+
+# 进程内 LLM 实例缓存：复用底层 httpx.AsyncClient 连接池，避免每个请求新建客户端
+# 却从不关闭导致的连接/文件描述符泄漏（高并发下会耗尽 FD）。
+# httpx.AsyncClient 绑定创建它的事件循环；生产是单循环长驻进程，缓存长期复用即可。
+# 测试常为每个用例新建事件循环，故按「当前运行循环」缓存，循环切换时整体重建，
+# 避免「Future attached to a different loop」错误。
+_llm_cache: dict[tuple, LLMProvider] = {}
+_llm_cache_loop: "asyncio.AbstractEventLoop | None" = None
+
+
+def _get_cached_llm(provider: str, base_url: str, model: str, api_key: str) -> LLMProvider:
+    """按 (provider, base_url, model, api_key) 复用 LLM 实例。
+
+    同一配置返回同一实例（复用 httpx 连接池）；配置变更（如改地址/密钥）自然命中新 key
+    生成新实例。注意：测试连通性端点（llm_config.py）仍各自新建并 close()，不走此缓存。
+    """
+    global _llm_cache, _llm_cache_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not _llm_cache_loop:
+        # 事件循环切换（主要发生在测试）：丢弃旧缓存，旧实例随旧循环一并回收。
+        _llm_cache = {}
+        _llm_cache_loop = loop
+
+    key = (provider, base_url, model, api_key)
+    inst = _llm_cache.get(key)
+    if inst is None:
+        if provider == "ollama":
+            inst = OllamaLLM(base_url=base_url, model=model)
+        else:
+            inst = VllmLLM(base_url=base_url, model=model, api_key=api_key)
+        _llm_cache[key] = inst
+    return inst
 
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
-    """根据数据库配置创建 LLM 实例"""
+    """根据数据库配置创建（或复用）LLM 实例"""
     if config.provider == "ollama":
-        return OllamaLLM(base_url=config.base_url, model=config.model)
+        return _get_cached_llm("ollama", config.base_url, config.model, "")
     else:
         # provider 字段当前承载基础设施类型（ollama/vllm）。对于 vLLM 兼容端点，
         # 实际模型厂商由 VllmLLM 内部根据 base_url 自动检测，用于 thinking 方言分派。
-        return VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
+        return _get_cached_llm("vllm", config.base_url, config.model, config.api_key or "")
 
 
 
@@ -454,7 +489,8 @@ async def _retrieve_chunks(
     - agent: 完整 Agent 编排（路由→改写→迭代检索→反思）
 
     Args:
-        progress_queue: 可选的异步队列，用于推送 Agent 进度事件
+        progress_queue: 兼容保留参数（旧 agent 分支用于推送进度事件）。当前 agent 分支已改走
+            统一的 _run_agent_nonstream，不再消费此参数；direct/hybrid 分支本就不使用。
         tenant_id: 显式租户 ID（H5）。透传给 hybrid 检索与 agent 模式的 KnowledgeSearchTool，
             确保流式响应中 contextvar 已 reset 时仍能取到正确租户检索配置；None 时底层回退 contextvar。
     """
@@ -482,56 +518,16 @@ async def _retrieve_chunks(
         return results, False
 
     elif mode == "agent":
-        # Agent 模式：ReAct 循环引擎
-        hybrid_retriever = _build_hybrid_retriever()
-        bm25_retriever = BM25Retriever(milvus)
-
-        # 1. 创建 AgentState 和 ToolRegistry
-        state = AgentState()
-        tool_registry = ToolRegistry()
-
-        # 2. 创建 EventBus
-        event_bus = EventBus()
-
-        # 3. 注册工具
-        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
-        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
-        tool_registry.register(ListKnowledgeChunksTool())
-        tool_registry.register(FinalAnswerTool(state, event_bus, ""))
-
-        # 4. 创建 AgentConfig（使用 Progressive RAG prompt）
-        settings = get_settings()
-
-        # 注册可选工具：web_search（当 searxng_url 配置时启用）
-        if settings.searxng_url:
-            tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
-
-        config = AgentConfig(
-            max_iterations=settings.agent_max_iterations,
-            web_search_enabled=bool(settings.searxng_url),
-            system_prompt=render_system_prompt(
-                AgentConfig(),
-                kb_names=[kb_id],
-                available_tools=tool_registry.list_tools(),
-            ),
+        # Agent 模式：复用统一的 _run_agent_nonstream（与流式/非流式主链路共用
+        # _build_agent_runtime），不再在此维护第三份独立的工具注册/配置副本。
+        # 该分支现已不在生产主链路触达（非流式单库 agent 在 chat_completions 中直接走
+        # _run_agent_nonstream），保留仅为兼容潜在的内部调用方，返回 (refs, degraded)。
+        answer, refs, degraded, _steps = await _run_agent_nonstream(
+            query, kb_id, llm, preset_cfg={},
+            max_context_tokens=None, thinking_enabled=False,
+            tenant_id=tenant_id, session_id=None, history=None,
         )
-
-        # 5. 创建 AgentEngine
-        engine = AgentEngine(config, llm, tool_registry, event_bus)
-
-        # 6. 构建进度回调：将事件放入队列
-        if progress_queue:
-            async def _on_event(event: AgentEvent):
-                await progress_queue.put(event)
-            event_bus.on(None, _on_event)
-
-        # 7. 执行 Agent
-        result_state = await engine.execute("", query)
-
-        # 8. 返回 knowledge_refs 作为 chunks；degraded 取工具写入的真实降级状态（H3）。
-        #    KnowledgeSearchTool 持有此处构造的 state（与引擎内部 state 不同），检索降级写入其中，
-        #    故 degraded 读本地 state.degraded（不再恒 False）。
-        return result_state.knowledge_refs, state.degraded
+        return refs, degraded
 
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
@@ -625,6 +621,133 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     return None
 
 
+def _build_agent_runtime(
+    kb_id: str,
+    llm: LLMProvider,
+    preset_cfg: dict,
+    max_context_tokens: int | None,
+    thinking_enabled: bool,
+    tenant_id: str | None,
+    session_id: str | None,
+) -> tuple[AgentEngine, AgentState, EventBus]:
+    """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
+
+    统一两条链路的 Agent 编排，消除「流式 / 非流式各自重建一套」导致的行为分叉
+    （预设 allowed_tools 过滤、thinking、temperature、system_prompt 等过去仅流式生效）。
+
+    Returns:
+        (engine, state, event_bus)。其中 ``state`` 是传给工具的 AgentState，
+        ``knowledge_refs`` / ``degraded`` 由工具写入此对象；引擎 ``execute()`` 返回的
+        是另一个内部 state，``final_answer`` / ``steps`` 在那上面（与既有约定一致）。
+    """
+    milvus = _get_milvus_client()
+    hybrid_retriever = _build_hybrid_retriever()
+    bm25_retriever = BM25Retriever(milvus)
+
+    state = AgentState()
+    tool_registry = ToolRegistry()
+    event_bus = EventBus()
+
+    # 按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止
+    preset_allowed = preset_cfg.get("allowed_tools")
+
+    def _tool_enabled(tool_name: str) -> bool:
+        if tool_name == "final_answer":
+            return True
+        if not preset_allowed:
+            return True
+        return tool_name in preset_allowed
+
+    if _tool_enabled("knowledge_search"):
+        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
+    if _tool_enabled("grep_chunks"):
+        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
+    if _tool_enabled("list_knowledge_chunks"):
+        tool_registry.register(ListKnowledgeChunksTool())
+    tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
+
+    # 可选工具：web_search（需配置 searxng_url 且预设允许）
+    settings = get_settings()
+    web_search_on = bool(settings.searxng_url) and _tool_enabled("web_search")
+    if web_search_on:
+        tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
+
+    # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
+    # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
+    preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
+    system_prompt = render_system_prompt(
+        AgentConfig(system_prompt=preset_system_prompt),
+        kb_names=[kb_id],
+        available_tools=tool_registry.list_tools(),
+        web_search_enabled=web_search_on,
+    )
+    config = AgentConfig(
+        max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
+        max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
+        temperature=preset_cfg.get("temperature", AgentConfig.temperature),
+        web_search_enabled=web_search_on,
+        thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
+        system_prompt=system_prompt,
+    )
+    engine = AgentEngine(config, llm, tool_registry, event_bus)
+    return engine, state, event_bus
+
+
+async def _run_agent_nonstream(
+    query: str,
+    kb_id: str,
+    llm: LLMProvider,
+    preset_cfg: dict,
+    max_context_tokens: int | None,
+    thinking_enabled: bool,
+    tenant_id: str | None,
+    session_id: str | None,
+    history: list[dict] | None,
+) -> tuple[str, list[RetrievalResult], bool, list[dict]]:
+    """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
+
+    与流式路径共用 ``_build_agent_runtime``，消除双入口分叉。事件经 handler 收集为
+    agent_steps 落库，保证与流式会话历史结构一致（前端可还原思考/工具步骤）。
+
+    Returns:
+        (final_answer, knowledge_refs, degraded, agent_steps)
+    """
+    engine, state, event_bus = _build_agent_runtime(
+        kb_id, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+    )
+
+    steps_collected: list[dict] = []
+
+    async def _collect(event: AgentEvent):
+        sse = _agent_event_to_sse(event)
+        if sse:
+            steps_collected.append(sse)
+
+    event_bus.on(None, _collect)
+
+    llm_context = history if history else None
+    agent_start_time = time.time()
+    result_state: AgentState | None = None
+    try:
+        result_state = await engine.execute(session_id or "", query, llm_context=llm_context)
+        answer = result_state.final_answer or ""
+        degraded = state.degraded
+    except Exception as e:
+        # 引擎内部已兜住 LLM 永久错误 / max_iterations；此处仅捕获其余未预期异常，
+        # 返回友好降级文案而非让请求 500，保证非流式链路不中断。
+        logger.error("非流式 Agent 执行异常: %s", sanitize_for_log(e))
+        answer = "抱歉，处理您的请求时发生了错误，请稍后重试。"
+        degraded = True
+
+    total_steps = len(result_state.steps) if result_state else 0
+    steps_collected.append({
+        "type": "complete",
+        "total_steps": total_steps,
+        "total_duration_ms": int((time.time() - agent_start_time) * 1000),
+    })
+    return answer, state.knowledge_refs, degraded, steps_collected
+
+
 async def _stream_response(
     request: ChatCompletionRequest,
     query: str,
@@ -686,69 +809,15 @@ async def _stream_response(
         # 创建 asyncio.Queue 接收 AgentEvent
         event_queue: asyncio.Queue = asyncio.Queue()
 
-        # 构建 Agent 组件
-        manager = get_model_manager()
-        milvus = _get_milvus_client()
-        hybrid_retriever = _build_hybrid_retriever()
-        bm25_retriever = BM25Retriever(milvus)
-
-        # 创建 AgentState 和 ToolRegistry
-        state = AgentState()
-        tool_registry = ToolRegistry()
-
-        # 创建 EventBus 并注册 handler 将事件放入 queue
-        event_bus = EventBus()
+        # 构建 Agent 运行时（与非流式共用 _build_agent_runtime，消除双入口分叉）
+        engine, state, event_bus = _build_agent_runtime(
+            kb_id, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+        )
 
         async def _event_to_queue(event: AgentEvent):
             await event_queue.put(event)
 
         event_bus.on(None, _event_to_queue)
-
-        # 注册工具（按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止）
-        preset_allowed = preset_cfg.get("allowed_tools")
-
-        def _tool_enabled(tool_name: str) -> bool:
-            if tool_name == "final_answer":
-                return True
-            if not preset_allowed:
-                return True
-            return tool_name in preset_allowed
-
-        if _tool_enabled("knowledge_search"):
-            tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
-        if _tool_enabled("grep_chunks"):
-            tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
-        if _tool_enabled("list_knowledge_chunks"):
-            tool_registry.register(ListKnowledgeChunksTool())
-        tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
-
-        # 注册可选工具：web_search（需配置 searxng_url 且预设允许）
-        settings = get_settings()
-        web_search_on = bool(settings.searxng_url) and _tool_enabled("web_search")
-        if web_search_on:
-            tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
-
-        # 创建 AgentConfig
-        # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
-        # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
-        preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
-        system_prompt = render_system_prompt(
-            AgentConfig(system_prompt=preset_system_prompt),
-            kb_names=[kb_id],
-            available_tools=tool_registry.list_tools(),
-            web_search_enabled=web_search_on,
-        )
-        config = AgentConfig(
-            max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
-            max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
-            temperature=preset_cfg.get("temperature", AgentConfig.temperature),
-            web_search_enabled=web_search_on,
-            thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
-            system_prompt=system_prompt,
-        )
-
-        # 创建 AgentEngine
-        engine = AgentEngine(config, llm, tool_registry, event_bus)
 
         # 构建 LLM 上下文（历史对话）
         llm_context = history if history else None
@@ -759,46 +828,67 @@ async def _stream_response(
             engine.execute(session_id or "", query, llm_context=llm_context)
         )
 
-        # 从 event_queue 读取事件并转换为 SSE JSON
-        while not agent_task.done():
+        # 从 event_queue 读取事件并转换为 SSE JSON。
+        # 用 try/finally 保证：无论 agent_task 是否抛异常，都先排空队列里已产生的事件
+        # 再发 complete/meta、落库，避免「result() 重抛异常 → 排空被跳过 → SSE 断流、
+        # 事件与会话历史丢失」。
+        result_state: AgentState | None = None
+        agent_error: Exception | None = None
+        try:
+            while not agent_task.done():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    sse_data = _agent_event_to_sse(event)
+                    if sse_data:
+                        agent_steps_collected.append(sse_data)
+                        yield json.dumps(sse_data, ensure_ascii=False)
+                except asyncio.TimeoutError:
+                    continue
+
+            # 获取最终状态；agent_task 抛异常时在此捕获，转为友好降级而非断流。
             try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                result_state = agent_task.result()
+            except Exception as e:
+                agent_error = e
+                logger.error("流式 Agent 执行异常: %s", sanitize_for_log(e))
+        finally:
+            # 排空队列中剩余的事件（异常路径同样执行，不丢已产生的思考/工具事件）
+            while not event_queue.empty():
+                event = event_queue.get_nowait()
                 sse_data = _agent_event_to_sse(event)
                 if sse_data:
                     agent_steps_collected.append(sse_data)
                     yield json.dumps(sse_data, ensure_ascii=False)
-            except asyncio.TimeoutError:
-                continue
 
-        # 获取最终状态
-        result_state: AgentState = agent_task.result()
+        # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用。
+        # 注意：工具持有的 state 对象和引擎内部的 state 是不同的，
+        # knowledge_refs 被 KnowledgeSearchTool 写入到传给工具的 state 中。
+        chunks = state.knowledge_refs
+        # H3：agent 模式 degraded 取工具写入的真实降级状态（不再恒 False）。
+        # KnowledgeSearchTool 持有此 state，检索源失败/路级降级时置 state.degraded=True。
+        degraded = state.degraded
+        full_response = result_state.final_answer if result_state else ""
 
-        # 排空队列中剩余的事件
-        while not event_queue.empty():
-            event = event_queue.get_nowait()
-            sse_data = _agent_event_to_sse(event)
-            if sse_data:
-                agent_steps_collected.append(sse_data)
-                yield json.dumps(sse_data, ensure_ascii=False)
+        if agent_error is not None:
+            # 引擎抛出未兜住的异常：补发降级答案 + 标记 degraded，保证前端有正文、链路不中断。
+            degraded = True
+            if not full_response:
+                full_response = "抱歉，处理您的请求时发生了错误，请稍后重试。"
+                answer_event = {"type": "final_answer", "content": full_response, "done": False}
+                agent_steps_collected.append(answer_event)
+                yield json.dumps(answer_event, ensure_ascii=False)
+            yield json.dumps({"type": "final_answer", "content": "", "done": True}, ensure_ascii=False)
+        full_response = full_response or ""
 
         # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
         total_duration_ms = int((time.time() - agent_start_time) * 1000)
         complete_event = {
             "type": "complete",
-            "total_steps": len(result_state.steps),
+            "total_steps": len(result_state.steps) if result_state else 0,
             "total_duration_ms": total_duration_ms,
         }
         agent_steps_collected.append(complete_event)
         yield json.dumps(complete_event, ensure_ascii=False)
-
-        # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用
-        # 注意：工具持有的 state 对象和引擎内部的 state 是不同的
-        # knowledge_refs 被 KnowledgeSearchTool 写入到传给工具的 state 中
-        chunks = state.knowledge_refs
-        # H3：agent 模式 degraded 取工具写入的真实降级状态（不再恒 False）。
-        # KnowledgeSearchTool 持有此 state，检索源失败/路级降级时置 state.degraded=True。
-        degraded = state.degraded
-        full_response = result_state.final_answer or ""
 
         # 发送引用来源和元数据
         references = await _build_references(chunks)
@@ -1018,6 +1108,44 @@ async def chat_completions(
         )
 
     # 非流式响应
+    # 单库 Agent 模式：跑 ReAct 引擎并直接采用其最终答案（与流式共用 _build_agent_runtime），
+    # 不再丢弃 final_answer 后二次走普通 RAG 生成（既省一次 LLM 调用，也保留 Agent 推理结果）。
+    if mode == "agent" and request.knowledge_base_id and not use_multi_kb and not skip_retrieval:
+        answer, chunks, degraded, agent_steps = await _run_agent_nonstream(
+            user_query, request.knowledge_base_id, llm, preset_cfg,
+            max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
+        )
+        references = await _build_references(chunks)
+        prompt_tokens = _estimate_tokens(user_query)
+        completion_tokens = _estimate_tokens(answer)
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        response = ChatCompletionResponse(
+            id=completion_id,
+            choices=[ChatChoice(message=ResponseMessage(content=answer))],
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+            references=references,
+            metadata={
+                "retrieval_mode": mode,
+                "degraded": degraded,
+                "failed_source_count": 0,
+                "llm_degraded": False,
+            },
+        )
+        if request.session_id and answer:
+            try:
+                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, tenant_id=tenant_id)
+                refs_data = [ref.model_dump() for ref in references] if references else None
+                steps_data = agent_steps if agent_steps else None
+                await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, tenant_id=tenant_id)
+                await _auto_title_session(request.session_id, user_query, answer)
+            except Exception as e:
+                logger.warning("保存会话消息失败: %s", e)
+        return response
+
     if skip_retrieval:
         # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
         chunks = []
