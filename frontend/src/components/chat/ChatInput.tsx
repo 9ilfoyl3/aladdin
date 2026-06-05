@@ -2,10 +2,16 @@ import { useRef, useEffect } from 'react'
 import { Send, Cpu, Bot, Paperclip } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import ContextUsageRing from '@/components/chat/ContextUsageRing'
 import KbSelector from '@/components/chat/KbSelector'
+import KbSelectionList from '@/components/chat/KbSelectionList'
 import SessionFileList, { type PendingSessionFile } from '@/components/chat/SessionFileList'
 import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
+
+/** 会话上传支持的文件类型（与后端 _ALLOWED_EXTENSIONS 一致）。 */
+const UPLOAD_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png'
+const UPLOAD_ACCEPT_LABEL = 'pdf、docx、xlsx、pptx、csv、txt、md、jpg、jpeg、png'
 
 interface KnowledgeBaseItem {
   id: string
@@ -111,39 +117,61 @@ function ChatInput({
     if (e.target) e.target.value = ''
   }
 
-  // 上传按钮 + 隐藏 input（centered/底部两套布局共用）
+  // 上传按钮（纯图标 + Tooltip 说明） + 隐藏 input（centered/底部两套布局共用）
   const uploadButton = (
     <>
-      <button
-        type="button"
-        onClick={handlePickFile}
-        disabled={!canUploadSessionFile || isStreaming}
-        title={canUploadSessionFile ? '上传文件到本会话（无需选择知识库）' : '请先开始一个会话再上传文件'}
-        aria-label="上传会话文件"
-        className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap"
-      >
-        <Paperclip className="h-3 w-3 shrink-0" />
-        <span>上传文件</span>
-      </button>
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={handlePickFile}
+              disabled={!canUploadSessionFile || isStreaming}
+              aria-label="上传会话文件"
+              className="h-7 w-7 flex items-center justify-center border-none bg-muted/50 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-muted-foreground cursor-pointer transition-colors shrink-0"
+            >
+              <Paperclip className="h-3.5 w-3.5 shrink-0" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-xs">
+            {canUploadSessionFile ? (
+              <div className="space-y-0.5 text-xs leading-relaxed">
+                <div>上传文件到本会话（无需选择知识库）</div>
+                <div className="text-muted-foreground">支持类型：{UPLOAD_ACCEPT_LABEL}</div>
+              </div>
+            ) : (
+              <div className="text-xs">请先开始一个会话再上传文件</div>
+            )}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <input
         ref={fileInputRef}
         type="file"
         multiple
+        accept={UPLOAD_ACCEPT}
         className="hidden"
         onChange={handleFileInputChange}
       />
     </>
   )
 
-  // 已上传文件列表（centered/底部两套布局共用）
+  // 已选知识库 + 已上传文件列表（centered/底部两套布局共用）
   const fileListSlot = (
-    <SessionFileList
-      files={sessionFiles}
-      pending={pendingSessionFiles}
-      onRemove={(id) => onRemoveSessionFile?.(id)}
-      onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
-      imagePreviewUrls={sessionImagePreviewUrls}
-    />
+    <>
+      <KbSelectionList
+        knowledgeBases={knowledgeBases}
+        selectedKbIds={selectedKbIds}
+        onRemove={onToggleKb}
+      />
+      <SessionFileList
+        files={sessionFiles}
+        pending={pendingSessionFiles}
+        onRemove={(id) => onRemoveSessionFile?.(id)}
+        onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
+        imagePreviewUrls={sessionImagePreviewUrls}
+      />
+    </>
   )
 
   // 居中静态布局（新对话空态）
