@@ -33,10 +33,10 @@ function Chat() {
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLoadingMessages, setIsLoadingMessages] = useState(false)
-  const [selectedKb, setSelectedKb] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedPreset, setSelectedPreset] = useState('')
-  const [auxiliaryKbIds, setAuxiliaryKbIds] = useState<string[]>([])
+  // 已选知识库（按选中顺序，首个即后端主库 kb_ids[0]，检索权重更高）。
+  const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
   const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const [contextUsage, setContextUsage] = useState<{ current: number; max: number }>({ current: 0, max: 0 })
@@ -233,14 +233,16 @@ function Chat() {
         }
         if (restoredUsage) setContextUsage(restoredUsage)
 
-        // 恢复该会话最近一次使用的知识库选择：从最后一条带 kb 信息的消息读取
+        // 恢复该会话最近一次使用的知识库选择：从最后一条带 kb 信息的消息读取。
+        // kb_ids（多选，有序，首个为主库）优先；否则回退单选 kb_id。
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i]
-          if (m.kb_id || (m.kb_ids && m.kb_ids.length > 0)) {
-            setSelectedKb(m.kb_id || '')
-            setAuxiliaryKbIds(
-              (m.kb_ids || []).filter((id) => id && id !== m.kb_id)
-            )
+          if (m.kb_ids && m.kb_ids.length > 0) {
+            setSelectedKbIds(m.kb_ids.filter(Boolean))
+            break
+          }
+          if (m.kb_id) {
+            setSelectedKbIds([m.kb_id])
             break
           }
         }
@@ -293,12 +295,11 @@ function Chat() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
-      let kbIds: string[] | undefined = undefined
-      if (selectedKb && auxiliaryKbIds.length > 0) {
-        kbIds = [selectedKb, ...auxiliaryKbIds.filter((id) => id !== selectedKb)]
-      } else if (!selectedKb && auxiliaryKbIds.length > 0) {
-        kbIds = auxiliaryKbIds
-      }
+      // 合并知识库选择映射到后端契约（保持既有路由语义不变）：
+      // - 0 个库 → 都不传；1 个库 → 仅 knowledge_base_id（走 SINGLE_KB，保留单库查询理解链路）；
+      // - 2+ 个库 → kb_ids（走 MULTI_KB），数组首个即权重 1.0 的主库。
+      const primaryKb = selectedKbIds[0] || undefined
+      const multiKbIds = selectedKbIds.length > 1 ? selectedKbIds : undefined
 
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
@@ -307,10 +308,10 @@ function Chat() {
           model: 'rag',
           messages: [{ role: 'user', content: query }],
           stream: true,
-          knowledge_base_id: selectedKb || undefined,
+          knowledge_base_id: primaryKb,
           model_config_id: selectedModel || undefined,
           agent_preset_id: selectedPreset || undefined,
-          kb_ids: kbIds,
+          kb_ids: multiKbIds,
           session_id: sessionId || undefined,
           attachments: boundAttachments.length > 0 ? boundAttachments : undefined,
         }),
@@ -649,8 +650,8 @@ function Chat() {
     })
   }
 
-  function toggleAuxiliaryKb(kbId: string) {
-    setAuxiliaryKbIds((prev) =>
+  function toggleKb(kbId: string) {
+    setSelectedKbIds((prev) =>
       prev.includes(kbId) ? prev.filter((id) => id !== kbId) : [...prev, kbId]
     )
   }
@@ -779,21 +780,19 @@ function Chat() {
   const chatInputProps = {
     input,
     isStreaming,
-    selectedKb,
+    selectedKbIds,
     selectedModel,
     selectedModelName,
     selectedPreset,
-    auxiliaryKbIds,
     contextUsage,
     knowledgeBases,
     llmConfigs,
     agentPresets,
     onInputChange: setInput,
     onSend: handleSend,
-    onKbChange: setSelectedKb,
+    onToggleKb: toggleKb,
     onModelChange: setSelectedModel,
     onPresetChange: setSelectedPreset,
-    onToggleAuxiliaryKb: toggleAuxiliaryKb,
     // 会话文件上传：始终可用（即使未选 KB，Req 1.4），仅在流式或建索引时禁用由组件内判断
     // 输入区只展示"尚未随消息发出"的暂存文件；已发送的随用户气泡上移。
     sessionFiles: stagedFiles,

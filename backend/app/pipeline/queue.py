@@ -16,6 +16,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable
 
 import redis.asyncio as aioredis
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.retry import Retry
 from pydantic import BaseModel
 
 logger = logging.getLogger("pipeline.queue")
@@ -364,11 +368,13 @@ class TaskQueue:
                 # 否则队列空闲时，客户端会在服务端长轮询返回前先判定读超时，
                 # 持续抛出 "Timeout reading from redis"。取 15s 给足网络往返余量。
                 socket_timeout=15,
-                # 超时后自动重连底层 socket，避免 stale 连接导致消费循环永久卡死。
-                retry_on_timeout=True,
+                # 超时/断连后按退避自动重试，避免 stale 连接导致消费循环永久卡死。
+                # redis-py 6.0+ 已废弃 retry_on_timeout，统一用 retry + retry_on_error。
+                retry=Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3),
+                retry_on_error=[RedisConnectionError, RedisTimeoutError],
                 # 注意：health_check_interval 与 XREADGROUP BLOCK 命令在某些
                 # redis-py 版本下冲突（保活 PING 在 block 期间触发导致协议错乱），
-                # 禁用保活，由 retry_on_timeout 负责断线重连。
+                # 禁用保活，由 retry 负责断线重连。
                 health_check_interval=0,
             )
             # 测试连接

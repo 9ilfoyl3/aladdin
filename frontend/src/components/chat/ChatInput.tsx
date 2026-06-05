@@ -1,10 +1,9 @@
 import { useRef, useEffect } from 'react'
-import { Send, Database, Cpu, Library, ChevronDown, Bot, Paperclip } from 'lucide-react'
+import { Send, Cpu, Bot, Paperclip } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
-import { Badge } from '@/components/ui/badge'
 import ContextUsageRing from '@/components/chat/ContextUsageRing'
+import KbSelector from '@/components/chat/KbSelector'
 import SessionFileList, { type PendingSessionFile } from '@/components/chat/SessionFileList'
 import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
 
@@ -25,21 +24,19 @@ interface LLMConfigItem {
 interface ChatInputProps {
   input: string
   isStreaming: boolean
-  selectedKb: string
+  selectedKbIds: string[]
   selectedModel: string
   selectedModelName: string
   selectedPreset: string
-  auxiliaryKbIds: string[]
   contextUsage: { current: number; max: number }
   knowledgeBases: KnowledgeBaseItem[]
   llmConfigs: LLMConfigItem[]
   agentPresets: AgentPresetItem[]
   onInputChange: (value: string) => void
   onSend: (query?: string) => void
-  onKbChange: (value: string) => void
+  onToggleKb: (kbId: string) => void
   onModelChange: (value: string) => void
   onPresetChange: (value: string) => void
-  onToggleAuxiliaryKb: (kbId: string) => void
   /** 居中静态布局（用于新对话空态），默认 false 时固定在底部 */
   centered?: boolean
   // ====== 会话文件上传（session-file-upload Task 16）======
@@ -62,21 +59,19 @@ interface ChatInputProps {
 function ChatInput({
   input,
   isStreaming,
-  selectedKb,
+  selectedKbIds,
   selectedModel,
   selectedModelName,
   selectedPreset,
-  auxiliaryKbIds,
   contextUsage,
   knowledgeBases,
   llmConfigs,
   agentPresets,
   onInputChange,
   onSend,
-  onKbChange,
+  onToggleKb,
   onModelChange,
   onPresetChange,
-  onToggleAuxiliaryKb,
   centered = false,
   sessionFiles = [],
   pendingSessionFiles = [],
@@ -172,64 +167,11 @@ function ChatInput({
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
               {uploadButton}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Database className="h-3 w-3 shrink-0" />
-                    <span>{knowledgeBases.find((kb) => kb.id === selectedKb)?.name || '主知识库'}</span>
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases.map((kb) => (
-                      <DropdownMenuCheckboxItem
-                        key={kb.id}
-                        checked={selectedKb === kb.id}
-                        onCheckedChange={() => onKbChange(selectedKb === kb.id ? '' : kb.id)}
-                        onSelect={(e) => e.preventDefault()}
-                      >
-                        {kb.name}
-                      </DropdownMenuCheckboxItem>
-                    ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Library className="h-3 w-3 shrink-0" />
-                    <span>关联知识库</span>
-                    {auxiliaryKbIds.length > 0 && (
-                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
-                        {auxiliaryKbIds.length}
-                      </Badge>
-                    )}
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases
-                      .filter((kb) => kb.id !== selectedKb)
-                      .map((kb) => (
-                        <DropdownMenuCheckboxItem
-                          key={kb.id}
-                          checked={auxiliaryKbIds.includes(kb.id)}
-                          onCheckedChange={() => onToggleAuxiliaryKb(kb.id)}
-                          onSelect={(e) => e.preventDefault()}
-                        >
-                          {kb.name}
-                        </DropdownMenuCheckboxItem>
-                      ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <KbSelector
+                knowledgeBases={knowledgeBases}
+                selectedKbIds={selectedKbIds}
+                onToggle={onToggleKb}
+              />
 
               <Select value={selectedPreset} onValueChange={onPresetChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
@@ -303,64 +245,11 @@ function ChatInput({
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
               {uploadButton}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Database className="h-3 w-3 shrink-0" />
-                    <span>{knowledgeBases.find((kb) => kb.id === selectedKb)?.name || '主知识库'}</span>
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases.map((kb) => (
-                      <DropdownMenuCheckboxItem
-                        key={kb.id}
-                        checked={selectedKb === kb.id}
-                        onCheckedChange={() => onKbChange(selectedKb === kb.id ? '' : kb.id)}
-                        onSelect={(e) => e.preventDefault()}
-                      >
-                        {kb.name}
-                      </DropdownMenuCheckboxItem>
-                    ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Library className="h-3 w-3 shrink-0" />
-                    <span>关联知识库</span>
-                    {auxiliaryKbIds.length > 0 && (
-                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
-                        {auxiliaryKbIds.length}
-                      </Badge>
-                    )}
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases
-                      .filter((kb) => kb.id !== selectedKb)
-                      .map((kb) => (
-                        <DropdownMenuCheckboxItem
-                          key={kb.id}
-                          checked={auxiliaryKbIds.includes(kb.id)}
-                          onCheckedChange={() => onToggleAuxiliaryKb(kb.id)}
-                          onSelect={(e) => e.preventDefault()}
-                        >
-                          {kb.name}
-                        </DropdownMenuCheckboxItem>
-                      ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <KbSelector
+                knowledgeBases={knowledgeBases}
+                selectedKbIds={selectedKbIds}
+                onToggle={onToggleKb}
+              />
 
               <Select value={selectedPreset} onValueChange={onPresetChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
