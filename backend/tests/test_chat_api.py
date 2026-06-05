@@ -378,3 +378,129 @@ def test_chat_completions_retrieval_error(mock_preset, mock_retrieve, test_clien
 
     assert response.status_code == 500
     assert "检索失败" in response.json()["detail"]
+
+
+# ============================================================
+# 历史 assistant 轮次结构化还原测试
+# ============================================================
+
+
+def test_reconstruct_turn_plain_answer_no_steps():
+    """无 agent_steps（普通 RAG / 旧数据）应退化为单条 assistant 消息"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    msgs = _reconstruct_assistant_turn("最终答案", None)
+    assert msgs == [{"role": "assistant", "content": "最终答案"}]
+
+
+def test_reconstruct_turn_empty_answer_returns_nothing():
+    """空答案且无步骤应返回空列表，不污染上下文"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    assert _reconstruct_assistant_turn("", None) == []
+    assert _reconstruct_assistant_turn("   ", []) == []
+
+
+def test_reconstruct_turn_strips_legacy_tool_annotation():
+    """历史正文中残留的旧版 [Agent used: ...] 注解应被剥除"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    content = "这是答案。[Agent used: grep_chunks(27ms), list_knowledge_chunks(16ms)]"
+    msgs = _reconstruct_assistant_turn(content, None)
+    assert msgs == [{"role": "assistant", "content": "这是答案。"}]
+    # 工具名绝不出现在还原后的任何内容中
+    assert "grep_chunks" not in json.dumps(msgs, ensure_ascii=False)
+
+
+def test_reconstruct_turn_builds_structured_tool_calls():
+    """带工具调用的历史应还原为 assistant(tool_calls) + tool 消息对"""
+    from app.api.chat import _HISTORY_TOOL_OUTPUT_PLACEHOLDER, _reconstruct_assistant_turn
+
+    steps = [
+        {"type": "thought", "content": "先检索", "iteration": 0},
+        {
+            "type": "tool_call",
+            "tool_name": "grep_chunks",
+            "tool_call_id": "tc_1",
+            "arguments": {"query": "反分裂国家法 第三条"},
+            "iteration": 0,
+        },
+        {"type": "tool_result", "tool_call_id": "tc_1", "tool_name": "grep_chunks", "success": True},
+        {"type": "final_answer", "content": "答案正文", "done": True},
+    ]
+    msgs = _reconstruct_assistant_turn("答案正文", steps)
+
+    # 结构：assistant(tool_calls) → tool → assistant(final)
+    assert len(msgs) == 3
+    assistant_call, tool_msg, final_msg = msgs
+
+    assert assistant_call["role"] == "assistant"
+    assert assistant_call["content"] == "先检索"
+    assert len(assistant_call["tool_calls"]) == 1
+    tc = assistant_call["tool_calls"][0]
+    assert tc["id"] == "tc_1"
+    assert tc["function"]["name"] == "grep_chunks"
+    # 参数序列化为 JSON 字符串，且保留非 ASCII 原文
+    assert "反分裂国家法" in tc["function"]["arguments"]
+
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == "tc_1"
+    assert tool_msg["content"] == _HISTORY_TOOL_OUTPUT_PLACEHOLDER
+
+    assert final_msg == {"role": "assistant", "content": "答案正文"}
+
+
+def test_reconstruct_turn_skips_final_answer_as_tool_call():
+    """final_answer 是终止信号，不应作为中间工具调用重放"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    steps = [
+        {
+            "type": "tool_call",
+            "tool_name": "final_answer",
+            "tool_call_id": "tc_final",
+            "arguments": {"answer": "x"},
+            "iteration": 0,
+        },
+    ]
+    msgs = _reconstruct_assistant_turn("最终答案", steps)
+    # 只剩末尾 assistant 答案，没有任何 tool_calls 消息
+    assert msgs == [{"role": "assistant", "content": "最终答案"}]
+
+
+def test_reconstruct_turn_groups_parallel_calls_by_iteration():
+    """同一 iteration 的多个工具调用应聚合到一条 assistant 消息"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    steps = [
+        {"type": "tool_call", "tool_name": "grep_chunks", "tool_call_id": "a", "arguments": {}, "iteration": 0},
+        {"type": "tool_call", "tool_name": "knowledge_search", "tool_call_id": "b", "arguments": {}, "iteration": 0},
+        {"type": "tool_result", "tool_call_id": "a", "tool_name": "grep_chunks", "success": True},
+        {"type": "tool_result", "tool_call_id": "b", "tool_name": "knowledge_search", "success": True},
+    ]
+    msgs = _reconstruct_assistant_turn("答案", steps)
+
+    # assistant(2 tool_calls) + 2 tool + assistant(final)
+    assert len(msgs) == 4
+    assert len(msgs[0]["tool_calls"]) == 2
+    assert msgs[1]["role"] == "tool" and msgs[2]["role"] == "tool"
+    assert msgs[3] == {"role": "assistant", "content": "答案"}
+
+
+def test_reconstruct_turn_multi_iteration_order_preserved():
+    """跨多个 iteration 的调用应按 iteration 顺序还原"""
+    from app.api.chat import _reconstruct_assistant_turn
+
+    steps = [
+        {"type": "tool_call", "tool_name": "grep_chunks", "tool_call_id": "a", "arguments": {}, "iteration": 0},
+        {"type": "tool_result", "tool_call_id": "a", "tool_name": "grep_chunks", "success": True},
+        {"type": "tool_call", "tool_name": "list_knowledge_chunks", "tool_call_id": "b", "arguments": {}, "iteration": 1},
+        {"type": "tool_result", "tool_call_id": "b", "tool_name": "list_knowledge_chunks", "success": True},
+    ]
+    msgs = _reconstruct_assistant_turn("答案", steps)
+
+    # assistant → tool → assistant → tool → assistant(final)
+    assert len(msgs) == 5
+    assert msgs[0]["tool_calls"][0]["function"]["name"] == "grep_chunks"
+    assert msgs[2]["tool_calls"][0]["function"]["name"] == "list_knowledge_chunks"
+    assert msgs[4] == {"role": "assistant", "content": "答案"}

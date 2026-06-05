@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -90,14 +91,30 @@ async def _verify_session_owner(session_id: str, identity: IdentityContext) -> N
         raise CrossTenantError()
 
 
+# 历史检索结果占位符：历史轮次的工具输出不落库（避免膨胀，也避免模型复用过期检索
+# 结果），重放时统一以此占位，配合系统提示词强制每个新事实问题重新检索。
+_HISTORY_TOOL_OUTPUT_PLACEHOLDER = (
+    "[Previous retrieval omitted — please perform a fresh search.]"
+)
+
+# final_answer 是终止信号，不作为中间工具调用重放（其答案正文以末尾 assistant 消息承载）。
+_TERMINAL_TOOL_NAME = "final_answer"
+
+# 历史 assistant 正文中可能残留的旧版工具注解（如 "[Agent used: grep_chunks(27ms)]"），
+# 重放前剥除，避免内部工具名泄露进模型上下文乃至被模型抄进答案。
+_LEGACY_TOOL_ANNOTATION_RE = re.compile(r"\n*\[Agent used:[^\]]*\]\s*$")
+
+
 async def _load_session_history(session_id: str) -> list[dict]:
-    """从数据库加载会话历史消息，返回最近 N 轮对话
+    """从数据库加载会话历史消息，返回最近 N 轮对话（OpenAI 消息格式）。
 
-    只保留最近 MAX_HISTORY_ROUNDS 轮（user+assistant 各一条算一轮），
-    避免上下文过长超出 LLM token 限制。
+    只保留最近 MAX_HISTORY_ROUNDS 轮（user+assistant 各一条算一轮），避免上下文
+    过长超出 LLM token 限制。
 
-    对于 assistant 消息中包含 agent_steps 的，追加工具使用摘要，
-    给 LLM 提供上一轮使用了哪些工具的上下文。
+    对于带 agent_steps 的 assistant 消息，将其事件流还原为结构化的
+    ``assistant(tool_calls)`` + ``tool`` 消息对，而非把工具名拼进正文文本：
+    工具名与调用参数仅进入 LLM 协议字段，不会出现在任何用户可见内容里。历史工具
+    输出一律以占位符替代，强制后续轮次重新检索。
     """
     async with async_session() as session:
         try:
@@ -117,7 +134,6 @@ async def _load_session_history(session_id: str) -> list[dict]:
                 {"sid": session_id},
             )
             rows = raw_result.fetchall()
-            messages = None
             history = [{"role": row.role, "content": row.content} for row in rows]
             max_messages = MAX_HISTORY_ROUNDS * 2
             if len(history) > max_messages:
@@ -127,42 +143,108 @@ async def _load_session_history(session_id: str) -> list[dict]:
     if not messages:
         return []
 
-    # 转换为 dict 列表，assistant 消息附带工具摘要
-    history = []
-    for m in messages:
-        content = m.content
-        if m.role == "assistant" and hasattr(m, 'agent_steps') and m.agent_steps:
-            # 从 agent_steps 中提取工具调用摘要
-            tool_summary = _summarize_agent_steps(m.agent_steps)
-            if tool_summary:
-                content = f"{content}\n{tool_summary}"
-        history.append({"role": m.role, "content": content})
-
-    # 截取最近 N 轮（2N 条消息）
+    # 先按源消息（user/assistant 各一条）截断到最近 2N 条，再逐条还原。
+    # 在源消息边界截断是安全的：每条 assistant 还原出的消息块自成完整结构
+    # （以 assistant(tool_calls) 开头、tool 紧随其后），不会产生孤立的 tool 消息。
     max_messages = MAX_HISTORY_ROUNDS * 2
-    if len(history) > max_messages:
-        history = history[-max_messages:]
+    if len(messages) > max_messages:
+        messages = messages[-max_messages:]
+
+    history: list[dict] = []
+    for m in messages:
+        if m.role == "assistant":
+            agent_steps = getattr(m, "agent_steps", None)
+            history.extend(_reconstruct_assistant_turn(m.content or "", agent_steps))
+        else:
+            history.append({"role": m.role, "content": m.content})
 
     return history
 
 
-def _summarize_agent_steps(agent_steps: list) -> str:
-    """从 agent_steps 中提取工具调用摘要
+def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[dict]:
+    """将一条历史 assistant 消息还原为结构化的 OpenAI 消息序列。
 
-    格式: [Agent used: tool1(Nms), tool2(Nms)]
+    输出形如::
+
+        assistant(content=思考, tool_calls=[…])   # 每个 LLM 决策轮一条
+        tool(tool_call_id=…, content=占位符)        # 紧随其后，逐个工具结果
+        …
+        assistant(content=最终答案)                  # 末尾承载用户可见答案
+
+    要点：
+    - 工具名、调用参数只出现在 ``tool_calls`` 协议字段中，绝不进入可见正文。
+    - final_answer 作为终止信号被跳过，其文本由末尾 assistant 消息承载，避免重复
+      或让模型误以为上一轮仍在进行中。
+    - 历史工具输出未落库，统一以占位符替代，强制后续轮次重新检索。
+    - 无 agent_steps（普通 RAG / 旧数据）时退化为单条 assistant 最终答案消息。
     """
-    tool_calls = []
+    final_answer = _LEGACY_TOOL_ANNOTATION_RE.sub("", content or "").strip()
+
+    if not agent_steps or not isinstance(agent_steps, list):
+        return [{"role": "assistant", "content": final_answer}] if final_answer else []
+
+    # 按 iteration 聚合：还原"一次 LLM 决策可发起多个并行工具调用"的结构。
+    # agent_steps 按时间顺序存储：thought → tool_call(s) → tool_result(s) → … → final_answer。
+    iter_thought: dict[int, str] = {}
+    iter_calls: dict[int, list[dict]] = {}
+    iter_order: list[int] = []
+
     for step in agent_steps:
-        if isinstance(step, dict) and step.get("type") == "tool_result":
-            tool_name = step.get("tool_name", "")
-            duration_ms = step.get("duration_ms", 0)
-            if tool_name:
-                tool_calls.append(f"{tool_name}({duration_ms}ms)")
+        if not isinstance(step, dict):
+            continue
+        stype = step.get("type")
+        iteration = step.get("iteration", 0)
+        if stype == "thought":
+            text = step.get("content", "")
+            if text:
+                iter_thought[iteration] = iter_thought.get(iteration, "") + text
+        elif stype == "tool_call":
+            name = step.get("tool_name", "")
+            if not name or name == _TERMINAL_TOOL_NAME:
+                continue
+            if iteration not in iter_calls:
+                iter_calls[iteration] = []
+                iter_order.append(iteration)
+            iter_calls[iteration].append({
+                "id": step.get("tool_call_id", ""),
+                "name": name,
+                "arguments": step.get("arguments", {}),
+            })
 
-    if not tool_calls:
-        return ""
+    msgs: list[dict] = []
+    for iteration in iter_order:
+        calls = iter_calls[iteration]
+        if not calls:
+            continue
+        assistant_msg: dict = {
+            "role": "assistant",
+            "content": iter_thought.get(iteration, "") or None,
+            "tool_calls": [
+                {
+                    "id": c["id"],
+                    "type": "function",
+                    "function": {
+                        "name": c["name"],
+                        "arguments": json.dumps(c["arguments"], ensure_ascii=False)
+                        if not isinstance(c["arguments"], str)
+                        else c["arguments"],
+                    },
+                }
+                for c in calls
+            ],
+        }
+        msgs.append(assistant_msg)
+        for c in calls:
+            msgs.append({
+                "role": "tool",
+                "tool_call_id": c["id"],
+                "content": _HISTORY_TOOL_OUTPUT_PLACEHOLDER,
+            })
 
-    return f"[Agent used: {', '.join(tool_calls)}]"
+    if final_answer:
+        msgs.append({"role": "assistant", "content": final_answer})
+
+    return msgs
 
 
 async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> None:
@@ -658,6 +740,9 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "type": "tool_call",
             "tool_name": event.data.get("tool_name", ""),
             "tool_call_id": event.data.get("tool_call_id", ""),
+            # 持久化调用参数（如检索 query），用于后续轮次将历史还原为结构化
+            # tool_calls 消息。参数仅进入 LLM 协议字段，不在前端答案中展示。
+            "arguments": event.data.get("arguments", {}),
             "iteration": event.data.get("iteration", 0),
         }
     elif event.type == EventType.TOOL_RESULT:
