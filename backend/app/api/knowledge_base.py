@@ -89,6 +89,8 @@ class KBCapacityVO(BaseModel):
     approx_total_files: int = Field(..., description="约可容纳文档数（向下取整，近似）")
     # 已传文档数（精确，Document 计数）
     approx_used_files: int = Field(..., description="已传文档数（精确）")
+    # 约还可上传文档数 = 剩余 chunk // 单文件估算 chunk，向下取整（用户侧最直观的「还能传多少」）
+    approx_remaining_files: int = Field(..., description="约还可上传文档数（向下取整，近似）")
 
 
 class KnowledgeBaseResponse(BaseModel):
@@ -161,6 +163,7 @@ def _compute_capacity(
     - ``approx_total_files`` = total_chunks // (upload_max_file_mb × CHUNK_DENSITY)，向下取整
       （单文件估算 chunk = 租户上传上限 × 保守密度，Req 7.4）；估算分母<=0 时记 0。
     - ``approx_used_files`` = 已传文档数（精确）。
+    - ``approx_remaining_files`` = 剩余 chunk // 单文件估算 chunk，向下取整（用户最关心的「还能传多少」）。
 
     入参均按非负兜底处理，保证输出稳定（不抛错）。
     """
@@ -172,6 +175,9 @@ def _compute_capacity(
 
     per_file_chunks = max(0, upload_max_file_mb) * CHUNK_DENSITY
     approx_total_files = total // per_file_chunks if per_file_chunks > 0 else 0
+    # 剩余 chunk（不为负）→ 约还可上传份数（向下取整，保守）
+    remaining_chunks = max(0, total - used)
+    approx_remaining_files = remaining_chunks // per_file_chunks if per_file_chunks > 0 else 0
 
     return KBCapacityVO(
         used_chunks=used,
@@ -179,6 +185,7 @@ def _compute_capacity(
         percent=percent,
         approx_total_files=approx_total_files,
         approx_used_files=used_docs,
+        approx_remaining_files=approx_remaining_files,
     )
 
 

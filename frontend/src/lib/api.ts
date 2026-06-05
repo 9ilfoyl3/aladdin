@@ -85,6 +85,8 @@ export interface KBCapacity {
   percent: number
   approx_total_files: number
   approx_used_files: number
+  // 约还可上传文档数（向下取整，近似），用户最关心的「还能传多少」
+  approx_remaining_files: number
 }
 
 // 知识库相关接口

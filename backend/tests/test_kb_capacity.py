@@ -40,6 +40,8 @@ def test_basic_capacity_half_used():
     # 1_000_000 // (10 * 300) = 1_000_000 // 3000 = 333
     assert vo.approx_total_files == 333
     assert vo.approx_used_files == 10
+    # 剩余 500_000 chunk // 3000 = 166
+    assert vo.approx_remaining_files == 166
 
 
 def test_percent_capped_at_one_when_full():
@@ -57,6 +59,7 @@ def test_percent_capped_at_one_when_over_limit():
     )
     assert vo.percent == 1.0
     assert vo.used_chunks == 2_500_000  # used 仍如实透出
+    assert vo.approx_remaining_files == 0  # 已超限，无剩余可传
 
 
 def test_empty_kb_percent_zero():
@@ -68,6 +71,18 @@ def test_empty_kb_percent_zero():
     assert vo.approx_used_files == 0
     # 1_000_000 // (20 * 300) = 1_000_000 // 6000 = 166
     assert vo.approx_total_files == 166
+    # 空库剩余 == 总容量估算
+    assert vo.approx_remaining_files == 166
+
+
+def test_remaining_files_equals_total_minus_used_floor():
+    """约还可上传份数 = 剩余 chunk // 单文件估算 chunk，向下取整（用户最关心的「还能传多少」）。"""
+    # 已用 600_000，剩余 400_000；单文件估算 10*300=3000
+    vo = _compute_capacity(
+        used_chunks=600_000, used_files=20, kb_chunk_cap=1_000_000, upload_max_file_mb=10
+    )
+    # 400_000 // 3000 = 133
+    assert vo.approx_remaining_files == 133
 
 
 def test_approx_total_files_floor():
@@ -106,6 +121,7 @@ def test_negative_inputs_clamped_to_non_negative():
     assert vo.total_chunks == 0
     assert vo.approx_used_files == 0
     assert vo.approx_total_files == 0
+    assert vo.approx_remaining_files == 0
     assert vo.percent == 0.0
 
 
