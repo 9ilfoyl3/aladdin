@@ -12,6 +12,11 @@ import logging
 import signal
 import sys
 
+from app.logging_config import setup_logging
+
+# 在所有业务模块 import 之前配置日志
+setup_logging(service_name="worker")
+
 from app.config import get_settings
 from app.pipeline.factory import create_pipeline
 from app.pipeline.queue import TaskQueue
@@ -19,11 +24,6 @@ from app.pipeline.worker import PipelineWorker
 from app.startup import configure_thread_pool, load_embed_configs
 from app.storage.database import async_session, init_db
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("worker_main")
 
 # 优雅关闭超时（秒），超时后强制退出

@@ -139,6 +139,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - upload_data:/app/data
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -162,6 +163,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - upload_data:/app/data
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy

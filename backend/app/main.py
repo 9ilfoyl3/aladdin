@@ -10,6 +10,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.logging_config import setup_logging
+
+# 在所有业务模块 import 之前配置日志
+setup_logging(service_name="backend")
+
 from app.api.agent_config import router as agent_config_router
 from app.api.api_key import router as api_key_router
 from app.api.auth_routes import router as auth_router
