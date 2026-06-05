@@ -73,3 +73,11 @@ _reference/
 
 # 本地开发启动脚本（个人本地一键拉起后端/Worker/前端，不纳入版本管理）
 start-dev.ps1
+
+# Tests（本地测试文件，不纳入版本管理）
+backend/tests/
+
+# Deploy packages（打包后的部署产物目录，不入库）
+deploy-*/
+deploy-package/
+deploy-package.zip
