@@ -1,0 +1,29 @@
+# ============================================================
+# Milvus 用户级配置覆盖（standalone v2.5.x）
+# 挂载到容器 /milvus/configs/user.yaml，与默认 milvus.yaml 合并，user.yaml 优先。
+# 目的：开启 mmap（内存映射），把冷数据/索引放磁盘 + OS page cache，
+#       降低单机常驻内存占用，让 Milvus 服务端按访问频率自动做冷热分层。
+#       适用场景：单服务器部署、知识库数量随使用增长、内存与 PG/Redis/模型等争用。
+#
+# 改完后重启 Milvus 生效（在 deploy-middleware 目录）：
+#   docker compose --env-file ../.env up -d milvus
+# ============================================================
+
+queryNode:
+  mmap:
+    # 向量原始数据走 mmap —— 省常驻内存最有效的一项（原始向量是内存大头）。
+    vectorField: true
+    # 向量索引保留在内存 —— 索引是检索速度的关键，留内存保查询延迟（保守起步）。
+    # 若内存仍然紧张，可将其改为 true（会以略增检索延迟换取更低内存）。
+    vectorIndex: false
+    # 标量数据走 mmap（占内存不大，mmap 影响很小）。
+    scalarField: true
+    # 标量索引走 mmap（标量索引体积小，mmap 收益/代价均小，安全开启）。
+    scalarIndex: true
+    # 新增/增长段也启用 mmap，降低新写入数据的内存开销（略增受影响段的查询延迟）。
+    growingMmapEnabled: true
+
+  # chunk cache（原始向量取回用）内存上限。默认 2GB，按服务器内存调整。
+  # 内存吃紧可调小；磁盘较快（NVMe）时调小影响不大。如需修改取消下行注释：
+  # cache:
+  #   memoryLimit: 2147483648  # 2GB = 2 * 1024 * 1024 * 1024

@@ -68,15 +68,34 @@ if [ -d "$MODEL_DIR" ] && [ "$(ls -A $MODEL_DIR 2>/dev/null)" ]; then
     fi
 fi
 
+# 4.1 创建共享网络（中间件与应用通过它互通，幂等）
+echo "  创建共享网络 arag-network（已存在则跳过）..."
+docker network create arag-network 2>/dev/null || true
+
+# 4.2 先起中间件（etcd/minio/milvus/postgres/redis），等其 healthy
+if [ -f "middleware/docker-compose.yml" ]; then
+    echo "  启动中间件（含 Milvus mmap 配置）..."
+    (cd middleware && docker compose --env-file ../.env up -d)
+    echo "  等待中间件就绪（30s）..."
+    sleep 30
+    (cd middleware && docker compose --env-file ../.env ps)
+else
+    echo "  ⚠️ 未找到 middleware/docker-compose.yml，跳过中间件启动"
+    echo "     （若中间件已单独部署可忽略；否则应用将无法连接 DB/Milvus/Redis）"
+fi
+
+# 4.3 再起应用（backend 多进程 / worker / frontend）
+echo "  启动应用服务..."
 docker compose up -d
 
 echo ""
 echo "=== 部署完成 ==="
-echo "前端: http://$(hostname -I | awk '{print $1}'):8888"
-echo "后端: http://$(hostname -I | awk '{print $1}'):8000"
-echo "API 文档: http://$(hostname -I | awk '{print $1}'):8000/docs"
+echo "前端: http://$(hostname -I | awk '{print $1}'):${FRONTEND_PORT:-8888}"
+echo "后端: http://$(hostname -I | awk '{print $1}'):${BACKEND_PORT:-8088}"
 echo ""
 echo "提示："
 echo "  - 可在前端 Embedding 页面动态切换本地/远程 Embedding 服务"
-echo "  - 查看日志: docker compose logs -f"
-echo "  - 停止服务: docker compose down"
+echo "  - 查看应用日志:   docker compose logs -f"
+echo "  - 查看中间件日志: (cd middleware && docker compose --env-file ../.env logs -f)"
+echo "  - 停止应用:       docker compose down"
+echo "  - 停止中间件:     (cd middleware && docker compose --env-file ../.env down)"

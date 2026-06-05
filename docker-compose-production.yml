@@ -15,6 +15,10 @@ services:
   backend:
     container_name: arag-backend
     image: ${IMAGE_BACKEND:-artoo-backend:latest}
+    # 覆盖镜像默认 CMD：单机多进程，提升并发问答吞吐与单进程崩溃韧性。
+    # 进程数由 BACKEND_WORKERS 控制（默认 2，单机建议 2~4，别太大以给 Milvus/模型留内存）。
+    # 各 worker 进程的检索/配置缓存经 InvalidationBus(Redis pub/sub) 广播保持一致。
+    command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-2}"]
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:

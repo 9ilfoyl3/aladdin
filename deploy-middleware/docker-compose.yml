@@ -59,6 +59,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
+      # 用户级配置覆盖：开启 mmap 控常驻内存（详见 milvus-user.yaml）。只读挂载。
+      - ./milvus-user.yaml:/milvus/configs/user.yaml:ro
     expose:
       - "19530"
     depends_on:
@@ -74,6 +76,15 @@ services:
   postgres:
     container_name: arag-postgres
     image: ${IMAGE_POSTGRES:-postgres:16-alpine}
+    # 抬高最大连接数：每个应用进程一个连接池（pool_size=10 + overflow=20 = 上限 30）。
+    # BACKEND_WORKERS=2 的 backend + 1 个 worker ≈ 峰值 90 连接，默认 100 余量过窄。
+    # 设为 200 给足余量（含运维直连 / 迁移等）。shared_buffers 同步上调。
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
     environment:
       POSTGRES_DB: artoo
       POSTGRES_USER: postgres

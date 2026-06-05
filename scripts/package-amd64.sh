@@ -55,6 +55,13 @@ echo ""
 echo "[5] 复制配置文件..."
 cp docker-compose-production.yml "$OUT/docker-compose.yml"
 cp backend/.env.example "$OUT/.env.example"
+cp frontend/nginx.conf "$OUT/nginx.conf"
+cp scripts/deploy-intranet.sh "$OUT/"
+# 中间件 compose + Milvus mmap 配置：放 middleware/ 子目录，与 ps1 版产物对齐。
+# compose 内以 ./milvus-user.yaml 挂载，二者须同目录。
+mkdir -p "$OUT/middleware"
+cp deploy-middleware/docker-compose.yml "$OUT/middleware/docker-compose.yml"
+cp deploy-middleware/milvus-user.yaml "$OUT/middleware/milvus-user.yaml"
 
 echo ""
 echo "=== 完成 ==="
