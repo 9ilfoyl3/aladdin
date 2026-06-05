@@ -1,21 +1,26 @@
 """日志配置模块
 
 按时间分目录的文件日志：
-  logs/{YYYY-MM-DD}/{service_name}/{HH}.log
+  logs/{YYYY-MM-DD}/{service_name}/{HH}.{PID}.log
 
 目录结构：
   logs/
   ├── 2026-06-06/
   │   ├── backend/
-  │   │   ├── 00.log
-  │   │   ├── 01.log
+  │   │   ├── 00.31872.log   (uvicorn worker 进程 1)
+  │   │   ├── 00.31873.log   (uvicorn worker 进程 2)
+  │   │   ├── 01.31872.log
   │   │   └── ...
   │   └── worker/
-  │       └── ...
+  │       └── 00.31880.log
   └── 2026-06-07/
       └── ...
 
-日志保留 15 天，过期目录由后台清理。
+文件名带 PID 后缀：backend 多进程（uvicorn --workers）+ 独立 worker
+进程会同时写日志，Python logging 文件句柄非多进程安全，按 PID 分文件避免
+日志交错/丢失。
+
+日志保留 15 天，过期日期目录由后台线程清理。
 同时保留 stdout 输出（docker logs 仍然可用）。
 """
 
@@ -53,7 +58,11 @@ class HourlyDirectoryHandler(BaseRotatingHandler):
         super().__init__(str(filepath), mode="a", encoding=encoding)
 
     def _get_current_filepath(self) -> Path:
-        """根据当前时间计算日志文件路径"""
+        """根据当前时间计算日志文件路径
+
+        文件名带 PID 后缀，避免 backend 多 worker 进程 + worker 进程
+        同时写同一文件导致日志交错/丢失（Python logging 文件句柄非多进程安全）。
+        """
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
         hour_str = now.strftime("%H")
@@ -63,7 +72,7 @@ class HourlyDirectoryHandler(BaseRotatingHandler):
 
         dir_path = self.base_dir / date_str / self.service_name
         dir_path.mkdir(parents=True, exist_ok=True)
-        return dir_path / f"{hour_str}.log"
+        return dir_path / f"{hour_str}.{os.getpid()}.log"
 
     def shouldRollover(self, record) -> int:
         """检查是否需要切换文件（跨小时）"""
