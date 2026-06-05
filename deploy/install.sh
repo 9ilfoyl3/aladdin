@@ -22,9 +22,8 @@ done
 echo "[2/4] 检查配置..."
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  echo "  已生成 .env，请填写必填项后重新执行本脚本："
-  echo "    JWT_SECRET、SUPER_ADMIN_USERNAME/PASSWORD、LLM_*、EMBED_BASE_URL、RERANK_BASE_URL"
-  exit 0
+  echo "  已从 .env.example 生成 .env（含示例默认值，可直接启动）。"
+  echo "  ⚠️ 生产环境建议修改 JWT_SECRET 与 SUPER_ADMIN_PASSWORD 后重新部署。"
 fi
 
 echo "[3/4] 启动中间件，等待就绪..."

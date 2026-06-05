@@ -44,7 +44,8 @@ ensure_compose_compat() {
 check_env() {
   if [[ ! -f .env ]]; then
     cp .env.example .env
-    echo "  已生成 .env，请填写必填项。"
+    echo "  已从 .env.example 生成 .env（含示例默认值，可直接启动）。"
+    echo "  ⚠️ 生产环境建议修改 JWT_SECRET 与 SUPER_ADMIN_PASSWORD 后重新部署。"
   fi
 
   # 用 grep 直接从文件提取值（避免 source 解析注释或特殊字符的问题）
