@@ -17,12 +17,12 @@ B1 调参与 B2 阈值改动对召回与准确度的实际影响，避免"优化
 - ``compare``：在 before / after 两组参数下各跑一遍，并排对比，**跑完恢复原配置**。
 - ``build_default_hybrid`` / ``main``：CLI 入口，组装真实检索器并执行。
 
-用法示例（在 ``aladdin/backend`` 目录，aladdin conda 环境）::
+用法示例（在 ``artoo/backend`` 目录，artoo conda 环境）::
 
-    conda run -n aladdin python -m app.scripts.evaluate_retrieval \\
+    conda run -n artoo python -m app.scripts.evaluate_retrieval \\
         --eval-set app/scripts/eval_sets/large-kb-legal-sample.json --top-k 10
 
-    conda run -n aladdin python -m app.scripts.evaluate_retrieval \\
+    conda run -n artoo python -m app.scripts.evaluate_retrieval \\
         --eval-set app/scripts/eval_sets/large-kb-legal-sample.json \\
         --compare-before before.json --compare-after after.json --save-json
 """

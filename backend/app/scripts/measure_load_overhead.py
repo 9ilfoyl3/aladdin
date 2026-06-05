@@ -20,10 +20,10 @@
 脚本为**同步**实现：pymilvus 是同步 API，直接调用并用 ``time.perf_counter`` 计时即可，
 无需 asyncio。
 
-用法示例（在 ``aladdin/backend`` 目录，aladdin conda 环境）::
+用法示例（在 ``artoo/backend`` 目录，artoo conda 环境）::
 
-    conda run -n aladdin python -m app.scripts.measure_load_overhead --kb-id <KB_ID>
-    conda run -n aladdin python -m app.scripts.measure_load_overhead --kb-id <KB_ID> -n 50
+    conda run -n artoo python -m app.scripts.measure_load_overhead --kb-id <KB_ID>
+    conda run -n artoo python -m app.scripts.measure_load_overhead --kb-id <KB_ID> -n 50
 """
 
 from __future__ import annotations

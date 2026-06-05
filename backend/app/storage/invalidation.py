@@ -16,7 +16,7 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-CHANNEL = "aladdin:invalidate"
+CHANNEL = "artoo:invalidate"
 
 
 class InvalidationBus:

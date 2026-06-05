@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# pymilvus 已在 aladdin env 安装（3.0.0）。优先使用真实 pymilvus，使 _FIELDS/_SESSION_FIELDS
+# pymilvus 已在 artoo env 安装（3.0.0）。优先使用真实 pymilvus，使 _FIELDS/_SESSION_FIELDS
 # 的字段名解析为真实字符串；仅当导入失败时回退到 mock（对齐 test_milvus 系列的容错模式）。
 # 注意：本特性的行为断言（建表/删除/检索 expr）均通过 patch Collection/utility 完成，
 # 不依赖字段名是否为真实字符串。

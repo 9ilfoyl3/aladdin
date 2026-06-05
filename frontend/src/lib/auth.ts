@@ -11,7 +11,7 @@
 // 且避免多标签共享同一 token 互相覆盖导致的登录态错乱。
 // 代价：新开一个空白标签页需重新登录（同标签页内刷新仍保持登录）。
 
-const TOKEN_KEY = 'aladdin.jwt'
+const TOKEN_KEY = 'artoo.jwt'
 
 let _token: string | null = null
 
