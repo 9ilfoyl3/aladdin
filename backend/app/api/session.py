@@ -65,6 +65,7 @@ class MessageItem(BaseModel):
     content: str
     references: dict | list | None = None
     agent_steps: list | None = None
+    attachments: list | None = None
     kb_id: str | None = None
     kb_ids: list | None = None
     created_at: datetime
@@ -246,6 +247,7 @@ async def get_session_messages(
             MessageItem(
                 id=m.id, role=m.role, content=m.content,
                 references=m.references, agent_steps=m.agent_steps,
+                attachments=m.attachments,
                 kb_id=m.kb_id, kb_ids=m.kb_ids, created_at=m.created_at,
             )
             for m in messages

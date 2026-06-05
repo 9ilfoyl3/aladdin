@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { isImageFilename } from '@/components/chat/SessionFileList'
+import type { MessageAttachment } from '@/lib/api'
 
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
@@ -20,6 +24,8 @@ export interface Message {
   content: string
   references?: Reference[]
   agentSteps?: AgentStep[]
+  // 用户消息绑定的会话文件附件（发送时从已上传文件中选取，随消息进入历史）
+  attachments?: MessageAttachment[]
   // 新格式：交错流式段落
   segments?: ContentSegment[]
   // Agent 执行整体耗时（毫秒），来自 complete 事件
@@ -65,6 +71,8 @@ interface MessageBubbleProps {
   expandedRefDetails: Set<string>
   onToggleRef: (index: number) => void
   onToggleRefDetail: (key: string) => void
+  /** 文件名 → 图片预览 URL（本会话内上传的图片，用于附件 chip 缩略图/放大预览） */
+  imagePreviewUrls?: Record<string, string>
 }
 
 function MessageBubble({
@@ -76,6 +84,7 @@ function MessageBubble({
   expandedRefDetails,
   onToggleRef,
   onToggleRefDetail,
+  imagePreviewUrls = {},
 }: MessageBubbleProps) {
   // 在父块内容中高亮子块命中部分
   function highlightChild(parentContent: string, childContent: string) {
@@ -97,7 +106,10 @@ function MessageBubble({
 
   if (msg.role === 'user') {
     return (
-      <div className="flex justify-end animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
+      <div className="flex flex-col items-end gap-1.5 animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
+        {msg.attachments && msg.attachments.length > 0 && (
+          <MessageAttachments attachments={msg.attachments} imagePreviewUrls={imagePreviewUrls} />
+        )}
         <div className="max-w-[75%]">
           <div className="rounded-2xl rounded-br-md bg-primary text-primary-foreground px-4 py-3 text-sm leading-relaxed shadow-sm">
             <p className="whitespace-pre-wrap">{msg.content}</p>
@@ -689,6 +701,84 @@ function ReferencesBlock({
         </div>
       </div>
     </div>
+  )
+}
+
+// 用户消息附件 chip 行（发送时绑定的会话文件）。展示在用户气泡上方、右对齐。
+// 图片附件若本会话内有预览 URL（客户端 blob）则内联缩略图 + 点击放大；
+// 历史回放（刷新后）无 blob，退化为文件图标 + 文件名，悬浮看全称。
+function MessageAttachments({
+  attachments,
+  imagePreviewUrls,
+}: {
+  attachments: MessageAttachment[]
+  imagePreviewUrls: Record<string, string>
+}) {
+  const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
+
+  function formatSize(bytes?: number | null): string {
+    if (!bytes || bytes <= 0) return ''
+    if (bytes < 1024) return `${bytes}B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+    return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+  }
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <div className="flex flex-wrap justify-end gap-1.5 max-w-[75%]">
+        {attachments.map((a) => {
+          const isImg = isImageFilename(a.filename)
+          const previewUrl = isImg ? imagePreviewUrls[a.filename] : undefined
+          const sz = formatSize(a.file_size)
+          return (
+            <Tooltip key={a.file_id}>
+              <TooltipTrigger asChild>
+                <div className="inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2 rounded-xl border border-border bg-card text-xs text-foreground max-w-[15em] transition-colors hover:border-primary/40">
+                  {previewUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => setPreview({ url: previewUrl, name: a.filename })}
+                      className="h-6 w-6 shrink-0 rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
+                      aria-label={`预览图片 ${a.filename}`}
+                    >
+                      <img src={previewUrl} alt="" className="h-full w-full object-cover" />
+                    </button>
+                  ) : (
+                    <span className="h-6 w-6 shrink-0 flex items-center justify-center">
+                      {isImg ? (
+                        <ImageIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                      ) : (
+                        <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                      )}
+                    </span>
+                  )}
+                  <span className="truncate font-medium">{a.filename}</span>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-xs p-2">
+                {previewUrl && (
+                  <img src={previewUrl} alt="" className="mb-1.5 max-h-40 w-auto rounded-md object-contain" />
+                )}
+                <div className="font-medium break-all leading-snug">{a.filename}</div>
+                {sz && <div className="mt-0.5 text-xs text-muted-foreground">{sz}</div>}
+              </TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </div>
+
+      <Dialog open={!!preview} onOpenChange={(open) => !open && setPreview(null)}>
+        <DialogContent className="max-w-3xl p-3 bg-background">
+          <DialogTitle className="sr-only">{preview?.name ?? '图片预览'}</DialogTitle>
+          {preview && (
+            <div className="flex flex-col gap-2">
+              <img src={preview.url} alt={preview.name} className="w-full max-h-[78vh] rounded-md object-contain" />
+              <p className="text-center text-xs text-muted-foreground break-all">{preview.name}</p>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </TooltipProvider>
   )
 }
 

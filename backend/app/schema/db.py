@@ -318,6 +318,10 @@ class ChatMessageRecord(Base, TenantScopedMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     references: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 检索引用来源
     agent_steps: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # Agent 思考步骤
+    # 用户消息携带的会话文件附件元数据（发送时绑定的已上传文件快照）。
+    # 仅 user 消息可能非空；每项形如 {file_id, filename, file_size, file_type}。
+    # 用于历史回放时在对应用户气泡上方渲染附件 chip（session-file-upload 附件归属）。
+    attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 本条消息使用的主知识库 ID
     kb_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # 多知识库联合检索时的知识库 ID 列表
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

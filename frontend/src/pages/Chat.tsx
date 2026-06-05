@@ -1,12 +1,13 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi } from '@/lib/api'
-import type { SessionFileResponse } from '@/lib/api'
+import type { SessionFileResponse, MessageAttachment } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
 import type { PendingSessionFile } from '@/components/chat/SessionFileList'
+import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import { useSession } from '@/lib/session-context'
@@ -42,6 +43,10 @@ function Chat() {
   // 会话文件本地占位（POST 在飞 / 失败提示），与服务端列表一起展示。
   // 同步上传完成后由 react-query 刷新列表 + 清掉对应占位。
   const [pendingFiles, setPendingFiles] = useState<PendingSessionFile[]>([])
+  // 本会话内上传的图片：文件名 → object URL（用于 chip 缩略图与放大预览）。
+  // 服务端临时文件处理后即删，无法回源取图，故在上传时就地从客户端 blob 生成。
+  const [imagePreviewUrls, setImagePreviewUrls] = useState<Record<string, string>>({})
+  const imagePreviewUrlsRef = useRef<Record<string, string>>({})
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
@@ -86,8 +91,19 @@ function Chat() {
     // 「null -> 新建会话」不清（保留上传发起时刚加的占位）。
     if (prev !== null) {
       setPendingFiles([])
+      // 释放上一会话的图片预览 object URL，避免内存泄漏
+      Object.values(imagePreviewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url))
+      imagePreviewUrlsRef.current = {}
+      setImagePreviewUrls({})
     }
   }, [currentSessionId])
+
+  // 组件卸载时统一释放所有图片预览 object URL
+  useEffect(() => {
+    return () => {
+      Object.values(imagePreviewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [])
 
   // 默认选中 is_default 的 Agent 预设
   useEffect(() => {
@@ -141,6 +157,7 @@ function Chat() {
             role: m.role as 'user' | 'assistant',
             content: m.content,
             references: (m.references as Reference[]) || undefined,
+            attachments: m.attachments || undefined,
           }
           // 解析 agent_steps：区分新格式（有 type 字段）和旧格式（有 step/detail 字段）
           if (m.agent_steps && Array.isArray(m.agent_steps)) {
@@ -260,6 +277,14 @@ function Chat() {
     }
 
     const userMessage: Message = { role: 'user', content: query }
+    // 绑定当前暂存的会话文件为本条用户消息的附件（已建索引完成的；上传中的不绑）。
+    const boundAttachments: MessageAttachment[] = stagedFiles.map((f) => ({
+      file_id: f.id,
+      filename: f.filename,
+      file_size: f.file_size,
+      file_type: f.file_type,
+    }))
+    if (boundAttachments.length > 0) userMessage.attachments = boundAttachments
     setMessages((prev) => [...prev, userMessage])
     setInput('')
     setIsStreaming(true)
@@ -287,6 +312,7 @@ function Chat() {
           agent_preset_id: selectedPreset || undefined,
           kb_ids: kbIds,
           session_id: sessionId || undefined,
+          attachments: boundAttachments.length > 0 ? boundAttachments : undefined,
         }),
       })
 
@@ -667,6 +693,15 @@ function Chat() {
     // 逐个串行上传（同步建索引耗时较长，避免并发打爆 API 进程的 embed 信号量）
     for (const file of fileArr) {
       const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`
+      // 图片：就地生成预览 object URL（服务端临时文件处理后即删，事后无法回源取图）
+      if (isImageFilename(file.name)) {
+        const url = URL.createObjectURL(file)
+        // 同名旧预览先释放再覆盖
+        const old = imagePreviewUrlsRef.current[file.name]
+        if (old) URL.revokeObjectURL(old)
+        imagePreviewUrlsRef.current = { ...imagePreviewUrlsRef.current, [file.name]: url }
+        setImagePreviewUrls((prev) => ({ ...prev, [file.name]: url }))
+      }
       setPendingFiles((prev) => [
         ...prev,
         { localId, filename: file.name, size: file.size, status: 'uploading' },
@@ -705,6 +740,13 @@ function Chat() {
     try {
       await sessionFileApi.remove(currentSessionId, fileId)
       await queryClient.invalidateQueries({ queryKey: ['session-files', currentSessionId] })
+      // 释放该文件对应的图片预览 object URL（若有）
+      if (target && imagePreviewUrlsRef.current[target.filename]) {
+        URL.revokeObjectURL(imagePreviewUrlsRef.current[target.filename])
+        const { [target.filename]: _removed, ...rest } = imagePreviewUrlsRef.current
+        imagePreviewUrlsRef.current = rest
+        setImagePreviewUrls(rest)
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '移除失败')
     }
@@ -715,6 +757,22 @@ function Chat() {
   }
 
   const selectedModelName = llmConfigs.find((c) => c.id === selectedModel)?.name || ''
+
+  // 已被某条用户消息"消费"的会话文件 ID（发送时绑定为附件后，从输入区清出）。
+  // 单一数据源：从 messages 的 attachments 派生，刷新历史后同样成立。
+  const consumedFileIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const m of messages) {
+      if (m.attachments) for (const a of m.attachments) ids.add(a.file_id)
+    }
+    return ids
+  }, [messages])
+
+  // 输入区仅展示"尚未随消息发出"的会话文件（已发送的随气泡上移）。
+  const stagedFiles = useMemo(
+    () => sessionFiles.filter((f) => !consumedFileIds.has(f.id)),
+    [sessionFiles, consumedFileIds]
+  )
 
   const isEmpty = messages.length === 0
   // 共用的输入框 props
@@ -737,12 +795,14 @@ function Chat() {
     onPresetChange: setSelectedPreset,
     onToggleAuxiliaryKb: toggleAuxiliaryKb,
     // 会话文件上传：始终可用（即使未选 KB，Req 1.4），仅在流式或建索引时禁用由组件内判断
-    sessionFiles,
+    // 输入区只展示"尚未随消息发出"的暂存文件；已发送的随用户气泡上移。
+    sessionFiles: stagedFiles,
     pendingSessionFiles: pendingFiles,
     canUploadSessionFile: !isStreaming,
     onUploadSessionFiles: handleUploadSessionFiles,
     onRemoveSessionFile: handleRemoveSessionFile,
     onDismissPendingSessionFile: handleDismissPendingSessionFile,
+    sessionImagePreviewUrls: imagePreviewUrls,
   }
 
   // 空态：标题 + 提问示例气泡 + 居中输入框
@@ -784,6 +844,7 @@ function Chat() {
                 expandedRefDetails={expandedRefDetails}
                 onToggleRef={toggleRef}
                 onToggleRefDetail={toggleRefDetail}
+                imagePreviewUrls={imagePreviewUrls}
               />
             ))}
           </div>

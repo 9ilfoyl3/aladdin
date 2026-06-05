@@ -585,9 +585,18 @@ export interface SessionMessageItem {
     max_context_tokens?: number
     current_context_tokens?: number
   }[] | null
+  attachments: MessageAttachment[] | null
   kb_id: string | null
   kb_ids: string[] | null
   created_at: string
+}
+
+/** 用户消息携带的会话文件附件（发送时绑定的已上传文件快照）。 */
+export interface MessageAttachment {
+  file_id: string
+  filename: string
+  file_size?: number | null
+  file_type?: string | null
 }
 
 // 会话级文件上传（session-file-upload Task 8 / Design C8）

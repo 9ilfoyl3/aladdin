@@ -55,6 +55,8 @@ interface ChatInputProps {
   onRemoveSessionFile?: (fileId: string) => void
   /** 关闭一个失败占位（仅本地清理） */
   onDismissPendingSessionFile?: (localId: string) => void
+  /** 文件名 → 图片预览 URL（本会话内上传的图片缩略图/放大预览） */
+  sessionImagePreviewUrls?: Record<string, string>
 }
 
 function ChatInput({
@@ -82,6 +84,7 @@ function ChatInput({
   onUploadSessionFiles,
   onRemoveSessionFile,
   onDismissPendingSessionFile,
+  sessionImagePreviewUrls = {},
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -144,6 +147,7 @@ function ChatInput({
       pending={pendingSessionFiles}
       onRemove={(id) => onRemoveSessionFile?.(id)}
       onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
+      imagePreviewUrls={sessionImagePreviewUrls}
     />
   )
 

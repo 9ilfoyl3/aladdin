@@ -165,11 +165,14 @@ def _summarize_agent_steps(agent_steps: list) -> str:
     return f"[Agent used: {', '.join(tool_calls)}]"
 
 
-async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None) -> None:
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> None:
     """保存一条消息到会话。
 
     tenant_id 由调用方在请求处理期间从 IdentityContext 取好后传入（后台任务在响应返回后
     执行，届时请求级 contextvar 已失效，故必须显式透传，不在此重新解析身份）。
+
+    attachments 仅 user 消息可能非空：发送时绑定的会话文件快照（file_id/filename/...），
+    用于历史回放在对应用户气泡上方渲染附件 chip。
     """
     msg = ChatMessageRecord(
         id=str(uuid.uuid4()),
@@ -178,6 +181,7 @@ async def _save_message(session_id: str, role: str, content: str, references: li
         content=content,
         references=references,
         agent_steps=agent_steps,
+        attachments=attachments,
         kb_id=kb_id,
         kb_ids=kb_ids,
         tenant_id=tenant_id,
@@ -831,6 +835,7 @@ async def _stream_response(
     tenant_id: str | None = None,
     retrieval_query: str | None = None,
     skip_retrieval: bool = False,
+    attachments: list | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件
 
@@ -977,7 +982,7 @@ async def _stream_response(
         # 保存消息到会话（不阻塞 SSE 关闭）
         if session_id and full_response:
             try:
-                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id, attachments=attachments)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
                 await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
@@ -1079,7 +1084,7 @@ async def _stream_response(
     # 保存消息到会话（如果指定了 session_id）
     if session_id and full_response:
         try:
-            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id, attachments=attachments)
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
             await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
@@ -1195,8 +1200,11 @@ async def chat_completions(
     # （单选走 knowledge_base_id，kb_ids 为空），导致多源检索只查会话文件、漏掉知识库。
     if request.stream:
         stream_kb_ids = list(requested_kb_ids) if use_multi_kb else None
+        attachments_data = (
+            [a.model_dump() for a in request.attachments] if request.attachments else None
+        )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data),
             media_type="text/event-stream",
         )
 
@@ -1230,7 +1238,10 @@ async def chat_completions(
         )
         if request.session_id and answer:
             try:
-                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, tenant_id=tenant_id)
+                attachments_data = (
+                    [a.model_dump() for a in request.attachments] if request.attachments else None
+                )
+                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, tenant_id=tenant_id, attachments=attachments_data)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps if agent_steps else None
                 await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, tenant_id=tenant_id)
@@ -1312,7 +1323,10 @@ async def chat_completions(
     if request.session_id and answer:
         try:
             msg_kb_ids = request.kb_ids if use_multi_kb else None
-            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
+            attachments_data = (
+                [a.model_dump() for a in request.attachments] if request.attachments else None
+            )
+            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id, attachments=attachments_data)
             refs_data = [ref.model_dump() for ref in references] if references else None
             await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
             await _auto_title_session(request.session_id, user_query, answer)

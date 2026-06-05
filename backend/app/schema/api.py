@@ -40,6 +40,15 @@ class ChatMessage(BaseModel):
     content: str = Field(..., description="消息内容")
 
 
+class MessageAttachment(BaseModel):
+    """用户消息携带的会话文件附件（发送时绑定的已上传文件快照）。"""
+
+    file_id: str = Field(..., description="会话文件 ID（= SessionFile.id）")
+    filename: str = Field(..., description="原始文件名")
+    file_size: Optional[int] = Field(default=None, description="文件字节数")
+    file_type: Optional[str] = Field(default=None, description="文件类型扩展名（小写，无点）")
+
+
 class ChatCompletionRequest(BaseModel):
     """Chat Completion 请求体（OpenAI 兼容 + RAG 扩展字段）"""
 
@@ -64,6 +73,10 @@ class ChatCompletionRequest(BaseModel):
     )
     session_id: Optional[str] = Field(
         default=None, description="会话 ID，传入后自动加载历史上下文并保存消息"
+    )
+    attachments: Optional[list[MessageAttachment]] = Field(
+        default=None,
+        description="本次用户消息绑定的会话文件附件（发送时从已上传文件中选取），随用户消息存入历史",
     )
     temperature: Optional[float] = Field(default=None, description="生成温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
