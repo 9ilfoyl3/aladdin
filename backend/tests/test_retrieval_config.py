@@ -12,7 +12,7 @@ Feature: kb-retrieval-optimization
 import logging
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from app.retrieval.config import (
@@ -51,6 +51,10 @@ EXPECTED_SPECS = {
     "hnsw_ef": (128, 1, 2048, KIND_INT),
     "hnsw_ef_construction": (128, 8, 512, KIND_INT),
     "hnsw_m": (16, 4, 64, KIND_INT),
+    # 上传限制档 Upload_Tier（session-file-upload 新增，租户级）
+    "upload_max_file_mb": (10, 1, 100, KIND_INT),
+    "session_max_files": (5, 1, 20, KIND_INT),
+    "session_chunk_cap": (6000, 500, 20000, KIND_INT),
 }
 
 
@@ -164,7 +168,7 @@ def _raw_config(draw):
 # ============================================================
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(data=_raw_config())
 def test_property_effective_from_raw_per_field_fallback(data):
     """Feature: kb-retrieval-optimization, Property 1: Effective_Value 逐字段独立兜底
@@ -198,7 +202,7 @@ def test_property_effective_from_raw_per_field_fallback(data):
             assert spec.lo <= effective_value <= spec.hi, f"{name} 结果越界"
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(
     field_name=st.sampled_from(list(RETRIEVAL_FIELD_SPECS.keys())),
     others_raw=_raw_config(),
@@ -294,7 +298,7 @@ def _patch_with_expected_violations(draw):
     return patch, violations
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 @given(data=_patch_with_expected_violations())
 def test_property_validate_patch_rejects_exact_violations(data):
     """Feature: kb-retrieval-optimization, Property 2: 范围校验精确拒绝越界字段

@@ -43,3 +43,6 @@ jieba>=0.42.1
 # 认证与授权
 PyJWT>=2.9
 bcrypt>=4.1
+
+# 系统资源检测（session-file-upload：单库 chunk 上限内存推荐，cgroup 不可用时回退物理内存）
+psutil>=5.9

@@ -3,7 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X } from 'lucide-react'
 import { authApi, knowledgeBaseApi } from '@/lib/api'
-import type { PageResult, KnowledgeBaseListParams } from '@/lib/api'
+import type { PageResult, KnowledgeBaseListParams, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
+import KBCapacityBar from '@/components/KBCapacityBar'
 import { toast } from 'sonner'
 
 // 知识库数据类型（kb-sharing-refinement：附带归属、可见性与组织开放维度，用于前端按钮显隐 + 关系标签）
@@ -37,6 +38,8 @@ interface KnowledgeBaseItem {
   owner_username?: string | null
   tenant_name?: string | null
   share_count?: number | null
+  // 容量进度条（session-file-upload Req 7）。后端列表/详情按需填充，未计算时为 null。
+  capacity?: KBCapacity | null
 }
 
 // 表单数据类型
@@ -544,6 +547,13 @@ function KnowledgeBase() {
               <p className="text-sm text-muted-foreground mt-1.5 line-clamp-2 min-h-10">
                 {kb.description || '暂无描述'}
               </p>
+
+              {/* 容量进度条（chunk 真实度量；接近/已满变色，Req 7） */}
+              {kb.capacity && (
+                <div className="mt-3">
+                  <KBCapacityBar capacity={kb.capacity} compact />
+                </div>
+              )}
 
               {/* 底部信息：文档数 + 关系标签 + 来源说明/可点击状态 chip */}
               <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border/60 flex-wrap">

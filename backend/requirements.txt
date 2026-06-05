@@ -38,6 +38,9 @@ jieba>=0.42.1
 bcrypt>=4.1          # 口令哈希（自带 salt + 工作因子，纯 C 跨平台 wheel）
 PyJWT>=2.9           # JWT 签发/校验（HS256）
 
+# 系统资源检测（session-file-upload：单库 chunk 上限内存推荐，cgroup 不可用时回退物理内存）
+psutil>=5.9
+
 # 测试
 pytest>=8.3.3
 pytest-asyncio>=0.24.0

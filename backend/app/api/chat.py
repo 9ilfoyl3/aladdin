@@ -56,8 +56,9 @@ from app.schema.api import (
     UsageInfo,
 )
 from app.schema.db import LLMConfig, ChatSession, ChatMessageRecord
+from app.session_upload.service import get_session_upload_service
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient, get_milvus_client
+from app.storage.milvus import MilvusClient, SESSION_FILES_KB_ID, build_session_id_expr, get_milvus_client
 
 from sqlalchemy import select
 
@@ -438,15 +439,42 @@ def _build_hybrid_retriever() -> HybridRetriever:
     )
 
 
+def _build_degraded_metadata(failed_kb_ids: list[str]) -> dict:
+    """从失败源列表派生前端可消费的降级元数据（Req 2.x：区分会话源 vs 知识库源）。
+
+    - ``failed_source_count``：失败源总数（向后兼容既有字段）。
+    - ``failed_kb_ids``：失败源 ID 列表（含 ``SESSION_FILES_KB_ID`` 时表示会话文件源失败）。
+    - ``session_source_failed``：会话文件源是否失败（前端据此提示"会话文件检索失败"）。
+    - ``kb_source_failed``：是否有正式知识库源失败（前端据此提示"知识库检索失败"）。
+
+    前端拿到后即可分别渲染"会话文件检索失败"与"知识库检索失败"两类提示（design C7.1）。
+    """
+    session_failed = SESSION_FILES_KB_ID in failed_kb_ids
+    kb_failed = any(kid != SESSION_FILES_KB_ID for kid in failed_kb_ids)
+    return {
+        "failed_source_count": len(failed_kb_ids),
+        "failed_kb_ids": list(failed_kb_ids),
+        "session_source_failed": session_failed,
+        "kb_source_failed": kb_failed,
+    }
+
+
 async def _retrieve_multi_kb(
     query: str,
     kb_ids: list[str],
     filter_obj: RetrievalFilter | None = None,
     tenant_id: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[RetrievalResult], bool, list[str]]:
-    """多知识库联合检索
+    """多知识库联合检索（含可选会话文件源）
 
     第一个 kb_id 为主库 (priority=1.0)，其余为辅助库 (priority=0.8)。
+    若 ``session_id`` 给定且该会话有上传文件，则把会话文件源（kb_id=
+    ``SESSION_FILES_KB_ID``、priority=1.2、expr=``session_id == "{sid}"``）作为
+    一个额外检索源接入，使刚上传的会话文件在合并 rerank 中更易靠前（Req 2.1/2.3/2.4/
+    2.6）。会话源由此自动纳入 bugfix H6 的 ``Semaphore`` 并发限流（占一个并发位，
+    总源数 = ``len(kb_ids) + 1``）；失败按 bugfix H3 经 ``failed_kb_ids`` 透传
+    （含 ``"session_files"``）供前端区分"会话文件检索失败"与"知识库检索失败"。
     返回 ``(检索结果, 是否降级, 失败知识库 ID 列表)``。
 
     H3：完整透传降级信息——不再丢弃 ``failed_kb_ids``，供上层填充 SSE meta 的
@@ -455,18 +483,38 @@ async def _retrieve_multi_kb(
     Args:
         tenant_id: 显式租户 ID（H5）。透传给 ``MultiKBRetriever.search``，确保流式响应中
             contextvar 已 reset 时仍能取到正确租户检索配置；None 时底层回退 contextvar。
+        session_id: 当前会话 ID。非 None 且该会话已上传文件时追加会话源（Req 1.3/1.5/
+            1.11）。会话源以 ``session_id == "..."`` 标量 expr 强制会话隔离。
     """
     # 构建知识库配置
-    kb_configs = []
+    kb_configs: list[KBRetrievalConfig] = []
     for i, kb_id in enumerate(kb_ids):
         priority = 1.0 if i == 0 else 0.8
         kb_configs.append(KBRetrievalConfig(kb_id=kb_id, priority=priority))
 
+    # 追加会话文件源（仅当指定 session_id 且该会话有上传文件，Req 1.3/1.5/2.4）。
+    # 用 SESSION_FILES_KB_ID 常量 + session_id 标量 expr 隔离，复用 MultiKBRetriever
+    # 的并发限流 + 降级透传链路，不引入新的检索分支（design C7 / C7.1）。
+    if session_id:
+        try:
+            session_upload_service = get_session_upload_service()
+            if await session_upload_service.has_files(session_id):
+                kb_configs.append(
+                    KBRetrievalConfig(
+                        kb_id=SESSION_FILES_KB_ID,
+                        priority=1.2,
+                        expr=build_session_id_expr(session_id),
+                    )
+                )
+        except Exception as e:
+            # 会话源探测失败（例如 DB 临时抖动）不应阻塞正式 KB 检索；
+            # 退化为"无会话源"继续主流程（Req 9.2 安全降级）。
+            logger.warning(
+                "探测会话文件源失败，本次检索将不包含会话源: %s",
+                sanitize_for_log(e),
+            )
+
     # 构建 HybridRetriever
-    manager = get_model_manager()
-    milvus = _get_milvus_client()
-    vector_retriever = VectorRetriever(manager.embedder, milvus)
-    sparse_retriever = SparseRetriever(manager.embedder, milvus)
     hybrid_retriever = _build_hybrid_retriever()
 
     # 使用 MultiKBRetriever 执行联合检索
@@ -782,11 +830,13 @@ async def _stream_response(
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
     degraded = False
-    failed_source_count = 0
+    failed_kb_ids: list[str] = []  # 哪些源失败（含 SESSION_FILES_KB_ID 时为会话源失败），供前端区分提示
     agent_steps_collected: list[dict] = []
 
-    if kb_ids:
-        # 多知识库联合检索
+    if kb_ids is not None:
+        # 多知识库联合检索（kb_ids=[] 表示仅会话文件源，由 _retrieve_multi_kb
+        # 内部按 session_id 追加单源 cfg；用 ``is not None`` 而非 ``if kb_ids:``
+        # 才能让"仅会话文件"场景正确进入多源链路）。
         try:
             filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
             if skip_retrieval:
@@ -794,15 +844,18 @@ async def _stream_response(
             else:
                 # H3：完整接收 (results, degraded, failed_kb_ids)，不丢弃失败列表。
                 chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
-                    retrieval_query, kb_ids, filter_obj, tenant_id=tenant_id
+                    retrieval_query, kb_ids, filter_obj, tenant_id=tenant_id,
+                    session_id=session_id,
                 )
-                failed_source_count = len(failed_kb_ids)
         except Exception as e:
             # H3：except 分支异常导致结果缺失 → degraded=True（不硬编码 False）。
             logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             chunks = []
             degraded = True
-            failed_source_count = len(kb_ids)
+            # 整体异常无法区分具体失败源；若本次含会话源（kb_ids 为空即仅会话源，
+            # 或有 session_id 且该会话有文件），把会话源标记为失败以便前端区分提示。
+            # failed_kb_ids 失败源列表由 _build_degraded_metadata 据此派生 failed_source_count。
+            failed_kb_ids = list(kb_ids) if kb_ids else [SESSION_FILES_KB_ID]
 
     elif kb_id and mode == "agent":
         # Agent 模式：使用 EventBus→SSE 桥接
@@ -897,8 +950,8 @@ async def _stream_response(
             "metadata": {
                 "retrieval_mode": mode,
                 "degraded": degraded,
-                "failed_source_count": failed_source_count,
                 "llm_degraded": False,
+                **_build_degraded_metadata(failed_kb_ids),
             },
         }
         yield json.dumps(meta_event, ensure_ascii=False)
@@ -927,11 +980,12 @@ async def _stream_response(
             try:
                 chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
             except Exception as e:
-                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False），单库失败计 1 源。
+                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False）。
                 logger.error("检索失败: %s", sanitize_for_log(e))
                 chunks = []
                 degraded = True
-                failed_source_count = 1
+                # 单库 direct/hybrid 路径只有正式知识库源（无会话源），失败即知识库源失败。
+                failed_kb_ids = [kb_id]
 
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
@@ -998,8 +1052,8 @@ async def _stream_response(
         "metadata": {
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
-            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
+            **_build_degraded_metadata(failed_kb_ids),
         },
     }
     yield json.dumps(meta_event, ensure_ascii=False)
@@ -1077,8 +1131,24 @@ async def chat_completions(
             logger.warning("加载会话历史失败: %s", e)
             history = None
 
-    # 判断是否使用多知识库联合检索
-    use_multi_kb = bool(request.kb_ids)
+    # 判断是否使用多知识库联合检索（包含"仅会话文件"场景，Req 1.4）：
+    # - 选了 KB → 走多源链路；
+    # - 未选 KB 但当前会话有上传文件 → 走多源链路（会话源单源处理，Req 2.4）；
+    # - 否则按既有单库 / 闲聊分支。
+    # 探测会话文件存在性失败（DB 抖动等）按"无会话文件"降级，不阻塞主流程（Req 9.2）。
+    session_has_files = False
+    if request.session_id:
+        try:
+            session_has_files = await get_session_upload_service().has_files(
+                request.session_id
+            )
+        except Exception as e:
+            logger.warning(
+                "探测会话文件源失败，本次按无会话文件处理: %s",
+                sanitize_for_log(e),
+            )
+            session_has_files = False
+    use_multi_kb = bool(request.kb_ids) or session_has_files
 
     # 查询理解（仅单轮检索链路 direct/hybrid 需要）：
     # 这类链路无 ReAct 自我修正机会，必须在检索前一次性消解指代、判别闲聊，
@@ -1098,12 +1168,15 @@ async def chat_completions(
     # 执行检索（未指定知识库时跳过检索）
     chunks: list[RetrievalResult] = []
     degraded = False
-    failed_source_count = 0
+    failed_kb_ids: list[str] = []  # 失败源（含 SESSION_FILES_KB_ID 时为会话源），供前端区分提示
 
     # 流式响应（检索和生成一体化，支持进度推送）
+    # use_multi_kb=True 但 request.kb_ids 为空（仅会话文件）→ 传 [] 让
+    # _stream_response 进入多源分支做单源处理；use_multi_kb=False → 传 None。
     if request.stream:
+        stream_kb_ids = (request.kb_ids or []) if use_multi_kb else None
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=request.kb_ids if use_multi_kb else None, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval),
             media_type="text/event-stream",
         )
 
@@ -1150,13 +1223,13 @@ async def chat_completions(
         # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
         chunks = []
     elif use_multi_kb:
-        # 多知识库联合检索
+        # 多知识库联合检索（含"仅会话文件"场景，kb_ids 可能为空列表）
         try:
-            # H3：完整接收 (results, degraded, failed_kb_ids)，failed_source_count 计入失败源数。
+            # H3：完整接收 (results, degraded, failed_kb_ids)；失败源经 _build_degraded_metadata 透传前端。
             chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
-                retrieval_query, request.kb_ids, filter_obj, tenant_id=tenant_id
+                retrieval_query, request.kb_ids or [], filter_obj, tenant_id=tenant_id,
+                session_id=request.session_id,
             )
-            failed_source_count = len(failed_kb_ids)
         except Exception as e:
             logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
@@ -1208,8 +1281,8 @@ async def chat_completions(
         metadata={
             "retrieval_mode": mode,
             "degraded": degraded or llm_degraded,
-            "failed_source_count": failed_source_count,
             "llm_degraded": llm_degraded,
+            **_build_degraded_metadata(failed_kb_ids),
         },
     )
 

@@ -9,6 +9,7 @@ Content_View_Boundary 约束（Super_Admin 默认不可读）。
 的用户互相看到、打开、改名、删除对方的对话历史（本次修复的核心权限缺陷）。
 """
 
+import logging
 import uuid
 from datetime import datetime
 
@@ -21,7 +22,10 @@ from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.auth.identity import IdentityContext
 from app.config import get_settings
 from app.schema.db import ChatSession, ChatMessageRecord
+from app.session_upload.service import get_session_upload_service
 from app.storage.database import async_session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["Sessions"])
 
@@ -194,11 +198,31 @@ async def delete_session(
     session_id: str,
     identity: IdentityContext = Depends(require_authenticated()),
 ):
-    """删除会话及其所有消息（仅本人）"""
+    """删除会话及其所有消息（仅本人）。
+
+    DB 删除（``ChatSession`` → CASCADE 删 ``messages`` / ``session_files`` /
+    ``session_chunks``）后，显式调用 ``SessionUploadService.cleanup_session_files``
+    按 ``session_id`` 清理共享 ``kb_session_files`` 中的会话文件向量（DB FK 管不到
+    Milvus，必须显式删，Req 1.6）。
+
+    清理失败仅记 WARNING、不阻塞会话删除主流程：会话 DB 行已删除是用户主诉求；
+    残留向量在隔离前提下用户已不可访问，可由后台对账兜底（无对应 ChatSession 的
+    孤儿 session_id 向量）。``cleanup_session_files`` 内部已捕获并记 WARNING，此处
+    再包一层 try/except 是对实现协议的防御性兜底。
+    """
     async with async_session() as session:
         chat_session = await _get_owned_session(session, session_id, identity)
         await session.delete(chat_session)
         await session.commit()
+
+    # DB 删除已成功提交（用户主诉求已满足），后续清理失败不应回滚 / 报错。
+    try:
+        await get_session_upload_service().cleanup_session_files(session_id)
+    except Exception as e:
+        logger.warning(
+            "会话 %s 删除后向量级联清理异常（非致命，DB 已删）: %s", session_id, e
+        )
+
     return {"detail": "已删除"}
 
 

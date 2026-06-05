@@ -1,11 +1,12 @@
 import { useRef, useEffect } from 'react'
-import { Send, Database, Cpu, Library, ChevronDown, Bot } from 'lucide-react'
+import { Send, Database, Cpu, Library, ChevronDown, Bot, Paperclip } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
 import ContextUsageRing from '@/components/chat/ContextUsageRing'
-import type { AgentPresetItem } from '@/lib/api'
+import SessionFileList, { type PendingSessionFile } from '@/components/chat/SessionFileList'
+import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
 
 interface KnowledgeBaseItem {
   id: string
@@ -41,6 +42,19 @@ interface ChatInputProps {
   onToggleAuxiliaryKb: (kbId: string) => void
   /** 居中静态布局（用于新对话空态），默认 false 时固定在底部 */
   centered?: boolean
+  // ====== 会话文件上传（session-file-upload Task 16）======
+  /** 已建索引完成的服务端文件列表 */
+  sessionFiles?: SessionFileResponse[]
+  /** 同步上传中的本地占位（POST 在飞 / 失败） */
+  pendingSessionFiles?: PendingSessionFile[]
+  /** 是否启用上传按钮：会话存在 + 未在流式响应中（关闭 KB 选择不影响） */
+  canUploadSessionFile?: boolean
+  /** 选择文件后触发同步上传 */
+  onUploadSessionFiles?: (files: FileList) => void
+  /** 移除单个已建索引文件 */
+  onRemoveSessionFile?: (fileId: string) => void
+  /** 关闭一个失败占位（仅本地清理） */
+  onDismissPendingSessionFile?: (localId: string) => void
 }
 
 function ChatInput({
@@ -62,8 +76,15 @@ function ChatInput({
   onPresetChange,
   onToggleAuxiliaryKb,
   centered = false,
+  sessionFiles = [],
+  pendingSessionFiles = [],
+  canUploadSessionFile = false,
+  onUploadSessionFiles,
+  onRemoveSessionFile,
+  onDismissPendingSessionFile,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -79,11 +100,59 @@ function ChatInput({
     }
   }
 
+  function handlePickFile() {
+    fileInputRef.current?.click()
+  }
+
+  function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (files && files.length > 0 && onUploadSessionFiles) {
+      onUploadSessionFiles(files)
+    }
+    // 重置以便相同文件名可再次选中触发 change
+    if (e.target) e.target.value = ''
+  }
+
+  // 上传按钮 + 隐藏 input（centered/底部两套布局共用）
+  const uploadButton = (
+    <>
+      <button
+        type="button"
+        onClick={handlePickFile}
+        disabled={!canUploadSessionFile || isStreaming}
+        title={canUploadSessionFile ? '上传文件到本会话（无需选择知识库）' : '请先开始一个会话再上传文件'}
+        aria-label="上传会话文件"
+        className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap"
+      >
+        <Paperclip className="h-3 w-3 shrink-0" />
+        <span>上传文件</span>
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
+    </>
+  )
+
+  // 已上传文件列表（centered/底部两套布局共用）
+  const fileListSlot = (
+    <SessionFileList
+      files={sessionFiles}
+      pending={pendingSessionFiles}
+      onRemove={(id) => onRemoveSessionFile?.(id)}
+      onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
+    />
+  )
+
   // 居中静态布局（新对话空态）
   if (centered) {
     return (
       <div className="w-full">
         <div className="rounded-3xl border border-border bg-card shadow-lg transition-shadow focus-within:shadow-xl focus-within:border-primary/30">
+          {fileListSlot}
           <textarea
             ref={textareaRef}
             value={input}
@@ -98,6 +167,7 @@ function ChatInput({
           <div className="flex items-center justify-between px-3.5 pb-3.5 gap-2 flex-wrap">
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
+              {uploadButton}
               <Select value={selectedKb} onValueChange={onKbChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
                   <Database className="h-3 w-3 shrink-0" />
@@ -199,6 +269,7 @@ function ChatInput({
     <div className="absolute bottom-0 left-0 right-0 p-4 bg-linear-to-t from-background via-background to-transparent pt-10 pointer-events-none">
       <div className="max-w-3xl mx-auto pointer-events-auto">
         <div className="rounded-2xl border border-border bg-card shadow-lg">
+          {fileListSlot}
           <textarea
             ref={textareaRef}
             value={input}
@@ -213,6 +284,7 @@ function ChatInput({
           <div className="flex items-center justify-between px-3 pb-3 gap-2 flex-wrap">
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
+              {uploadButton}
               <Select value={selectedKb} onValueChange={onKbChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
                   <Database className="h-3 w-3 shrink-0" />

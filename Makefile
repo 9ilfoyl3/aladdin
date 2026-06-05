@@ -162,6 +162,9 @@ docker-export-arm:
 	@cp docker-compose-production.yml $(DEPLOY_DIR_ARM)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_ARM)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_ARM)/
+	@mkdir -p $(DEPLOY_DIR_ARM)/middleware
+	@cp deploy-middleware/docker-compose.yml $(DEPLOY_DIR_ARM)/middleware/docker-compose.yml
+	@cp deploy-middleware/milvus-user.yaml $(DEPLOY_DIR_ARM)/middleware/milvus-user.yaml
 	@echo "导出完成: $(DEPLOY_DIR_ARM)/"
 	@du -sh $(DEPLOY_DIR_ARM)
 
@@ -225,6 +228,9 @@ docker-export-amd64:
 	@cp docker-compose-production.yml $(DEPLOY_DIR_AMD64)/docker-compose.yml
 	@cp backend/.env.example $(DEPLOY_DIR_AMD64)/.env.example
 	@cp scripts/deploy-intranet.sh $(DEPLOY_DIR_AMD64)/
+	@mkdir -p $(DEPLOY_DIR_AMD64)/middleware
+	@cp deploy-middleware/docker-compose.yml $(DEPLOY_DIR_AMD64)/middleware/docker-compose.yml
+	@cp deploy-middleware/milvus-user.yaml $(DEPLOY_DIR_AMD64)/middleware/milvus-user.yaml
 	@echo "导出完成: $(DEPLOY_DIR_AMD64)/"
 	@du -sh $(DEPLOY_DIR_AMD64)
 

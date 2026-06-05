@@ -838,3 +838,173 @@ class TestConfigChangeAudit:
         assert resp.json()["changes"] == []
         spy.assert_not_awaited()
         assert await _count_audit(factory, "platform.config_update") == 0
+
+
+# ============================================================
+# 上传限制配置（session-file-upload Task 13）
+# ============================================================
+
+
+class TestUploadLimitTenantConfig:
+    """租户级上传限制三字段随 /api/system/config GET/PUT/reset 读写（Req 3.1/3.3/6.1/8.1/8.5）。"""
+
+    @pytest.mark.asyncio
+    async def test_get_includes_upload_limit_fields(self, ctx):
+        """GET retrieval 分区含上传限制三字段且为 Safe_Default。"""
+        client, _store, _pstore, _holder = ctx
+        resp = await client.get("/api/system/config")
+        assert resp.status_code == 200
+        section = resp.json()["retrieval"]
+        for name in ("upload_max_file_mb", "session_max_files", "session_chunk_cap"):
+            assert section[name] == RETRIEVAL_FIELD_SPECS[name].default
+
+    @pytest.mark.asyncio
+    async def test_put_upload_limit_fields_reflected(self, ctx):
+        """PUT 上传限制字段后响应与 store 即时反映新值。"""
+        client, store, _pstore, _holder = ctx
+        resp = await client.put(
+            "/api/system/config",
+            json={
+                "retrieval": {
+                    "upload_max_file_mb": 50,
+                    "session_max_files": 10,
+                    "session_chunk_cap": 12000,
+                }
+            },
+        )
+        assert resp.status_code == 200
+        section = resp.json()["retrieval"]
+        assert section["upload_max_file_mb"] == 50
+        assert section["session_max_files"] == 10
+        assert section["session_chunk_cap"] == 12000
+
+        eff = await store.get_effective(_TENANT_A)
+        assert eff.upload_max_file_mb == 50
+        assert eff.session_max_files == 10
+        assert eff.session_chunk_cap == 12000
+
+    @pytest.mark.asyncio
+    async def test_put_upload_limit_out_of_range_422_not_written(self, ctx):
+        """越界上传限制字段（upload_max_file_mb=999 超出 [1,100]）→ 422 且 store 未写。"""
+        client, store, _pstore, _holder = ctx
+        spy = AsyncMock()
+        store.update = spy  # type: ignore[method-assign]
+        resp = await client.put(
+            "/api/system/config",
+            json={"retrieval": {"upload_max_file_mb": 999}},
+        )
+        assert resp.status_code == 422
+        item = resp.json()["detail"][0]
+        assert item["field"] == "upload_max_file_mb"
+        assert "allowed_range" in item
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reset_restores_upload_limit_defaults(self, ctx):
+        """reset 后上传限制三字段恢复 Safe_Default。"""
+        client, store, _pstore, _holder = ctx
+        await store.update(_TENANT_A, {"upload_max_file_mb": 80, "session_chunk_cap": 9000})
+        resp = await client.post("/api/system/config/retrieval/reset")
+        assert resp.status_code == 200
+        section = resp.json()["retrieval"]
+        for name in ("upload_max_file_mb", "session_max_files", "session_chunk_cap"):
+            assert section[name] == RETRIEVAL_FIELD_SPECS[name].default
+
+
+class TestUploadLimitPlatformConfig:
+    """平台级单库 chunk 上限 + 会话天花板随 /api/system/platform-config 读写，GET 含内存推荐。
+
+    Req 4.1/4.4/4.6/5.1/6.2/8.4。
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_platform_includes_upload_caps_and_recommendation(self, ctx):
+        """超管 GET 平台配置含 kb_chunk_cap / session_chunk_ceiling 默认值与内存推荐块。"""
+        client, _store, _pstore, holder = ctx
+        holder["identity"] = _super_admin_identity()
+        resp = await client.get("/api/system/platform-config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["kb_chunk_cap"] == PLATFORM_FIELD_SPECS["kb_chunk_cap"].default
+        assert data["session_chunk_ceiling"] == PLATFORM_FIELD_SPECS["session_chunk_ceiling"].default
+        rec = data["memory_recommendation"]
+        assert rec is not None
+        for key in (
+            "detected_memory_gb",
+            "recommended_kb_chunk_cap",
+            "safety_factor",
+            "active_kbs_assumption",
+            "assumption",
+        ):
+            assert key in rec
+
+    @pytest.mark.asyncio
+    async def test_put_platform_upload_caps_reflected(self, ctx):
+        """超管 PUT kb_chunk_cap / session_chunk_ceiling 即时反映（写后回读 + store 校验）。"""
+        client, _store, pstore, holder = ctx
+        holder["identity"] = _super_admin_identity()
+        resp = await client.put(
+            "/api/system/platform-config",
+            json={"kb_chunk_cap": 2000000, "session_chunk_ceiling": 50000},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["kb_chunk_cap"] == 2000000
+        assert data["session_chunk_ceiling"] == 50000
+
+        eff = await pstore.get_effective()
+        assert eff.kb_chunk_cap == 2000000
+        assert eff.session_chunk_ceiling == 50000
+
+        resp2 = await client.get("/api/system/platform-config")
+        assert resp2.json()["kb_chunk_cap"] == 2000000
+
+    @pytest.mark.asyncio
+    async def test_put_platform_upload_cap_out_of_range_422_not_written(self, ctx):
+        """越界 kb_chunk_cap（5000 低于 [10000, 1e7]）→ 422 且 store 未写。"""
+        client, _store, pstore, holder = ctx
+        holder["identity"] = _super_admin_identity()
+        spy = AsyncMock()
+        pstore.update = spy  # type: ignore[method-assign]
+        resp = await client.put(
+            "/api/system/platform-config", json={"kb_chunk_cap": 5000}
+        )
+        assert resp.status_code == 422
+        item = resp.json()["detail"][0]
+        assert item["field"] == "kb_chunk_cap"
+        assert "allowed_range" in item
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tenant_admin_rejected_on_platform_upload_caps(self, ctx):
+        """普通租户管理员不能读平台级上传上限（require_platform，403）。"""
+        client, _store, _pstore, holder = ctx
+        holder["identity"] = _tenant_admin_identity(_TENANT_A)
+        resp = await client.get("/api/system/platform-config")
+        assert resp.status_code == 403
+
+
+class TestUploadLimitModels:
+    """模型层：上传限制字段在 Section/Update 与平台模型中存在。"""
+
+    def test_section_has_upload_limit_fields(self):
+        from app.api.system import RetrievalConfigSection
+
+        for name in ("upload_max_file_mb", "session_max_files", "session_chunk_cap"):
+            assert name in RetrievalConfigSection.model_fields
+
+    def test_update_has_upload_limit_fields_optional(self):
+        from app.api.system import RetrievalConfigUpdate
+
+        upd = RetrievalConfigUpdate()
+        for name in ("upload_max_file_mb", "session_max_files", "session_chunk_cap"):
+            assert name in RetrievalConfigUpdate.model_fields
+            assert getattr(upd, name) is None
+
+    def test_platform_models_have_upload_cap_fields(self):
+        from app.api.system import PlatformConfigResponse, PlatformConfigUpdate
+
+        for name in ("kb_chunk_cap", "session_chunk_ceiling"):
+            assert name in PlatformConfigResponse.model_fields
+            assert name in PlatformConfigUpdate.model_fields
+        assert "memory_recommendation" in PlatformConfigResponse.model_fields

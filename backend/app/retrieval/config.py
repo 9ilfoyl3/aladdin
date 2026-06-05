@@ -80,6 +80,13 @@ RETRIEVAL_FIELD_SPECS: dict[str, FieldSpec] = {
     "hnsw_ef": FieldSpec(default=128, lo=1, hi=2048, kind=KIND_INT),
     "hnsw_ef_construction": FieldSpec(default=128, lo=8, hi=512, kind=KIND_INT),
     "hnsw_m": FieldSpec(default=16, lo=4, hi=64, kind=KIND_INT),
+    # 上传限制档 Upload_Tier（session-file-upload，租户级）
+    # 单文件大小上限（MB），会话上传与知识库上传共用（design C1）
+    "upload_max_file_mb": FieldSpec(default=10, lo=1, hi=100, kind=KIND_INT),
+    # 单会话累计文件数上限（无平台天花板）
+    "session_max_files": FieldSpec(default=5, lo=1, hi=20, kind=KIND_INT),
+    # 单会话累计 child chunk 上限（受平台 session_chunk_ceiling 约束，生效取 min）
+    "session_chunk_cap": FieldSpec(default=6000, lo=500, hi=20000, kind=KIND_INT),
 }
 
 
@@ -162,6 +169,10 @@ class RetrievalConfig(BaseModel):
     hnsw_ef: int = RETRIEVAL_FIELD_SPECS["hnsw_ef"].default
     hnsw_ef_construction: int = RETRIEVAL_FIELD_SPECS["hnsw_ef_construction"].default
     hnsw_m: int = RETRIEVAL_FIELD_SPECS["hnsw_m"].default
+    # 上传限制档（session-file-upload，租户级）
+    upload_max_file_mb: int = RETRIEVAL_FIELD_SPECS["upload_max_file_mb"].default
+    session_max_files: int = RETRIEVAL_FIELD_SPECS["session_max_files"].default
+    session_chunk_cap: int = RETRIEVAL_FIELD_SPECS["session_chunk_cap"].default
 
     @classmethod
     def effective_from_raw(cls, raw: dict | None) -> "RetrievalConfig":
@@ -442,6 +453,11 @@ _PLATFORM_ROW_ID = "global"
 PLATFORM_FIELD_SPECS: dict[str, FieldSpec] = {
     # 加载缓存有效期（秒），超管平台级配置。
     "load_cache_ttl": FieldSpec(default=30, lo=0, hi=3600, kind=KIND_INT),
+    # 上传限制平台级（session-file-upload，超管可配）
+    # 单库 child chunk 硬上限（约束 Milvus 常驻内存），默认 100 万，范围 1 万–1000 万
+    "kb_chunk_cap": FieldSpec(default=1000000, lo=10000, hi=10000000, kind=KIND_INT),
+    # 会话 chunk 平台天花板（约束共享 embedding 资源），默认 20000，范围 500–10 万
+    "session_chunk_ceiling": FieldSpec(default=20000, lo=500, hi=100000, kind=KIND_INT),
 }
 
 # 平台配置全部字段名，行 ↔ dict 转换只取这些列（忽略 id / updated_at）。
@@ -455,6 +471,9 @@ class PlatformConfig(BaseModel):
     """
 
     load_cache_ttl: int = PLATFORM_FIELD_SPECS["load_cache_ttl"].default
+    # 上传限制平台级（session-file-upload，超管可配）
+    kb_chunk_cap: int = PLATFORM_FIELD_SPECS["kb_chunk_cap"].default
+    session_chunk_ceiling: int = PLATFORM_FIELD_SPECS["session_chunk_ceiling"].default
 
     @classmethod
     def effective_from_raw(cls, raw: dict | None) -> "PlatformConfig":

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.api.deps import get_db_session, require_authenticated, require_member
-from app.api.errors import CrossTenantError, PermissionDeniedError
+from app.api.errors import CrossTenantError, FileTooLargeError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_filename, validate_folder_name
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
@@ -25,6 +25,7 @@ from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
 from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
+from app.session_upload.limits import get_upload_limit_resolver
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, get_milvus_client
 
@@ -428,6 +429,13 @@ async def upload_document(
 
     content = await file.read()
     file_size = len(content)
+
+    # 文件大小校验：按租户级 Upload_File_Size_Limit 拦截（session-file-upload Req 3.2/3.5）。
+    # 真实校验来源已由前端展示用的 Settings.upload_max_file_size_mb 切到租户级配置，
+    # 经 UploadLimitResolver 即时热生效；超限在落盘/入队前拒绝，超限文案带允许上限。
+    limits = await get_upload_limit_resolver().resolve(identity.tenant_id)
+    if file_size > limits.upload_max_file_bytes:
+        raise FileTooLargeError.from_limit(limits.upload_max_file_bytes)
 
     # 计算文件哈希，检测重复
     import hashlib

@@ -629,3 +629,124 @@ class TestSourceTopKScaling:
             for top_k in [5, 10, 20, 50]:
                 result = MultiKBRetriever._compute_source_top_k(top_k, num_sources)
                 assert result >= top_k
+
+
+# ============================================================
+# Per-source expr 合并测试 (session-file-upload task 10)
+# ============================================================
+
+
+class TestPerSourceExprMerging:
+    """验证 KBRetrievalConfig.expr 与全局 filters.expr 的合并行为。
+
+    Feature: session-file-upload (task 10)
+    """
+
+    @staticmethod
+    def _make_retriever() -> tuple[MultiKBRetriever, AsyncMock]:
+        mock_hybrid = AsyncMock()
+        mock_hybrid.search = AsyncMock(return_value=[])
+        mock_hybrid.rerank_and_expand = AsyncMock(side_effect=_rerank_passthrough)
+        return MultiKBRetriever(hybrid_retriever=mock_hybrid), mock_hybrid
+
+    @pytest.mark.asyncio
+    async def test_default_no_expr_passes_none(self):
+        """既无全局 filters 也无 cfg.expr → expr 透传 None（兼容既有行为）。"""
+        retriever, mock_hybrid = self._make_retriever()
+        kb_configs = [KBRetrievalConfig(kb_id="kb-main", priority=1.0)]
+
+        await retriever.search("q", kb_configs, top_k=5)
+
+        passed_expr = mock_hybrid.search.call_args_list[0].kwargs.get("expr")
+        assert passed_expr is None
+
+    @pytest.mark.asyncio
+    async def test_only_global_expr_used_when_cfg_expr_none(self):
+        """有全局 filters 但 cfg.expr 为 None → 只用全局 expr（既有行为不变）。"""
+        from app.retrieval.filter import RetrievalFilter
+
+        retriever, mock_hybrid = self._make_retriever()
+        kb_configs = [KBRetrievalConfig(kb_id="kb-main", priority=1.0)]
+        filters = RetrievalFilter(doc_ids=["d1", "d2"])
+
+        await retriever.search("q", kb_configs, top_k=5, filters=filters)
+
+        passed_expr = mock_hybrid.search.call_args_list[0].kwargs.get("expr")
+        assert passed_expr is not None
+        assert "doc_id" in passed_expr
+        assert " and " not in passed_expr  # 不应有合并
+
+    @pytest.mark.asyncio
+    async def test_only_cfg_expr_used_when_global_none(self):
+        """无全局 filters 但 cfg.expr 非 None → 只用 cfg.expr（会话源单独场景）。"""
+        retriever, mock_hybrid = self._make_retriever()
+        kb_configs = [
+            KBRetrievalConfig(
+                kb_id="session_files",
+                priority=1.2,
+                expr='session_id == "sess-1"',
+            )
+        ]
+
+        await retriever.search("q", kb_configs, top_k=5)
+
+        passed_expr = mock_hybrid.search.call_args_list[0].kwargs.get("expr")
+        assert passed_expr == 'session_id == "sess-1"'
+
+    @pytest.mark.asyncio
+    async def test_global_and_cfg_expr_merged_with_and(self):
+        """全局 filters.expr 与 cfg.expr 都非 None → 用 ` and ` 合并（保留各自子表达式优先级）。"""
+        from app.retrieval.filter import RetrievalFilter
+
+        retriever, mock_hybrid = self._make_retriever()
+        kb_configs = [
+            KBRetrievalConfig(
+                kb_id="session_files",
+                priority=1.2,
+                expr='session_id == "sess-1"',
+            )
+        ]
+        filters = RetrievalFilter(doc_ids=["d1"])
+
+        await retriever.search("q", kb_configs, top_k=5, filters=filters)
+
+        passed_expr = mock_hybrid.search.call_args_list[0].kwargs.get("expr")
+        assert passed_expr is not None
+        assert " and " in passed_expr
+        assert "doc_id" in passed_expr
+        assert 'session_id == "sess-1"' in passed_expr
+        # 形如 "(doc_id ...) and (session_id ...)"，子表达式被各自加括号
+        assert passed_expr.count("(") >= 2
+        assert passed_expr.count(")") >= 2
+
+    @pytest.mark.asyncio
+    async def test_per_source_expr_isolated_between_sources(self):
+        """多源场景下每个源独立合并 cfg.expr，互不影响。"""
+        from app.retrieval.filter import RetrievalFilter
+
+        retriever, mock_hybrid = self._make_retriever()
+        kb_configs = [
+            KBRetrievalConfig(kb_id="kb-main", priority=1.0),  # cfg.expr=None
+            KBRetrievalConfig(
+                kb_id="session_files",
+                priority=1.2,
+                expr='session_id == "sess-A"',
+            ),
+        ]
+        filters = RetrievalFilter(doc_ids=["d1"])
+
+        await retriever.search("q", kb_configs, top_k=5, filters=filters)
+
+        # 调用顺序与 kb_configs 顺序对齐（gather 保序，asyncio 任务按声明顺序入队）
+        calls = mock_hybrid.search.call_args_list
+        assert len(calls) == 2
+        # 收集每个 KB 收到的 expr
+        expr_by_kb = {c.args[1]: c.kwargs.get("expr") for c in calls}
+        # kb-main：仅全局 expr，无 session_id
+        assert "doc_id" in expr_by_kb["kb-main"]
+        assert "session_id" not in expr_by_kb["kb-main"]
+        # session_files：合并 doc_id + session_id
+        merged = expr_by_kb["session_files"]
+        assert "doc_id" in merged
+        assert "session_id" in merged
+        assert " and " in merged

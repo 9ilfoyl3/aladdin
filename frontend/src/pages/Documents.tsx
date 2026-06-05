@@ -22,7 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
-import type { PageResult } from '@/lib/api'
+import type { PageResult, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
@@ -47,6 +47,7 @@ import FolderBreadcrumb from '@/components/documents/FolderBreadcrumb'
 import NewFolderDialog from '@/components/documents/NewFolderDialog'
 import RenameDialog from '@/components/documents/RenameDialog'
 import ChunkViewer from '@/components/documents/ChunkViewer'
+import KBCapacityBar from '@/components/KBCapacityBar'
 import DocumentGridSkeleton from '@/components/skeletons/DocumentGridSkeleton'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
@@ -59,6 +60,8 @@ interface KnowledgeBaseItem {
   id: string
   name: string
   can_write?: boolean | null
+  // 容量进度条（session-file-upload Req 7）
+  capacity?: KBCapacity | null
 }
 
 // 面包屑项
@@ -702,6 +705,13 @@ function Documents() {
           />
         </div>
       </div>
+
+      {/* 容量进度条（chunk 真实度量；接近/已满变色，session-file-upload Req 7） */}
+      {kb?.capacity && (
+        <div className="mb-4 shrink-0 max-w-2xl">
+          <KBCapacityBar capacity={kb.capacity} />
+        </div>
+      )}
 
       {/* 面包屑导航 */}
       <div className="flex items-center justify-between mb-4 shrink-0">

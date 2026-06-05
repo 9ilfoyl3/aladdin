@@ -47,6 +47,8 @@ Copy-Item frontend\nginx.conf "$OUT\nginx.conf"
 # 中间件 compose 单独放 middleware/ 子目录，便于独立启停管理
 New-Item -ItemType Directory -Force -Path "$OUT\middleware" | Out-Null
 Copy-Item deploy-middleware\docker-compose.yml "$OUT\middleware\docker-compose.yml"
+# Milvus mmap 用户配置：与中间件 compose 同目录（compose 内以 ./milvus-user.yaml 挂载）
+Copy-Item deploy-middleware\milvus-user.yaml "$OUT\middleware\milvus-user.yaml"
 
 Write-Host "`n=== 完成 ===" -ForegroundColor Green
 $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)
