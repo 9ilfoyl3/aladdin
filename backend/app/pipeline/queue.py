@@ -362,10 +362,14 @@ class TaskQueue:
                 socket_connect_timeout=5,
                 # socket 读超时必须大于 consume() 的 block 时长（XREADGROUP block=5s 长轮询）。
                 # 否则队列空闲时，客户端会在服务端长轮询返回前先判定读超时，
-                # 持续抛出 "Timeout reading from redis"。取 10s 给足网络往返余量。
-                socket_timeout=10,
-                # 定期 PING 保活，连接异常时自动重连，避免长时间空闲后连接失效。
-                health_check_interval=30,
+                # 持续抛出 "Timeout reading from redis"。取 15s 给足网络往返余量。
+                socket_timeout=15,
+                # 超时后自动重连底层 socket，避免 stale 连接导致消费循环永久卡死。
+                retry_on_timeout=True,
+                # 注意：health_check_interval 与 XREADGROUP BLOCK 命令在某些
+                # redis-py 版本下冲突（保活 PING 在 block 期间触发导致协议错乱），
+                # 禁用保活，由 retry_on_timeout 负责断线重连。
+                health_check_interval=0,
             )
             # 测试连接
             await client.ping()

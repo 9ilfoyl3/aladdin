@@ -172,17 +172,31 @@ function ChatInput({
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
               {uploadButton}
-              <Select value={selectedKb} onValueChange={onKbChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Database className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="全部知识库" />
-                </SelectTrigger>
-                <SelectContent>
-                  {knowledgeBases.map((kb) => (
-                    <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
+                    <Database className="h-3 w-3 shrink-0" />
+                    <span>{knowledgeBases.find((kb) => kb.id === selectedKb)?.name || '主知识库'}</span>
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="top" align="start">
+                  {knowledgeBases.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
+                  ) : (
+                    knowledgeBases.map((kb) => (
+                      <DropdownMenuCheckboxItem
+                        key={kb.id}
+                        checked={selectedKb === kb.id}
+                        onCheckedChange={() => onKbChange(selectedKb === kb.id ? '' : kb.id)}
+                        onSelect={(e) => e.preventDefault()}
+                      >
+                        {kb.name}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -289,17 +303,31 @@ function ChatInput({
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
               {uploadButton}
-              <Select value={selectedKb} onValueChange={onKbChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Database className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="全部知识库" />
-                </SelectTrigger>
-                <SelectContent>
-                  {knowledgeBases.map((kb) => (
-                    <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
+                    <Database className="h-3 w-3 shrink-0" />
+                    <span>{knowledgeBases.find((kb) => kb.id === selectedKb)?.name || '主知识库'}</span>
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="top" align="start">
+                  {knowledgeBases.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
+                  ) : (
+                    knowledgeBases.map((kb) => (
+                      <DropdownMenuCheckboxItem
+                        key={kb.id}
+                        checked={selectedKb === kb.id}
+                        onCheckedChange={() => onKbChange(selectedKb === kb.id ? '' : kb.id)}
+                        onSelect={(e) => e.preventDefault()}
+                      >
+                        {kb.name}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
