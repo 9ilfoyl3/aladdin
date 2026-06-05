@@ -47,16 +47,18 @@ check_env() {
     echo "  已生成 .env，请填写必填项。"
   fi
 
-  source .env 2>/dev/null || true
+  # 用 grep 直接从文件提取值（避免 source 解析注释或特殊字符的问题）
+  _get_env_val() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' ; }
+
   local MISSING=()
 
-  if [[ -z "${JWT_SECRET:-}" ]]; then
+  if [[ -z "$(_get_env_val JWT_SECRET)" ]]; then
     MISSING+=("JWT_SECRET（JWT 签名密钥，生成：python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"）")
   fi
-  if [[ -z "${SUPER_ADMIN_USERNAME:-}" ]]; then
+  if [[ -z "$(_get_env_val SUPER_ADMIN_USERNAME)" ]]; then
     MISSING+=("SUPER_ADMIN_USERNAME（初始超管用户名，如 admin）")
   fi
-  if [[ -z "${SUPER_ADMIN_PASSWORD:-}" ]]; then
+  if [[ -z "$(_get_env_val SUPER_ADMIN_PASSWORD)" ]]; then
     MISSING+=("SUPER_ADMIN_PASSWORD（初始超管密码，如 Admin@123456）")
   fi
 
