@@ -11,18 +11,16 @@ from app.schema.db import Base
 _settings = get_settings()
 _database_url = _settings.database_url
 
-# 兼容处理：如果用户配置了不带驱动的 URL，自动补上异步驱动
-if _database_url.startswith("sqlite:///"):
-    _database_url = _database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-elif _database_url.startswith("postgresql://"):
+# 仅支持 PostgreSQL。配置不带驱动的 URL 时自动补异步驱动。
+if _database_url.startswith("postgresql://"):
     _database_url = _database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# 异步引擎（PostgreSQL 使用连接池，pool_size 可按需调整）
+# 异步引擎（PostgreSQL 连接池，池大小由配置项控制，按服务器硬件调）
 engine = create_async_engine(
     _database_url,
     echo=False,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=_settings.db_pool_size,
+    max_overflow=_settings.db_max_overflow,
 )
 
 # 异步会话工厂

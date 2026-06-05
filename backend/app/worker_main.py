@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.pipeline.factory import create_pipeline
 from app.pipeline.queue import TaskQueue
 from app.pipeline.worker import PipelineWorker
-from app.startup import load_embed_configs
+from app.startup import configure_thread_pool, load_embed_configs
 from app.storage.database import async_session, init_db
 
 # 配置日志
@@ -34,6 +34,9 @@ async def main():
     """Worker 主函数"""
     settings = get_settings()
 
+    # 设置线程池上限（在任何 asyncio.to_thread 调用之前）
+    configure_thread_pool()
+
     print("=" * 50)
     print("[Worker] Pipeline Worker 独立进程启动")
     print(f"[Worker] max_concurrent={settings.pipeline_max_concurrent}, "
@@ -44,6 +47,8 @@ async def main():
           f"circuit_breaker={settings.pipeline_circuit_breaker_threshold}")
     print(f"[Worker] slow_lane_min_mb={settings.pipeline_slow_lane_min_mb}, "
           f"slow_max_concurrent={settings.pipeline_slow_max_concurrent}")
+    print(f"[Worker] db_pool={settings.db_pool_size}+{settings.db_max_overflow}, "
+          f"thread_pool_max_workers={settings.thread_pool_max_workers or 'default'}")
     print("=" * 50)
 
     # 初始化数据库（确保表存在 + migration）

@@ -12,6 +12,16 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/artoo"
+    # 数据库连接池（每进程）。单进程连接上限 = pool_size + max_overflow。
+    # 部署须满足：上限 ×（backend 进程数 + worker 进程数）≤ Postgres max_connections
+    # （中间件已设 200）。按服务器内存与并发上调，但别超过 PG 上限。
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+
+    # 线程池（asyncio.to_thread 的默认 executor）。承载同步阻塞调用：
+    # 文档解析/切片、pymilvus 同步检索、bcrypt 口令哈希等。
+    # 0 = 用 Python 默认 min(32, CPU+4)；设正整数则显式固定上限（按 CPU 核数调）。
+    thread_pool_max_workers: int = 0
 
     # Milvus
     milvus_host: str = "localhost"

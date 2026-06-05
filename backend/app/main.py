@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化数据库，加载模型配置"""
+    # 最早设置线程池上限（在任何 asyncio.to_thread 调用之前）
+    from app.startup import configure_thread_pool
+    configure_thread_pool()
+
     await init_db()
 
     # 自动迁移：添加可能缺失的新列

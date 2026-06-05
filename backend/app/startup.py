@@ -18,6 +18,29 @@ from app.storage.database import async_session
 logger = logging.getLogger(__name__)
 
 
+def configure_thread_pool() -> None:
+    """设置当前事件循环的默认线程池（asyncio.to_thread 使用它）。
+
+    文档解析/切片、pymilvus 同步检索、bcrypt 等阻塞调用都经 asyncio.to_thread
+    卸载到此线程池。默认 executor 上限是 min(32, CPU+4)，CPU 核多的机器够用；
+    但在受限容器里希望显式控量，故由 THREAD_POOL_MAX_WORKERS 配置：
+      0  -> 沿用 Python 默认（不显式设置 executor）
+      >0 -> 固定为该上限
+
+    API 与 Worker 进程各自的事件循环都需调用一次（启动早期、首个 to_thread 之前）。
+    """
+    settings = get_settings()
+    max_workers = settings.thread_pool_max_workers
+    if max_workers and max_workers > 0:
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="artoo-worker")
+        )
+        logger.info("线程池默认 executor 已设上限: max_workers=%d", max_workers)
+
+
 async def load_embed_configs() -> None:
     """从数据库加载 active 的 Embedding/Rerank 配置覆盖环境变量默认值
 
