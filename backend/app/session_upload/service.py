@@ -62,24 +62,8 @@ _MILVUS_INSERT_BATCH_SIZE = 1000
 
 
 # ============================================================
-# 业务异常 / 视图对象
+# 视图对象
 # ============================================================
-
-
-class SessionFileCountExceeded(Exception):
-    """会话累计文件数超过 ``session_max_files``（Req 6.5）。
-
-    单独建模而不复用 ``UploadCapExceeded``：前者按文件数（上传入口零解析成本即可判定），
-    后者按 child chunk 数（必须 Chunk 后由 Pre_Embed_Gate 精确判定），口径不同。
-    """
-
-    def __init__(self, cap: int, used: int, incoming: int = 1):
-        self.cap = cap
-        self.used = used
-        self.incoming = incoming
-        super().__init__(
-            f"会话文件数已达上限：已用 {used} + 本次 {incoming} 超过上限 {cap}"
-        )
 
 
 @dataclass(frozen=True)
@@ -169,7 +153,7 @@ class SessionUploadService:
             return int(result.scalar_one() or 0)
 
     async def used_files(self, session_id: str) -> int:
-        """该会话已用文件数（``session_max_files`` 配额校验用，Req 6.4）。"""
+        """该会话已用文件数（查询接口，供文件列表展示/调试用）。"""
         async with self._db_session_factory() as session:
             count = await session.scalar(
                 select(func.count(SessionFile.id)).where(
@@ -202,56 +186,29 @@ class SessionUploadService:
         content: bytes,
         limits: "UploadLimits",
     ) -> SessionFileVO:
-        """同步建会话文件索引（design C4 / Req 1.2）。
+        """同步建会话文件索引。
 
-        流程（与 design C4 一一对应）：
-
-        1. 文件大小校验（Req 3.2 / 3.5）：零解析成本拒绝。
-        2. 会话累计文件数校验（Req 6.5）：会话已用 +1 是否超 ``session_max_files``。
-        3. 落盘到 ``_SESSION_UPLOAD_DIR`` 临时区。
-        4. 调用 ``pipeline.process_to_vectors(source_kind="session", ...)``：内部
-           Pre_Embed_Gate 按 ``limits.session_chunk_cap`` 在 Embed 之前精确判定（Req 6.6）。
-        5. ``ensure_session_files_collection``（幂等）。
-        6. 写 Milvus（每条带 ``session_id`` 标量、``doc_id == file_id``）。
-        7. 写 ``session_files`` + ``session_chunks``（单事务）。
-        8. publish 失效广播（让其他进程清 ``kb_session_files`` 的 ``_loaded_at``）。
-
-        失败处理：
-        - Pre_Embed_Gate 拒绝（``UploadCapExceeded``）发生在 Embed 之前，未写任何向量，
-          直接传播；临时文件由 ``finally`` 清理。
-        - Milvus / DB 任一阶段失败：清理已部分写入向量（``delete_by_doc_id`` 幂等），
-          DB 事务由 ``with`` 自动回滚（不留孤儿，Req 1.10）。
-
-        Args:
-            session_id: 会话 ID（归属由路由层 ``_verify_session_owner`` 校验通过）。
-            tenant_id: 当前身份租户 ID（用于盖章 + 分块参数 + Pre_Embed_Gate 聚合）。
-            owner_user_id: 行事主体 ID（``acting_subject_id``），per-user 隔离（Req 1.11）。
-            filename: 原始文件名（路由层已 ``validate_filename``）。
-            content: 文件二进制内容。
-            limits: ``UploadLimitResolver.resolve`` 取的生效限制快照（Req 9.3 全程复用）。
-
-        Returns:
-            ``SessionFileVO`` 持久化后的最新元数据。
+        流程：
+        1. 文件大小校验：零解析成本拒绝超限文件。
+        2. 落盘到临时区。
+        3. pipeline.process_to_vectors(source_kind="session")：内部 Pre_Embed_Gate
+           按 kb_chunk_cap 在 Embed 之前精确判定（临时文件 = 会话级 KB，统一 chunk 闸门）。
+        4. ensure_session_files_collection（幂等）。
+        5. 写 Milvus（每条带 session_id 标量、doc_id == file_id）。
+        6. 写 session_files + session_chunks（单事务）。
+        7. publish 失效广播。
 
         Raises:
-            FileTooLargeError: 文件大小超 ``upload_max_file_bytes``（Req 3.2）。
-            SessionFileCountExceeded: 会话累计文件数超 ``session_max_files``（Req 6.5）。
-            UploadCapExceeded: Chunk 数超 ``session_chunk_cap``（Req 6.6，Pre_Embed_Gate）。
-            ValueError: 无可提取文本（pipeline 抛出）等。
+            FileTooLargeError: 文件大小超 upload_max_file_bytes。
+            UploadCapExceeded: Chunk 数超 kb_chunk_cap（Pre_Embed_Gate）。
+            ValueError: 无可提取文本。
         """
-        # 1) 文件大小校验（Req 3.2 / 3.5）
+        # 1) 文件大小校验
         file_size = len(content)
         if file_size > limits.upload_max_file_bytes:
             raise FileTooLargeError.from_limit(limits.upload_max_file_bytes)
 
-        # 2) 会话累计文件数校验（Req 6.5）
-        used = await self.used_files(session_id)
-        if used + 1 > limits.session_max_files:
-            raise SessionFileCountExceeded(
-                cap=limits.session_max_files, used=used, incoming=1
-            )
-
-        # 3) 落盘到临时区（处理完毕 finally 中删除）
+        # 2) 落盘到临时区（处理完毕 finally 中删除）
         ext = Path(filename).suffix.lstrip(".").lower()
         file_id = str(uuid.uuid4())
         _SESSION_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

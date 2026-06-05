@@ -229,10 +229,8 @@ class RetrievalConfigRow(Base):
     hnsw_ef: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hnsw_ef_construction: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hnsw_m: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # 上传限制档 Upload_Tier（session-file-upload，租户级；缺失由 effective_from_raw 兜底）
+    # 上传限制档（租户级；仅 upload_max_file_mb 仍生效，其余已废弃但 DB 列保留向后兼容）
     upload_max_file_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    session_max_files: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    session_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -248,9 +246,8 @@ class PlatformConfigRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default="global")
     load_cache_ttl: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # collection 加载缓存有效期（秒）
-    # 上传限制平台级（session-file-upload，超管可配；缺失由 effective_from_raw 兜底）
-    kb_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 单库 child chunk 硬上限
-    session_chunk_ceiling: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 会话 chunk 平台天花板
+    # 上传限制平台级（超管可配；仅 kb_chunk_cap 生效，session_chunk_ceiling 已废弃）
+    kb_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 单库/单会话 child chunk 硬上限
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 

@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -27,7 +28,7 @@ from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.tools.final_answer import FinalAnswerTool
 from app.agent.tools.grep_chunks import GrepChunksTool
-from app.agent.tools.knowledge_search import KnowledgeSearchTool
+from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
@@ -69,6 +70,74 @@ router = APIRouter()
 
 # 历史上下文最大轮数（每轮 = 1 user + 1 assistant）
 MAX_HISTORY_ROUNDS = 10
+
+
+class Route(str, Enum):
+    """问答检索路由决策（进程内枚举，不持久化）。
+
+    - ``AGENT``：Agent ReAct 多轮检索（含/不含会话源由 session_has_files 决定）。
+    - ``MULTI_KB``：非 agent 的单轮多源检索（含会话源经 MultiKB 接入，现状不变）。
+    - ``SINGLE_KB``：非 agent 的单轮单库检索（现状不变）。
+    - ``CHITCHAT``：skip_retrieval（闲聊/纯历史追问），跳过检索直接作答。
+    - ``NONE``：无任何检索源（agent 无 kb 无会话文件），纯 LLM 作答兜底。
+    """
+
+    AGENT = "agent"
+    MULTI_KB = "multi_kb"
+    SINGLE_KB = "single_kb"
+    CHITCHAT = "chitchat"
+    NONE = "none"
+
+
+def _resolve_retrieval_route(
+    mode: str,
+    requested_kb_ids: list[str],
+    session_has_files: bool,
+    skip_retrieval: bool,
+    multi_kb_requested: bool = False,
+) -> Route:
+    """统一路由决策纯函数（design「Route Resolution 真值表」），流式/非流式两入口共用。
+
+    关键不变式（Property 2 - Agent 不降级）：``mode==agent`` 且非 skip 且（有 KB 或有会话
+    文件）→ 恒为 ``AGENT``，不再因 ``session_has_files`` 切到 MULTI_KB。非 agent 模式
+    （hybrid/direct）路由与改造前逐条一致（Property 4 - 向后兼容）。
+
+    非 agent 的 MULTI_KB vs SINGLE_KB 判定精确复刻改造前 ``use_multi_kb =
+    bool(request.kb_ids) or session_has_files``：用了多选字段 ``kb_ids``（哪怕仅 1 个）、
+    或有会话文件 → MULTI_KB；仅单选 ``knowledge_base_id`` 且无会话文件 → SINGLE_KB。
+    （``len>1`` 作防御性兜底：即便调用方漏传 multi_kb_requested，多库也走 MULTI_KB。）
+
+    Args:
+        mode: 检索模式 direct / hybrid / agent。
+        requested_kb_ids: 已统一的所选知识库 ID（单选 knowledge_base_id 与多选 kb_ids 合并后）。
+        session_has_files: 当前会话是否有上传文件（探测失败按 False 传入）。
+        skip_retrieval: 查询理解判定为闲聊/纯历史追问。
+        multi_kb_requested: 请求是否使用了多选字段 ``request.kb_ids``（非空）。仅影响非 agent
+            模式 MULTI_KB vs SINGLE_KB 的区分，agent 模式不受影响（统一进 _build_agent_runtime）。
+
+    Returns:
+        Route 枚举。
+    """
+    has_kb = bool(requested_kb_ids)
+    has_any_source = has_kb or session_has_files
+
+    if mode == "agent":
+        if skip_retrieval:
+            return Route.CHITCHAT
+        if has_any_source:
+            return Route.AGENT
+        # agent 无任何检索源 → 纯 LLM 作答兜底（既有行为）。
+        return Route.NONE
+
+    # 非 agent（hybrid / direct）：保持改造前路由。
+    if skip_retrieval:
+        return Route.CHITCHAT
+    # 多选字段（含单元素）、或有会话文件、或库数 >1（防御）→ 多源单轮检索。
+    if multi_kb_requested or session_has_files or len(requested_kb_ids) > 1:
+        return Route.MULTI_KB
+    if has_kb:
+        return Route.SINGLE_KB
+    return Route.NONE
 
 
 async def _verify_session_owner(session_id: str, identity: IdentityContext) -> None:
@@ -674,8 +743,8 @@ async def _retrieve_chunks(
         # _build_agent_runtime），不再在此维护第三份独立的工具注册/配置副本。
         # 该分支现已不在生产主链路触达（非流式单库 agent 在 chat_completions 中直接走
         # _run_agent_nonstream），保留仅为兼容潜在的内部调用方，返回 (refs, degraded)。
-        answer, refs, degraded, _steps = await _run_agent_nonstream(
-            query, kb_id, llm, preset_cfg={},
+        answer, refs, degraded, _steps, _failed = await _run_agent_nonstream(
+            query, [kb_id] if kb_id else [], llm, preset_cfg={},
             max_context_tokens=None, thinking_enabled=False,
             tenant_id=tenant_id, session_id=None, history=None,
         )
@@ -777,18 +846,34 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
 
 
 def _build_agent_runtime(
-    kb_id: str,
+    kb_ids: list[str],
     llm: LLMProvider,
     preset_cfg: dict,
     max_context_tokens: int | None,
     thinking_enabled: bool,
     tenant_id: str | None,
     session_id: str | None,
+    include_session_source: bool = False,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
     统一两条链路的 Agent 编排，消除「流式 / 非流式各自重建一套」导致的行为分叉
     （预设 allowed_tools 过滤、thinking、temperature、system_prompt 等过去仅流式生效）。
+
+    检索源装配（agent-session-source-unification）：把全部所选知识库与（可选）会话文件源
+    组装为 ``KnowledgeSearchTool`` 的 ``search_targets``，让会话文件成为 Agent 可多轮检索的
+    普通数据源，而非靠"换检索路径"接入：
+    - 每个 ``kb_id`` → ``SearchTarget(kb_id, expr=None)``（正式知识库，无 session 概念）。
+    - ``include_session_source and session_id`` → 追加
+      ``SearchTarget(SESSION_FILES_KB_ID, expr=session_id 标量过滤)``（会话级隔离，Property 1）。
+    ``grep_chunks`` / ``list_knowledge_chunks`` 仅接主库 ``kb_ids[0]``，不接会话源
+    （design C2 有意决策：会话 chunk 在独立 session_chunks 表，跨表接入成本高、收益低；
+    knowledge_search 的混合检索已覆盖会话文件召回）。
+
+    Args:
+        kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
+        include_session_source: 是否把会话文件源加入 knowledge_search 检索（由装配层据
+            session_has_files 决定，不暴露给 LLM；Property 5）。
 
     Returns:
         (engine, state, event_bus)。其中 ``state`` 是传给工具的 AgentState，
@@ -803,6 +888,16 @@ def _build_agent_runtime(
     tool_registry = ToolRegistry()
     event_bus = EventBus()
 
+    # 主库：grep_chunks / list_knowledge_chunks 这类单库工具的归属库（kb_ids 为空时为 None）。
+    primary_kb_id = kb_ids[0] if kb_ids else None
+
+    # 装配 knowledge_search 的检索源：正式 KB 源（expr=None）+ 可选会话文件源（带 session_id expr）。
+    search_targets: list[SearchTarget] = [SearchTarget(kb_id=k, expr=None) for k in kb_ids]
+    if include_session_source and session_id:
+        search_targets.append(
+            SearchTarget(kb_id=SESSION_FILES_KB_ID, expr=build_session_id_expr(session_id))
+        )
+
     # 按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止
     preset_allowed = preset_cfg.get("allowed_tools")
 
@@ -813,10 +908,13 @@ def _build_agent_runtime(
             return True
         return tool_name in preset_allowed
 
-    if _tool_enabled("knowledge_search"):
-        tool_registry.register(KnowledgeSearchTool(hybrid_retriever, kb_id, state, tenant_id=tenant_id))
-    if _tool_enabled("grep_chunks"):
-        tool_registry.register(GrepChunksTool(bm25_retriever, kb_id, state))
+    if _tool_enabled("knowledge_search") and search_targets:
+        tool_registry.register(
+            KnowledgeSearchTool(hybrid_retriever, state=state, tenant_id=tenant_id, search_targets=search_targets)
+        )
+    # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
+    if _tool_enabled("grep_chunks") and primary_kb_id:
+        tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool())
     tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
@@ -829,10 +927,14 @@ def _build_agent_runtime(
 
     # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
     # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
+    # kb_names 用 kb_ids 渲染；含会话源时追加固定显示名，让 LLM 知道有"本会话上传的文件"可检索。
+    kb_names = list(kb_ids)
+    if include_session_source and session_id:
+        kb_names.append("本会话上传的文件")
     preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
     system_prompt = render_system_prompt(
         AgentConfig(system_prompt=preset_system_prompt),
-        kb_names=[kb_id],
+        kb_names=kb_names,
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
     )
@@ -850,7 +952,7 @@ def _build_agent_runtime(
 
 async def _run_agent_nonstream(
     query: str,
-    kb_id: str,
+    kb_ids: list[str],
     llm: LLMProvider,
     preset_cfg: dict,
     max_context_tokens: int | None,
@@ -858,17 +960,23 @@ async def _run_agent_nonstream(
     tenant_id: str | None,
     session_id: str | None,
     history: list[dict] | None,
-) -> tuple[str, list[RetrievalResult], bool, list[dict]]:
+    include_session_source: bool = False,
+) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
     与流式路径共用 ``_build_agent_runtime``，消除双入口分叉。事件经 handler 收集为
     agent_steps 落库，保证与流式会话历史结构一致（前端可还原思考/工具步骤）。
 
+    Args:
+        kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
+        include_session_source: 是否把会话文件源加入 agent 检索（由路由层据 session_has_files 决定）。
+
     Returns:
-        (final_answer, knowledge_refs, degraded, agent_steps)
+        (final_answer, knowledge_refs, degraded, agent_steps, failed_source_ids)
     """
     engine, state, event_bus = _build_agent_runtime(
-        kb_id, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+        kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+        include_session_source=include_session_source,
     )
 
     steps_collected: list[dict] = []
@@ -900,7 +1008,7 @@ async def _run_agent_nonstream(
         "total_steps": total_steps,
         "total_duration_ms": int((time.time() - agent_start_time) * 1000),
     })
-    return answer, state.knowledge_refs, degraded, steps_collected
+    return answer, state.knowledge_refs, degraded, steps_collected, list(state.failed_source_ids)
 
 
 async def _stream_response(
@@ -921,11 +1029,22 @@ async def _stream_response(
     retrieval_query: str | None = None,
     skip_retrieval: bool = False,
     attachments: list | None = None,
+    requested_kb_ids: list[str] | None = None,
+    session_has_files: bool = False,
+    multi_kb_requested: bool = False,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件
 
+    路由统一（agent-session-source-unification）：用 ``_resolve_retrieval_route`` 决定本次
+    走 AGENT / MULTI_KB / SINGLE_KB / CHITCHAT / NONE，与非流式入口共用同一决策，
+    保证一致性（Req 2.4）。``mode==agent`` 恒走 AGENT（含会话源由 session_has_files 决定），
+    不再因有会话文件被降级为单轮 MultiKB（Property 2）。
+
     Args:
         query: 用户原始问题，用于答案生成与消息保存。
+        kb_id / kb_ids: 仅用于消息持久化与单库回退展示（与改造前一致），不参与路由判定。
+        requested_kb_ids: 已统一的所选知识库 ID（单选 + 多选合并），路由与检索实际使用。
+        session_has_files: 当前会话是否有上传文件，决定 agent 是否引入会话源 / 非 agent 是否走多源。
         retrieval_query: 经查询理解改写后、用于检索的查询（None 时回退到 query）。
             仅单轮检索链路（direct/hybrid）使用；agent 模式自行处理指代。
         skip_retrieval: 查询理解判定为闲聊/纯历史追问时为 True，跳过检索直接作答。
@@ -934,6 +1053,12 @@ async def _stream_response(
     preset_cfg = preset_cfg or {}
     if retrieval_query is None:
         retrieval_query = query
+    requested_kb_ids = list(requested_kb_ids or [])
+
+    # 统一路由决策（与非流式入口共用纯函数）。
+    route = _resolve_retrieval_route(
+        mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=multi_kb_requested
+    )
 
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
@@ -941,38 +1066,16 @@ async def _stream_response(
     failed_kb_ids: list[str] = []  # 哪些源失败（含 SESSION_FILES_KB_ID 时为会话源失败），供前端区分提示
     agent_steps_collected: list[dict] = []
 
-    if kb_ids is not None:
-        # 多知识库联合检索（kb_ids=[] 表示仅会话文件源，由 _retrieve_multi_kb
-        # 内部按 session_id 追加单源 cfg；用 ``is not None`` 而非 ``if kb_ids:``
-        # 才能让"仅会话文件"场景正确进入多源链路）。
-        try:
-            filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
-            if skip_retrieval:
-                chunks = []
-            else:
-                # H3：完整接收 (results, degraded, failed_kb_ids)，不丢弃失败列表。
-                chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
-                    retrieval_query, kb_ids, filter_obj, tenant_id=tenant_id,
-                    session_id=session_id,
-                )
-        except Exception as e:
-            # H3：except 分支异常导致结果缺失 → degraded=True（不硬编码 False）。
-            logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
-            chunks = []
-            degraded = True
-            # 整体异常无法区分具体失败源；若本次含会话源（kb_ids 为空即仅会话源，
-            # 或有 session_id 且该会话有文件），把会话源标记为失败以便前端区分提示。
-            # failed_kb_ids 失败源列表由 _build_degraded_metadata 据此派生 failed_source_count。
-            failed_kb_ids = list(kb_ids) if kb_ids else [SESSION_FILES_KB_ID]
-
-    elif kb_id and mode == "agent":
-        # Agent 模式：使用 EventBus→SSE 桥接
+    if route == Route.AGENT:
+        # Agent 模式：使用 EventBus→SSE 桥接，始终走 ReAct（不因会话文件降级，Property 2）。
         # 创建 asyncio.Queue 接收 AgentEvent
         event_queue: asyncio.Queue = asyncio.Queue()
 
-        # 构建 Agent 运行时（与非流式共用 _build_agent_runtime，消除双入口分叉）
+        # 构建 Agent 运行时（与非流式共用 _build_agent_runtime，消除双入口分叉）。
+        # 传入全部所选库 + 会话源标志，让会话文件成为 agent 可检索的普通数据源。
         engine, state, event_bus = _build_agent_runtime(
-            kb_id, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+            requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
+            tenant_id, session_id, include_session_source=session_has_files,
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1028,6 +1131,10 @@ async def _stream_response(
         # H3：agent 模式 degraded 取工具写入的真实降级状态（不再恒 False）。
         # KnowledgeSearchTool 持有此 state，检索源失败/路级降级时置 state.degraded=True。
         degraded = state.degraded
+        # 失败源透传（agent-session-source-unification）：工具按源记录失败 kb_id（含会话源的
+        # SESSION_FILES_KB_ID），据此派生 failed_kb_ids / session_source_failed 供前端区分提示。
+        if state.failed_source_ids:
+            failed_kb_ids = list(state.failed_source_ids)
         full_response = result_state.final_answer if result_state else ""
 
         if agent_error is not None:
@@ -1079,21 +1186,40 @@ async def _stream_response(
         # Agent 模式到此结束，不走后续的 LLM 生成流程
         return
 
-    elif kb_id:
-        # 非 agent 模式：直接检索，无进度事件
-        if skip_retrieval:
-            # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
+    elif route == Route.MULTI_KB:
+        # 非 agent 的多源单轮检索（多选库 / 单库+会话文件 / 仅会话文件），现状不变。
+        # 用 requested_kb_ids（已统一单选+多选）；仅会话文件场景为 []，由 _retrieve_multi_kb
+        # 内部按 session_id 追加单源 cfg。
+        try:
+            filter_obj = RetrievalFilter(doc_ids=request.filter_doc_ids)
+            # H3：完整接收 (results, degraded, failed_kb_ids)，不丢弃失败列表。
+            chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
+                retrieval_query, list(requested_kb_ids), filter_obj, tenant_id=tenant_id,
+                session_id=session_id,
+            )
+        except Exception as e:
+            # H3：except 分支异常导致结果缺失 → degraded=True（不硬编码 False）。
+            logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             chunks = []
-        else:
-            try:
-                chunks, degraded = await _retrieve_chunks(retrieval_query, kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
-            except Exception as e:
-                # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False）。
-                logger.error("检索失败: %s", sanitize_for_log(e))
-                chunks = []
-                degraded = True
-                # 单库 direct/hybrid 路径只有正式知识库源（无会话源），失败即知识库源失败。
-                failed_kb_ids = [kb_id]
+            degraded = True
+            # 整体异常无法区分具体失败源；含会话源（仅会话文件即 requested_kb_ids 为空）时
+            # 把会话源标记为失败以便前端区分提示。
+            failed_kb_ids = list(requested_kb_ids) if requested_kb_ids else [SESSION_FILES_KB_ID]
+
+    elif route == Route.SINGLE_KB:
+        # 非 agent 的单库单轮检索，现状不变。路由保证 requested_kb_ids 恰有一个库。
+        single_kb_id = requested_kb_ids[0]
+        try:
+            chunks, degraded = await _retrieve_chunks(retrieval_query, single_kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
+        except Exception as e:
+            # H3：检索整体异常导致结果为空 → degraded=True（不硬编码 False）。
+            logger.error("检索失败: %s", sanitize_for_log(e))
+            chunks = []
+            degraded = True
+            # 单库 direct/hybrid 路径只有正式知识库源（无会话源），失败即知识库源失败。
+            failed_kb_ids = [single_kb_id]
+
+    # else: route 为 CHITCHAT / NONE → 不检索，chunks 保持空，直接走下方 LLM 作答。
 
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
@@ -1289,22 +1415,31 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids)),
             media_type="text/event-stream",
         )
 
     # 非流式响应
-    # 单库 Agent 模式：跑 ReAct 引擎并直接采用其最终答案（与流式共用 _build_agent_runtime），
+    # 统一路由决策（与流式入口共用纯函数）。
+    route = _resolve_retrieval_route(
+        mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=bool(request.kb_ids)
+    )
+
+    # Agent 模式：跑 ReAct 引擎并直接采用其最终答案（与流式共用 _build_agent_runtime），
     # 不再丢弃 final_answer 后二次走普通 RAG 生成（既省一次 LLM 调用，也保留 Agent 推理结果）。
-    if mode == "agent" and request.knowledge_base_id and not use_multi_kb and not skip_retrieval:
-        answer, chunks, degraded, agent_steps = await _run_agent_nonstream(
-            user_query, request.knowledge_base_id, llm, preset_cfg,
+    # 始终走 AGENT（含会话源由 session_has_files 决定），不再因会话文件降级（Property 2）。
+    if route == Route.AGENT:
+        answer, chunks, degraded, agent_steps, failed_source_ids = await _run_agent_nonstream(
+            user_query, list(requested_kb_ids), llm, preset_cfg,
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
+            include_session_source=session_has_files,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)
         completion_tokens = _estimate_tokens(answer)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        # 会话源失败时 failed_source_ids 含 SESSION_FILES_KB_ID，经 _build_degraded_metadata
+        # 派生 session_source_failed / kb_source_failed，让前端区分两类来源的检索失败。
         response = ChatCompletionResponse(
             id=completion_id,
             choices=[ChatChoice(message=ResponseMessage(content=answer))],
@@ -1317,31 +1452,30 @@ async def chat_completions(
             metadata={
                 "retrieval_mode": mode,
                 "degraded": degraded,
-                "failed_source_count": 0,
                 "llm_degraded": False,
+                **_build_degraded_metadata(failed_source_ids),
             },
         )
         if request.session_id and answer:
             try:
+                msg_kb_ids = list(requested_kb_ids) if len(requested_kb_ids) > 1 else None
                 attachments_data = (
                     [a.model_dump() for a in request.attachments] if request.attachments else None
                 )
-                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, tenant_id=tenant_id, attachments=attachments_data)
+                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id, attachments=attachments_data)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps if agent_steps else None
-                await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, tenant_id=tenant_id)
+                await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
                 await _auto_title_session(request.session_id, user_query, answer)
             except Exception as e:
                 logger.warning("保存会话消息失败: %s", e)
         return response
 
-    if skip_retrieval:
-        # 闲聊/纯历史追问：不检索，直接基于历史让 LLM 作答
+    if route == Route.CHITCHAT or route == Route.NONE:
+        # 闲聊/纯历史追问或无检索源：不检索，直接基于历史让 LLM 作答
         chunks = []
-    elif use_multi_kb:
-        # 多知识库联合检索（含"仅会话文件"场景，kb_ids 可能为空列表）。
-        # 用 requested_kb_ids（已统一单选 knowledge_base_id 与多选 kb_ids），避免
-        # "单选库 + 会话有临时文件"时丢掉选中的单库、只查会话文件。
+    elif route == Route.MULTI_KB:
+        # 多知识库联合检索（含"仅会话文件"场景，requested_kb_ids 可能为空列表）。
         try:
             # H3：完整接收 (results, degraded, failed_kb_ids)；失败源经 _build_degraded_metadata 透传前端。
             chunks, degraded, failed_kb_ids = await _retrieve_multi_kb(
@@ -1351,9 +1485,10 @@ async def chat_completions(
         except Exception as e:
             logger.error("多知识库联合检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"多知识库联合检索失败: {e}")
-    elif request.knowledge_base_id:
+    elif route == Route.SINGLE_KB:
+        single_kb_id = requested_kb_ids[0]
         try:
-            chunks, degraded = await _retrieve_chunks(retrieval_query, request.knowledge_base_id, mode, llm, expr=expr, tenant_id=tenant_id)
+            chunks, degraded = await _retrieve_chunks(retrieval_query, single_kb_id, mode, llm, expr=expr, tenant_id=tenant_id)
         except Exception as e:
             logger.error("检索失败: %s", sanitize_for_log(e))
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")

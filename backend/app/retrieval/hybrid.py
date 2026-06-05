@@ -406,6 +406,7 @@ class HybridRetriever(BaseRetriever):
         # reranker 会把真正相关但 RRF 排名靠后的 chunk（如另一来源的精确条文）截断在
         # rerank 之前，导致"选了知识库却答不出其内容"。reranker 本就擅长从较大候选池精选。
         rerank_candidates = results[: config.rerank_candidate_k]
+
         try:
             reranked = await self._rerank(query, rerank_candidates, top_k, config)
             print(f"[Retrieval] 统一 Rerank 后: {len(reranked)} 条")

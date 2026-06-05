@@ -85,10 +85,8 @@ class RetrievalConfigSection(BaseModel):
     hnsw_ef: int
     hnsw_ef_construction: int
     hnsw_m: int
-    # 上传限制档 Upload_Tier（session-file-upload，租户级，Req 3.1/6.1/8.1）
+    # 上传限制档（租户级）
     upload_max_file_mb: int
-    session_max_files: int
-    session_chunk_cap: int
 
     @classmethod
     def from_config(cls, config: RetrievalConfig) -> "RetrievalConfigSection":
@@ -126,10 +124,8 @@ class RetrievalConfigUpdate(BaseModel):
     hnsw_ef: int | None = None
     hnsw_ef_construction: int | None = None
     hnsw_m: int | None = None
-    # 上传限制档 Upload_Tier（session-file-upload，租户级，Req 3.1/6.1/8.1）
+    # 上传限制档（租户级）
     upload_max_file_mb: int | None = None
-    session_max_files: int | None = None
-    session_chunk_cap: int | None = None
 
 
 class SystemConfigResponse(BaseModel):
@@ -488,15 +484,14 @@ class MemoryRecommendationVO(BaseModel):
 
 
 class PlatformConfigResponse(BaseModel):
-    """平台级配置响应（超管专属，不并入 SystemConfigResponse，Req 18.3）。"""
+    """平台级配置响应（超管专属）。"""
 
     load_cache_ttl: int
-    # 上传限制平台级（session-file-upload，超管可配，Req 4.1/6.2）
+    # 上传限制平台级（单库/单会话 chunk 硬上限）
     kb_chunk_cap: int
-    session_chunk_ceiling: int
-    # 单库 chunk 上限的内存推荐值（仅 GET 填充，信息性建议，Req 5.1）
+    # 单库 chunk 上限的内存推荐值（仅 GET 填充，信息性建议）
     memory_recommendation: MemoryRecommendationVO | None = None
-    # 本次实际变更明细（仅 PUT 填充；GET 无变更时为空列表，供前端确认/提示用）
+    # 本次实际变更明细（仅 PUT 填充；GET 无变更时为空列表）
     changes: list[ConfigChange] = Field(default_factory=list)
 
 
@@ -504,21 +499,18 @@ class PlatformConfigUpdate(BaseModel):
     """平台级配置更新请求（字段 Optional，仅更新提交字段）。"""
 
     load_cache_ttl: int | None = None
-    # 上传限制平台级（session-file-upload，超管可配，Req 4.1/6.2）
+    # 上传限制平台级（单库/单会话 chunk 硬上限）
     kb_chunk_cap: int | None = None
-    session_chunk_ceiling: int | None = None
 
 
 @router.get("/platform-config", response_model=PlatformConfigResponse)
 async def get_platform_config(
     _identity: IdentityContext = Depends(require_platform()),
 ):
-    """读取平台级配置（仅超级管理员/JWT，禁 api_key 通道，Req 18.1/18.2）。
+    """读取平台级配置（仅超级管理员/JWT）。
 
-    本期承载 Load_Cache_TTL（控制 collection 加载缓存有效期），以及上传限制平台级配置
-    （单库 chunk 硬上限 KB_Chunk_Cap、会话 chunk 平台天花板 Session_Chunk_Ceiling），均对
-    全平台生效（Req 4.1/6.2/18.4）。额外返回基于运行内存的 KB_Chunk_Cap 推荐值（信息性，
-    不自动写入，Req 5.1）。
+    本期承载 Load_Cache_TTL（控制 collection 加载缓存有效期）与单库/单会话 chunk 硬上限
+    （kb_chunk_cap）。额外返回基于运行内存的 KB_Chunk_Cap 推荐值（信息性，不自动写入）。
     """
     eff = await get_platform_config_store().get_effective()
     return PlatformConfigResponse(
@@ -568,7 +560,6 @@ async def update_platform_config(
     return PlatformConfigResponse(
         load_cache_ttl=eff.load_cache_ttl,
         kb_chunk_cap=eff.kb_chunk_cap,
-        session_chunk_ceiling=eff.session_chunk_ceiling,
         changes=[ConfigChange(**c) for c in changes],
     )
 

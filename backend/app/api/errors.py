@@ -135,13 +135,10 @@ class FileTooLargeError(AppError):
 def register_exception_handlers(app: FastAPI) -> None:
     """注册全局异常处理：把 AppError 统一转为 {"detail": ...} 响应。
 
-    会话上传 / 容量闸门两个业务异常（``SessionFileCountExceeded`` /
-    ``UploadCapExceeded``）不在 ``AppError`` 体系内（前者在 ``app.session_upload.service``
-    保持精简的领域异常形态、后者在 ``app.pipeline.pipeline`` 同时被 KB 异步路径以
-    "置文档 failed" 方式吞掉），但会从会话同步上传路径透出到 HTTP 层。统一在此映射
-    为 413 Payload Too Large，文案直接取异常消息（已含 used/incoming/cap 信息），
-    保证路由层零 try/catch（团队规范"Controller 层禁止 try-catch"）。延迟导入避免
-    循环依赖（service / pipeline 都依赖本模块）。
+    容量闸门业务异常 ``UploadCapExceeded``（在 ``app.pipeline.pipeline``，同时被 KB 异步
+    路径以"置文档 failed"方式吞掉）会从会话同步上传路径透出到 HTTP 层，统一在此映射为
+    413 Payload Too Large，文案直接取异常消息（已含 used/incoming/cap 信息），保证路由层
+    零 try/catch（团队规范"Controller 层禁止 try-catch"）。延迟导入避免循环依赖。
     """
 
     @app.exception_handler(AppError)
@@ -149,13 +146,6 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.http_status, content={"detail": exc.detail})
 
     from app.pipeline.pipeline import UploadCapExceeded
-    from app.session_upload.service import SessionFileCountExceeded
-
-    @app.exception_handler(SessionFileCountExceeded)
-    async def _handle_session_file_count_exceeded(
-        _request: Request, exc: SessionFileCountExceeded
-    ) -> JSONResponse:
-        return JSONResponse(status_code=413, content={"detail": str(exc)})
 
     @app.exception_handler(UploadCapExceeded)
     async def _handle_upload_cap_exceeded(

@@ -8,9 +8,8 @@
 
 路由层遵守团队规范"Controller 层禁止 try-catch"：
 
-- 上传超限（文件大小 / 会话累计文件数 / 累计 chunk）由 ``FileTooLargeError`` /
-  ``SessionFileCountExceeded`` / ``UploadCapExceeded`` 抛出，经 ``register_exception_handlers``
-  统一转 4xx（413）。
+- 上传超限（文件大小 / 累计 chunk）由 ``FileTooLargeError`` / ``UploadCapExceeded``
+  抛出，经 ``register_exception_handlers`` 统一转 413。
 - 会话不存在 / 非本人 → ``CrossTenantError``（404，存在性非泄露，与 ``app/api/session.py``
   的 ``_get_owned_session`` 同语义）。
 - 文件名 / 扩展名校验复用 ``validate_filename`` 与 ``app/api/document.py`` 的
@@ -158,9 +157,9 @@ def _validate_extension(filename: str) -> str:
     description=(
         "在指定会话内上传单个文件，系统同步执行 解析 → 切分 → 向量化 → 写入共享"
         " ``kb_session_files`` collection。上传前依次校验：会话归属（仅本人）、"
-        "文件名 / 扩展名、文件大小（租户级 ``Upload_File_Size_Limit``）、会话累计文件数"
-        "（租户级 ``session_max_files``）；Chunk 后由 Pre_Embed_Gate 用精确 child chunk 数"
-        "判定累计是否超 ``session_chunk_cap``。任一闸门触发即返回明确提示，不写入向量。"
+        "文件名 / 扩展名、文件大小（租户级 ``Upload_File_Size_Limit``）；Chunk 后由"
+        " Pre_Embed_Gate 用精确 child chunk 数判定累计是否超 ``kb_chunk_cap``（临时文件与"
+        "知识库共用同一上限）。任一闸门触发即返回明确提示，不写入向量。"
     ),
 )
 async def upload_session_file(

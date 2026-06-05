@@ -161,8 +161,6 @@ async def test_property7_kb_and_session_share_same_tenant_limit() -> None:
 
     fake_limits = UploadLimits(
         upload_max_file_bytes=42 * _BYTES_PER_MB,
-        session_max_files=5,
-        session_chunk_cap=6000,
         kb_chunk_cap=1_000_000,
     )
 
@@ -282,8 +280,6 @@ async def kb_upload_ctx(tmp_path):
         async def resolve(self, tenant_id):
             return UploadLimits(
                 upload_max_file_bytes=holder["limit_bytes"],
-                session_max_files=5,
-                session_chunk_cap=6000,
                 kb_chunk_cap=1_000_000,
             )
 

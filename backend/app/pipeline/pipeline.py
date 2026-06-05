@@ -297,13 +297,12 @@ class DocumentPipeline:
 
             # ─── 3.5 Pre_Embed_Gate 容量闸门（design C5 / Req 4.2 / 4.3 / 6.6 / 9.4） ───
             # 用精确 child_count（而非估算）在 Embed 之前判定，超限抛 UploadCapExceeded；
-            # 该判定对 KB_Upload（cap=kb_chunk_cap）与 Session_Upload（cap=session_chunk_cap）
-            # 一致成立，scope 仅决定聚合范围与生效上限来源。
+            # KB 与 Session 统一用 kb_chunk_cap（临时文件 = 会话级 KB，共用同一硬上限）。
             if source_kind == "kb":
                 cap = limits.kb_chunk_cap
                 used = await self._kb_used_chunks(source_id, exclude_doc_id=incoming_doc_id)
             else:  # source_kind == "session"
-                cap = limits.session_chunk_cap
+                cap = limits.kb_chunk_cap
                 used = await self._session_used_chunks(source_id)
 
             if used + child_count > cap:

@@ -72,10 +72,8 @@ interface RetrievalConfig {
   hnsw_ef: number
   hnsw_ef_construction: number
   hnsw_m: number
-  // 上传限制档（session-file-upload，租户级，Req 8.1/3.1/6.1）
+  // 上传限制档（租户级）
   upload_max_file_mb: number
-  session_max_files: number
-  session_chunk_cap: number
   [key: string]: string | number | boolean
 }
 
@@ -107,13 +105,10 @@ const FIELD_LABELS: Record<string, string> = {
   hnsw_ef_construction: 'HNSW 建索引 efConstruction',
   hnsw_m: 'HNSW 建索引 M',
   load_cache_ttl: '加载缓存 TTL',
-  // 上传限制档（session-file-upload，租户级）
+  // 上传限制档（租户级）
   upload_max_file_mb: '单文件大小上限',
-  session_max_files: '会话文件数上限',
-  session_chunk_cap: '会话累计 chunk 上限',
-  // 上传限制平台级（session-file-upload，超管可配）
+  // 上传限制平台级（超管可配）
   kb_chunk_cap: '单库 chunk 硬上限',
-  session_chunk_ceiling: '会话 chunk 平台天花板',
 }
 
 // 值格式化：布尔显示开/关，空值显示 -，其余转字符串
@@ -215,8 +210,9 @@ const RETRIEVAL_GROUPS: RetrievalGroup[] = [
   },
 ]
 
-// 上传限制档（session-file-upload，租户级；与后端 RETRIEVAL_FIELD_SPECS 中的
-// upload_max_file_mb / session_max_files / session_chunk_cap 一一对应。仅租户管理员可改）
+// 上传限制档（租户级；仅 upload_max_file_mb 仍生效，会话上传与知识库上传共用）。
+// 注：会话文件数上限 / 会话累计 chunk 上限已废弃——临时文件本质 = 会话级知识库，
+// 容量统一由平台级 kb_chunk_cap 约束，不再有会话专属配额。
 const UPLOAD_GROUPS: RetrievalGroup[] = [
   {
     title: '文件大小',
@@ -233,35 +229,6 @@ const UPLOAD_GROUPS: RetrievalGroup[] = [
         sliderStep: 1,
         unit: 'MB',
         hint: '范围 [1, 100] MB。超出此大小的文件在上传入口被拒绝（解析前判定）',
-      },
-    ],
-  },
-  {
-    title: '会话上传',
-    icon: Sparkles,
-    description: '对话会话内临时上传文件的累计配额，决定实时建索引的总耗时与共享 embedding 资源占用',
-    fields: [
-      {
-        key: 'session_max_files',
-        label: '会话文件数上限',
-        type: 'number',
-        min: 1,
-        max: 20,
-        slider: true,
-        sliderStep: 1,
-        unit: '个',
-        hint: '范围 [1, 20]。单个会话累计允许的临时上传文件数，移除文件释放配额',
-      },
-      {
-        key: 'session_chunk_cap',
-        label: '会话累计 chunk 上限',
-        type: 'number',
-        min: 500,
-        max: 20000,
-        slider: true,
-        sliderStep: 100,
-        unit: '块',
-        hint: '范围 [500, 20000]。单会话所有文件的 child chunk 之和；最终生效值会与平台天花板取较小者',
       },
     ],
   },
@@ -450,9 +417,9 @@ function AppearanceSection() {
 // ============================================================
 // 切片配置 / 检索配置 / 上传限制（租户级，经 RetrievalConfigStore 读写）
 // mode='chunk'：仅渲染分块三档；mode='retrieval'：渲染召回/融合/精排/去重/索引五档；
-// mode='upload'：渲染文件大小 + 会话上传两档（upload_max_file_mb / session_max_files
-// / session_chunk_cap）。三者共享同一份 form（GET /system/config 的 retrieval 分区），
-// 保存时整体 PUT；后端按嵌套 retrieval 字段处理（仅租户管理员可改，Req 8.1/8.3/8.5）。
+// mode='upload'：渲染文件大小一档（upload_max_file_mb）。三者共享同一份 form（GET
+// /system/config 的 retrieval 分区），保存时整体 PUT；后端按嵌套 retrieval 字段处理
+// （仅租户管理员可改）。
 // ============================================================
 
 function RetrievalConfigSection({
@@ -687,8 +654,7 @@ function RetrievalConfigSection({
 // ============================================================
 // 平台配置（超管专属）：
 //   - Load_Cache_TTL（collection 加载缓存有效期，秒）
-//   - KB_Chunk_Cap（单库 child chunk 硬上限，约束 Milvus 常驻内存）
-//   - Session_Chunk_Ceiling（会话 chunk 平台天花板，约束共享 embedding 资源）
+//   - KB_Chunk_Cap（单库/单会话 child chunk 硬上限，约束 Milvus 常驻内存）
 // 额外展示基于运行内存的 KB_Chunk_Cap 推荐值（信息性，不自动写入；超管可点
 // 「应用建议值」回填到表单后再确认保存，Req 5.4）。
 // ============================================================
@@ -698,13 +664,10 @@ const LOAD_CACHE_TTL_MIN = 0
 const LOAD_CACHE_TTL_MAX = 3600
 const KB_CHUNK_CAP_MIN = 10_000
 const KB_CHUNK_CAP_MAX = 10_000_000
-const SESSION_CHUNK_CEILING_MIN = 500
-const SESSION_CHUNK_CEILING_MAX = 100_000
 
 type PlatformFormState = {
   load_cache_ttl: number | ''
   kb_chunk_cap: number | ''
-  session_chunk_ceiling: number | ''
 }
 
 function PlatformSection() {
@@ -723,7 +686,6 @@ function PlatformSection() {
       setForm({
         load_cache_ttl: data.load_cache_ttl,
         kb_chunk_cap: data.kb_chunk_cap,
-        session_chunk_ceiling: data.session_chunk_ceiling,
       })
     }
   }, [data])
@@ -761,7 +723,6 @@ function PlatformSection() {
     const fields: (keyof PlatformFormState)[] = [
       'load_cache_ttl',
       'kb_chunk_cap',
-      'session_chunk_ceiling',
     ]
     for (const k of fields) {
       const next = form[k]
@@ -879,26 +840,8 @@ function PlatformSection() {
               disabled={isLoading || !form}
             />
             <p className="text-[11px] text-muted-foreground">
-              单个知识库允许容纳的 child chunk 总数上限，范围 [
+              单个知识库（含会话临时文件）允许容纳的 child chunk 总数上限，范围 [
               {KB_CHUNK_CAP_MIN.toLocaleString()}, {KB_CHUNK_CAP_MAX.toLocaleString()}]。
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label className="text-xs">会话 chunk 平台天花板（session_chunk_ceiling）</Label>
-            <Input
-              type="number"
-              min={SESSION_CHUNK_CEILING_MIN}
-              max={SESSION_CHUNK_CEILING_MAX}
-              step={500}
-              value={form?.session_chunk_ceiling ?? ''}
-              onChange={(e) => updateField('session_chunk_ceiling', e.target.value)}
-              className="h-9"
-              disabled={isLoading || !form}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              单会话累计 chunk 上限的全局天花板，租户配置不得超过此值（生效取 min），范围 [
-              {SESSION_CHUNK_CEILING_MIN.toLocaleString()}, {SESSION_CHUNK_CEILING_MAX.toLocaleString()}]。
             </p>
           </div>
         </div>

@@ -315,12 +315,10 @@ export const apiKeyApi = {
 const tenantHeader = (tenantId?: string): RequestInit =>
   tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
 
-// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 上传限制平台级
-// （单库 chunk 硬上限 KB_Chunk_Cap、会话 chunk 平台天花板 Session_Chunk_Ceiling）。
+// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 单库/单会话 chunk 硬上限。
 export interface PlatformConfig {
   load_cache_ttl: number
   kb_chunk_cap: number
-  session_chunk_ceiling: number
 }
 
 // 单库 chunk 上限的内存推荐值（仅 GET 返回；信息性建议，不自动写入，Req 5.1）
@@ -607,7 +605,7 @@ export interface MessageAttachment {
 // - DELETE /{file_id}      → 移除单文件并释放配额（204）
 //
 // 鉴权：仅会话所有者本人；非 owner / 非存在 → 后端统一 404（存在性非泄露）。
-// 限制超额：413（FileTooLargeError / SessionFileCountExceeded / UploadCapExceeded），
+// 限制超额：413（FileTooLargeError / UploadCapExceeded），
 // detail 是后端已格式化的友好中文，由 request()/uploadFile() 透传到 toast。
 export interface SessionFileResponse {
   id: string

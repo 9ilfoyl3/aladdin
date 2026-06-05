@@ -106,14 +106,15 @@ class _FakeChunker:
         )
 
 
-def _build_limits(*, kb_cap: int = 1_000_000, session_cap: int = 6000):
-    """构造一个轻量 UploadLimits（避开 Resolver/Store，专注闸门决策测试）。"""
+def _build_limits(*, kb_cap: int = 1_000_000):
+    """构造一个轻量 UploadLimits（避开 Resolver/Store，专注闸门决策测试）。
+
+    会话与 KB 统一使用 kb_chunk_cap（会话专属限额已废弃）。
+    """
     from app.session_upload.limits import UploadLimits
 
     return UploadLimits(
         upload_max_file_bytes=10 * 1024 * 1024,
-        session_max_files=5,
-        session_chunk_cap=session_cap,
         kb_chunk_cap=kb_cap,
     )
 
@@ -224,7 +225,7 @@ async def _invoke_gate(
             sid = "test-session-001"
             await _seed_session_used(factory, session_id=sid, used=used)
             source_id = sid
-            limits = _build_limits(session_cap=cap)
+            limits = _build_limits(kb_cap=cap)
             incoming_doc_id = None
 
         pipeline, embed_calls = _make_pipeline(factory, incoming=incoming)
