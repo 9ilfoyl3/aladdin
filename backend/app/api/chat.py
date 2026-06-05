@@ -635,11 +635,14 @@ async def _retrieve_multi_kb(
 ) -> tuple[list[RetrievalResult], bool, list[str]]:
     """多知识库联合检索（含可选会话文件源）
 
-    第一个 kb_id 为主库 (priority=1.0)，其余为辅助库 (priority=0.8)。
+    所有选中的知识库平等参与召回（priority 统一 1.0），不区分主/副：库只是召回范围，
+    不是排序信号，最终顺序由统一 rerank 按真实语义相关性决定。此前主库 1.0 / 辅助库 0.8
+    的区分施加在跨库不可比的 RRF 分数上，几乎不影响最终结果（合并结果会重新送 reranker），
+    边缘情况下反而可能把相关的辅助库 chunk 挤出 rerank 候选池，故取消。
     若 ``session_id`` 给定且该会话有上传文件，则把会话文件源（kb_id=
     ``SESSION_FILES_KB_ID``、priority=1.0、expr=``session_id == "{sid}"``）作为
-    一个额外检索源接入，与主库同权参与合并，最终顺序由统一 rerank 按真实语义相关性
-    决定（Req 2.1/2.3/2.4/2.6）。会话源由此自动纳入 bugfix H6 的 ``Semaphore`` 并发限流（占一个并发位，
+    一个额外检索源接入，与知识库同权参与合并（Req 2.1/2.3/2.4/2.6）。会话源由此自动纳入
+    bugfix H6 的 ``Semaphore`` 并发限流（占一个并发位，
     总源数 = ``len(kb_ids) + 1``）；失败按 bugfix H3 经 ``failed_kb_ids`` 透传
     （含 ``"session_files"``）供前端区分"会话文件检索失败"与"知识库检索失败"。
     返回 ``(检索结果, 是否降级, 失败知识库 ID 列表)``。
@@ -653,11 +656,10 @@ async def _retrieve_multi_kb(
         session_id: 当前会话 ID。非 None 且该会话已上传文件时追加会话源（Req 1.3/1.5/
             1.11）。会话源以 ``session_id == "..."`` 标量 expr 强制会话隔离。
     """
-    # 构建知识库配置
-    kb_configs: list[KBRetrievalConfig] = []
-    for i, kb_id in enumerate(kb_ids):
-        priority = 1.0 if i == 0 else 0.8
-        kb_configs.append(KBRetrievalConfig(kb_id=kb_id, priority=priority))
+    # 构建知识库配置：所有库同权（priority=1.0），不分主/副。
+    kb_configs: list[KBRetrievalConfig] = [
+        KBRetrievalConfig(kb_id=kb_id, priority=1.0) for kb_id in kb_ids
+    ]
 
     # 追加会话文件源（仅当指定 session_id 且该会话有上传文件，Req 1.3/1.5/2.4）。
     # 用 SESSION_FILES_KB_ID 常量 + session_id 标量 expr 隔离，复用 MultiKBRetriever
@@ -669,7 +671,7 @@ async def _retrieve_multi_kb(
                 kb_configs.append(
                     KBRetrievalConfig(
                         kb_id=SESSION_FILES_KB_ID,
-                        # 与主库同权（1.0）：会话文件与所选知识库公平竞争，最终顺序交由
+                        # 与知识库源同权（1.0）：会话文件与所选知识库公平竞争，最终顺序交由
                         # 统一 rerank 按真实语义相关性决定。此前用 1.2 加权会让会话文件
                         # chunk 在合并排序时整体抬到 KB 之前，叠加 rerank 候选窗口截断
                         # （top_k*2）与软阈值过滤后，KB 候选被挤出 / 砍掉，导致"选了知识库

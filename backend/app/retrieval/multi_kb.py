@@ -1,7 +1,8 @@
 """多知识库联合检索模块
 
 提供 KBRetrievalConfig 配置和 MultiKBRetriever 检索器，
-支持并行检索多个知识库并按优先级加权合并结果，最后统一 Rerank。
+支持并行检索多个知识库并合并结果，最后统一 Rerank。各源默认同权（priority=1.0），
+库仅作为召回范围，最终顺序由 rerank 决定。
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ class KBRetrievalConfig:
     Attributes:
         kb_id: 知识库 ID（会话文件源固定为 ``"session_files"``，对应共享 collection
             ``kb_session_files``）。
-        priority: 优先级权重，主库 ``1.0``、辅助库 ``0.8``、会话文件源 ``1.2``
-            （高于普通辅助库，使刚上传的内容更易靠前）。
+        priority: 优先级权重，默认 ``1.0``。当前所有正式知识库与会话文件源均同权
+            （``1.0``）——库只是召回范围而非排序信号，最终顺序交由统一 rerank 决定。
+            该字段保留以支持未来按源加权的可能，调用方可显式传入非 1.0 值。
         expr: 该源专属的 Milvus 标量过滤表达式（如会话源用
             ``session_id == "{sid}"`` 强制会话隔离）。``None`` 时仅应用全局
             ``filters.expr``；非 None 时与全局 expr 用 `` and `` 合并，二者均存在
@@ -34,7 +36,7 @@ class KBRetrievalConfig:
     """
 
     kb_id: str
-    priority: float = 1.0  # 优先级权重 (主库1.0, 辅助库0.8, 会话文件源1.2)
+    priority: float = 1.0  # 优先级权重，当前各源同权 1.0（保留字段以备将来按源加权）
     expr: str | None = None  # 该源专属过滤表达式（如会话源 session_id 隔离）
 
 
