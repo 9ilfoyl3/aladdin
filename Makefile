@@ -155,7 +155,7 @@ docker-export-arm:
 	docker pull --platform linux/arm64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_ARM)/postgres_16-alpine.tar
 	docker save milvusdb/milvus:v2.5.4 -o $(DEPLOY_DIR_ARM)/milvusdb_milvus_v2.5.4.tar
-	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_ARM)/quay.io_coreos_etcd_v3.5.25.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_ARM)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	docker pull --platform linux/arm64 redis:7-alpine
 	docker save redis:7-alpine -o $(DEPLOY_DIR_ARM)/redis_7-alpine.tar
@@ -221,7 +221,7 @@ docker-export-amd64:
 	docker pull --platform linux/amd64 minio/minio:RELEASE.2024-05-28T17-19-04Z
 	docker save postgres:16-alpine -o $(DEPLOY_DIR_AMD64)/postgres_16-alpine.tar
 	docker save milvusdb/milvus:v2.5.4 -o $(DEPLOY_DIR_AMD64)/milvusdb_milvus_v2.5.4.tar
-	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.18.tar
+	docker save quay.io/coreos/etcd:v3.5.25 -o $(DEPLOY_DIR_AMD64)/quay.io_coreos_etcd_v3.5.25.tar
 	docker save minio/minio:RELEASE.2024-05-28T17-19-04Z -o $(DEPLOY_DIR_AMD64)/minio_minio_RELEASE.2024-05-28T17-19-04Z.tar
 	docker pull --platform linux/amd64 redis:7-alpine
 	docker save redis:7-alpine -o $(DEPLOY_DIR_AMD64)/redis_7-alpine.tar
