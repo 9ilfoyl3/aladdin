@@ -20,6 +20,12 @@ httpx>=0.27.2
 python-multipart>=0.0.12
 sse-starlette>=2.1.3
 
+# YAML 解析（Agent Skills 加载）
+PyYAML>=6.0
+
+# Token 计算（Agent 上下文估算）
+tiktoken>=0.7.0
+
 # 文档解析
 pymupdf>=1.25.0
 python-docx>=1.1.2

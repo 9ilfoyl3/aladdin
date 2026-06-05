@@ -5,8 +5,8 @@
 #       降低单机常驻内存占用，让 Milvus 服务端按访问频率自动做冷热分层。
 #       适用场景：单服务器部署、知识库数量随使用增长、内存与 PG/Redis/模型等争用。
 #
-# 改完后重启 Milvus 生效（在 deploy-middleware 目录）：
-#   docker compose --env-file ../.env up -d milvus
+# 改完后重启 Milvus 生效：
+#   docker compose --profile infra up -d milvus
 # ============================================================
 
 queryNode:
