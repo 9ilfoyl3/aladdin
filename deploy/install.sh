@@ -10,6 +10,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# 自动授权：Windows 打包会丢失 Linux 执行权限，这里统一补回
+chmod -R 755 . 2>/dev/null || true
+
 echo "=== Artoo 部署 ==="
 
 echo "[1/4] 加载 Docker 镜像..."

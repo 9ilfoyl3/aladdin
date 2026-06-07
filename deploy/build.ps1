@@ -62,30 +62,29 @@ Copy-Item deploy\milvus-user.yaml "$OUT\deploy\"
 Copy-Item deploy\install.sh "$OUT\"
 Copy-Item deploy\install-v1.sh "$OUT\"
 
+Write-Host "[5/5] 生成压缩包 artoo-deploy.tar.gz..." -ForegroundColor Cyan
+if (Test-Path "artoo-deploy.tar.gz") { Remove-Item "artoo-deploy.tar.gz" -Force }
+tar -czf artoo-deploy.tar.gz -C $OUT .
+if ($LASTEXITCODE -ne 0) { throw "压缩失败" }
+
 Write-Host ""
 Write-Host "=== 完成 ===" -ForegroundColor Green
-$size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)
-Write-Host "输出: $OUT\ ($size GB)"
+$tarSize = [math]::Round((Get-Item "artoo-deploy.tar.gz").Length / 1GB, 2)
+Write-Host "输出: artoo-deploy.tar.gz ($tarSize GB)"
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host " 部署步骤" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "1. 在开发机压缩:" -ForegroundColor Cyan
-Write-Host "   tar -czf artoo-deploy.tar.gz -C dist ."
+Write-Host "1. 上传 artoo-deploy.tar.gz 到服务器" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "2. 上传 artoo-deploy.tar.gz 到服务器" -ForegroundColor Cyan
+Write-Host "2. 服务器端解压:" -ForegroundColor Cyan
+Write-Host "   mkdir -p artoo && tar -xzf artoo-deploy.tar.gz -C artoo && cd artoo"
 Write-Host ""
-Write-Host "3. 服务器端解压:" -ForegroundColor Cyan
-Write-Host "   mkdir artoo && tar -xzf artoo-deploy.tar.gz -C artoo && cd artoo"
-Write-Host ""
-Write-Host "4. 授权（Windows 打包会丢失 Linux 执行权限）:" -ForegroundColor Cyan
-Write-Host "   chmod -R 755 ."
-Write-Host ""
-Write-Host "5. 首次部署:" -ForegroundColor Cyan
+Write-Host "3. 首次部署（脚本会自动授权）:" -ForegroundColor Cyan
 Write-Host "   Docker Compose V2:  bash install.sh"
 Write-Host "   Docker Compose V1:  bash install-v1.sh"
 Write-Host ""
-Write-Host "6. 后续更新（替换 app-images.tar 后）:" -ForegroundColor Cyan
+Write-Host "4. 后续更新（替换 app-images.tar 后）:" -ForegroundColor Cyan
 Write-Host "   bash install-v1.sh restart"
 Write-Host ""

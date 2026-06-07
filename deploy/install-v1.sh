@@ -16,6 +16,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# 自动授权：Windows 打包会丢失 Linux 执行权限，这里统一补回（含本脚本所在目录）
+chmod -R 755 . 2>/dev/null || true
+
 COMPOSE_CMD="docker-compose"
 COMPOSE_FILE="docker-compose.yml"
 ACTION="${1:-install}"
