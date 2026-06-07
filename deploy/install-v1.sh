@@ -6,7 +6,8 @@
 #   bash install-v1.sh              # 首次部署（加载镜像 + 启动全部）
 #   bash install-v1.sh start        # 启动全部服务
 #   bash install-v1.sh stop         # 停止全部服务（保留数据）
-#   bash install-v1.sh restart      # 重启应用（加载新镜像 + 重建应用容器）
+#   bash install-v1.sh restart      # 重启应用（不重建容器、不加载镜像）
+#   bash install-v1.sh update       # 更新应用（加载新镜像 + 重建容器）
 #   bash install-v1.sh down         # 停止并删除容器（数据卷保留）
 #   bash install-v1.sh down-all     # 停止并删除容器 + 数据卷（⚠️ 清除所有数据）
 #   bash install-v1.sh logs [服务名] [条数]  # 查看日志（默认全部应用，100条）
@@ -116,9 +117,10 @@ show_info() {
   echo "  常用命令（在本目录执行）："
   echo "    查看状态: bash install-v1.sh status"
   echo "    查看日志: bash install-v1.sh logs [服务名] [条数]"
-  echo "    重启更新: bash install-v1.sh restart   # 替换 app-images.tar 后执行"
+  echo "    重启应用: bash install-v1.sh restart    # 仅重启，不重建"
+  echo "    更新应用: bash install-v1.sh update     # 替换 app-images.tar 后执行"
   echo "    停止服务: bash install-v1.sh stop"
-  echo "    清理容器: bash install-v1.sh down       # 数据卷保留"
+  echo "    清理容器: bash install-v1.sh down        # 数据卷保留"
 }
 
 # ============================================================
@@ -169,7 +171,15 @@ do_stop() {
 }
 
 do_restart() {
-  echo "=== 重启应用（加载新镜像 + 重建容器）==="
+  echo "=== 重启应用（不重建容器、不加载镜像）==="
+  $COMPOSE_CMD -f "$COMPOSE_FILE" restart backend worker frontend
+  echo ""
+  echo "=== 重启完成 ==="
+  show_info
+}
+
+do_update() {
+  echo "=== 更新应用（加载新镜像 + 重建容器）==="
 
   echo "[1/3] 加载镜像..."
   for f in *.tar; do
@@ -185,7 +195,7 @@ do_restart() {
   $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate backend worker frontend
 
   echo ""
-  echo "=== 重启完成 ==="
+  echo "=== 更新完成 ==="
   show_info
 }
 
@@ -233,13 +243,14 @@ case "$ACTION" in
   start)     do_start ;;
   stop)      do_stop ;;
   restart)   do_restart ;;
+  update)    do_update ;;
   down)      do_down ;;
   down-all)  do_down_all ;;
   logs)      do_logs "$@" ;;
   status)    do_status ;;
   *)
     echo "未知命令: $ACTION"
-    echo "可用命令: start | stop | restart | down | down-all | logs [服务] [条数] | status"
+    echo "可用命令: start | stop | restart | update | down | down-all | logs [服务] [条数] | status"
     exit 1
     ;;
 esac
