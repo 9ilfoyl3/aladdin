@@ -4,13 +4,18 @@
 # 产物 dist\ 目录可整体拷到内网服务器，再执行 install.sh 部署。
 #
 # 用法：
-#   .\deploy\build.ps1                  # 当前架构，含中间件镜像（首次部署）
+#   .\deploy\build.ps1                  # 当前架构，含中间件镜像（首次部署），仅产出 dist\
 #   .\deploy\build.ps1 -Arch arm64      # 指定目标架构（amd64 | arm64）
 #   .\deploy\build.ps1 -AppOnly         # 只打应用镜像（迭代更新，不含中间件）
+#   .\deploy\build.ps1 -Tar             # 打包完自动压缩为 artoo-deploy.tar.gz
+#
+# 默认只产出 dist\，不压缩——方便先改 dist\ 里的配置（如 .env.example、
+# docker-compose.yml）再手动压缩。需要直接出压缩包时加 -Tar。
 # ============================================================
 param(
     [string]$Arch = "",        # 留空 = 跟随本机架构
-    [switch]$AppOnly           # 仅应用镜像
+    [switch]$AppOnly,          # 仅应用镜像
+    [switch]$Tar               # 打包完自动压缩为 artoo-deploy.tar.gz
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,15 +67,26 @@ Copy-Item deploy\milvus-user.yaml "$OUT\deploy\"
 Copy-Item deploy\install.sh "$OUT\"
 Copy-Item deploy\install-v1.sh "$OUT\"
 
-Write-Host "[5/5] 生成压缩包 artoo-deploy.tar.gz..." -ForegroundColor Cyan
-if (Test-Path "artoo-deploy.tar.gz") { Remove-Item "artoo-deploy.tar.gz" -Force }
-tar -czf artoo-deploy.tar.gz -C $OUT .
-if ($LASTEXITCODE -ne 0) { throw "压缩失败" }
+if ($Tar) {
+    Write-Host "[5/5] 生成压缩包 artoo-deploy.tar.gz..." -ForegroundColor Cyan
+    if (Test-Path "artoo-deploy.tar.gz") { Remove-Item "artoo-deploy.tar.gz" -Force }
+    tar -czf artoo-deploy.tar.gz -C $OUT .
+    if ($LASTEXITCODE -ne 0) { throw "压缩失败" }
+}
 
 Write-Host ""
 Write-Host "=== 完成 ===" -ForegroundColor Green
-$tarSize = [math]::Round((Get-Item "artoo-deploy.tar.gz").Length / 1GB, 2)
-Write-Host "输出: artoo-deploy.tar.gz ($tarSize GB)"
+if ($Tar) {
+    $tarSize = [math]::Round((Get-Item "artoo-deploy.tar.gz").Length / 1GB, 2)
+    Write-Host "输出: artoo-deploy.tar.gz ($tarSize GB)"
+} else {
+    $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Length -Sum).Sum / 1GB, 2)
+    Write-Host "输出: $OUT\ ($size GB)"
+    Write-Host ""
+    Write-Host "提示: 已产出 dist\，可先修改 dist\ 内的配置（.env.example / docker-compose.yml）" -ForegroundColor DarkGray
+    Write-Host "      改完后手动压缩，或重新执行加 -Tar 自动压缩：" -ForegroundColor DarkGray
+    Write-Host "      tar -czf artoo-deploy.tar.gz -C dist ." -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host " 部署步骤" -ForegroundColor Yellow
@@ -86,5 +102,5 @@ Write-Host "   Docker Compose V2:  bash install.sh"
 Write-Host "   Docker Compose V1:  bash install-v1.sh"
 Write-Host ""
 Write-Host "4. 后续更新（替换 app-images.tar 后）:" -ForegroundColor Cyan
-Write-Host "   bash install-v1.sh restart"
+Write-Host "   bash install-v1.sh update"
 Write-Host ""
