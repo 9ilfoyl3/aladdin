@@ -112,6 +112,13 @@ show_info() {
   echo ""
   echo "  前端: http://${IP}:${FRONTEND_PORT:-8888}"
   echo "  后端: http://${IP}:${BACKEND_PORT:-8000}"
+  echo ""
+  echo "  常用命令（在本目录执行）："
+  echo "    查看状态: bash install-v1.sh status"
+  echo "    查看日志: bash install-v1.sh logs [服务名] [条数]"
+  echo "    重启更新: bash install-v1.sh restart   # 替换 app-images.tar 后执行"
+  echo "    停止服务: bash install-v1.sh stop"
+  echo "    清理容器: bash install-v1.sh down       # 数据卷保留"
 }
 
 # ============================================================
