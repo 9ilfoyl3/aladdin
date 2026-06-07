@@ -4,14 +4,16 @@
 #
 # 用法：
 #   bash install-v1.sh              # 首次部署（加载镜像 + 启动全部）
-#   bash install-v1.sh start        # 启动全部服务
-#   bash install-v1.sh stop         # 停止全部服务（保留数据）
-#   bash install-v1.sh restart      # 重启应用（不重建容器、不加载镜像）
-#   bash install-v1.sh update       # 更新应用（加载新镜像 + 重建容器）
+#   bash install-v1.sh start [服务] # 启动全部 / 指定服务
+#   bash install-v1.sh stop [服务]  # 停止全部 / 指定服务（保留数据）
+#   bash install-v1.sh restart [服务] # 重启应用 / 指定服务（不重建、不加载镜像）
+#   bash install-v1.sh update [服务]  # 更新应用 / 指定服务（加载新镜像 + 重建容器）
 #   bash install-v1.sh down         # 停止并删除容器（数据卷保留）
 #   bash install-v1.sh down-all     # 停止并删除容器 + 数据卷（⚠️ 清除所有数据）
 #   bash install-v1.sh logs [服务名] [条数]  # 查看日志（默认全部应用，100条）
 #   bash install-v1.sh status       # 查看服务状态
+#
+# 服务名: backend / worker / frontend / postgres / milvus / redis / etcd / minio
 # ============================================================
 set -euo pipefail
 
@@ -114,13 +116,13 @@ show_info() {
   echo "  前端: http://${IP}:${FRONTEND_PORT:-8888}"
   echo "  后端: http://${IP}:${BACKEND_PORT:-8000}"
   echo ""
-  echo "  常用命令（在本目录执行）："
+  echo "  常用命令（在本目录执行，末尾可加服务名指定单个服务）："
   echo "    查看状态: bash install-v1.sh status"
   echo "    查看日志: bash install-v1.sh logs [服务名] [条数]"
-  echo "    重启应用: bash install-v1.sh restart    # 仅重启，不重建"
-  echo "    更新应用: bash install-v1.sh update     # 替换 app-images.tar 后执行"
-  echo "    停止服务: bash install-v1.sh stop"
-  echo "    清理容器: bash install-v1.sh down        # 数据卷保留"
+  echo "    重启应用: bash install-v1.sh restart [服务名]   # 仅重启，不重建"
+  echo "    更新应用: bash install-v1.sh update [服务名]    # 替换 app-images.tar 后执行"
+  echo "    停止服务: bash install-v1.sh stop [服务名]"
+  echo "    清理容器: bash install-v1.sh down               # 数据卷保留"
 }
 
 # ============================================================
@@ -156,29 +158,48 @@ do_install() {
 }
 
 do_start() {
-  echo "=== 启动全部服务 ==="
+  local SERVICE="${2:-}"
   ensure_compose_compat
-  $COMPOSE_CMD -f "$COMPOSE_FILE" up -d
-  wait_infra_healthy
+  if [[ -n "$SERVICE" ]]; then
+    echo "=== 启动服务: $SERVICE ==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d "$SERVICE"
+  else
+    echo "=== 启动全部服务 ==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d
+    wait_infra_healthy
+  fi
   echo "=== 启动完成 ==="
   show_info
 }
 
 do_stop() {
-  echo "=== 停止全部服务（数据保留）==="
-  $COMPOSE_CMD -f "$COMPOSE_FILE" stop
+  local SERVICE="${2:-}"
+  if [[ -n "$SERVICE" ]]; then
+    echo "=== 停止服务: $SERVICE（数据保留）==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" stop "$SERVICE"
+  else
+    echo "=== 停止全部服务（数据保留）==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" stop
+  fi
   echo "=== 已停止 ==="
 }
 
 do_restart() {
-  echo "=== 重启应用（不重建容器、不加载镜像）==="
-  $COMPOSE_CMD -f "$COMPOSE_FILE" restart backend worker frontend
+  local SERVICE="${2:-}"
+  if [[ -n "$SERVICE" ]]; then
+    echo "=== 重启服务: $SERVICE（不重建容器、不加载镜像）==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" restart "$SERVICE"
+  else
+    echo "=== 重启应用（不重建容器、不加载镜像）==="
+    $COMPOSE_CMD -f "$COMPOSE_FILE" restart backend worker frontend
+  fi
   echo ""
   echo "=== 重启完成 ==="
   show_info
 }
 
 do_update() {
+  local SERVICE="${2:-}"
   echo "=== 更新应用（加载新镜像 + 重建容器）==="
 
   echo "[1/3] 加载镜像..."
@@ -191,8 +212,13 @@ do_update() {
   echo "[2/3] 处理 compose 文件兼容性..."
   ensure_compose_compat
 
-  echo "[3/3] 重建应用容器..."
-  $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate backend worker frontend
+  if [[ -n "$SERVICE" ]]; then
+    echo "[3/3] 重建容器: $SERVICE..."
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate "$SERVICE"
+  else
+    echo "[3/3] 重建应用容器..."
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate backend worker frontend
+  fi
 
   echo ""
   echo "=== 更新完成 ==="
@@ -240,10 +266,10 @@ do_status() {
 
 case "$ACTION" in
   install)   do_install ;;
-  start)     do_start ;;
-  stop)      do_stop ;;
-  restart)   do_restart ;;
-  update)    do_update ;;
+  start)     do_start "$@" ;;
+  stop)      do_stop "$@" ;;
+  restart)   do_restart "$@" ;;
+  update)    do_update "$@" ;;
   down)      do_down ;;
   down-all)  do_down_all ;;
   logs)      do_logs "$@" ;;
@@ -251,6 +277,7 @@ case "$ACTION" in
   *)
     echo "未知命令: $ACTION"
     echo "可用命令: start | stop | restart | update | down | down-all | logs [服务] [条数] | status"
+    echo "提示: start/stop/restart/update 可在末尾加服务名，如: bash install-v1.sh restart backend"
     exit 1
     ;;
 esac
