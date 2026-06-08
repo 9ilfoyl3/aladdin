@@ -139,11 +139,14 @@ class PipelineWorker:
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
 
-                # 慢道：大文件，受 _slow_semaphore 限制在途数。非阻塞拉取
-                # （block_ms=0），快道空闲等待已经提供了循环节流，这里不再阻塞。
+                # 慢道：大文件，受 _slow_semaphore 限制在途数。短轮询拉取
+                # （block_ms=100）——注意 XREADGROUP 中 block=0 是“无限阻塞直到有消息”，
+                # 并非不阻塞；队列空时会一直阻塞到 socket_timeout 触发
+                # "Timeout reading from redis"。用 100ms 小正值做近似非阻塞拉取，
+                # 快道的 5s 长轮询已提供主循环节流，这里只需快速探一下慢道。
                 if self._slow_queue is not None and not self._slow_semaphore.locked():
                     slow_messages = await self._slow_queue.consume(
-                        self._consumer_name, count=1, block_ms=0
+                        self._consumer_name, count=1, block_ms=100
                     )
                     for message_id, msg in slow_messages:
                         task = asyncio.create_task(

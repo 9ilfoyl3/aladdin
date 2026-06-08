@@ -33,6 +33,9 @@ class InvalidationBus:
         self._redis = redis_client
         self._instance_id = instance_id or uuid.uuid4().hex
         self._running = False
+        # 订阅循环只允许启动一次：防止重复调用 start_invalidation_bus 起多个 listen 循环，
+        # 导致同一进程内多份订阅交替「超时重连」刷屏。
+        self._loop_started = False
 
     @property
     def instance_id(self) -> str:
@@ -49,14 +52,28 @@ class InvalidationBus:
             logger.warning("失效广播发布失败（降级 no-op）: %s", e)
 
     async def subscribe_loop(self, handlers: dict[str, callable]) -> None:
-        """订阅失效消息并分发给 handler。断线指数退避重连（上限 30s）。"""
+        """订阅失效消息并分发给 handler。
+
+        - 用 ``get_message(timeout=...)`` 轮询而非 ``listen()``：空闲（无消息）是常态，
+          不视为断开，避免 pubsub 长连接在 ``socket_timeout`` 下被误判为「连接断开」
+          而每隔 1s 重连刷屏。
+        - 仅真正的连接级错误才重连，指数退避（上限 30s）。
+        - 重复启动守卫：同一 bus 实例只跑一个订阅循环。
+        """
         if self._redis is None:
             logger.info("InvalidationBus: Redis 未配置，跳过订阅（降级 TTL 兜底）")
             return
 
+        if self._loop_started:
+            logger.debug("InvalidationBus: 订阅循环已在运行，跳过重复启动")
+            return
+        self._loop_started = True
+
         self._running = True
         retry_delay = 1.0
         max_delay = 30.0
+        # 轮询间隔：无消息时阻塞读最多 1s 后返回 None（正常空闲），不触发重连。
+        poll_timeout = 1.0
 
         while self._running:
             pubsub = None
@@ -66,10 +83,15 @@ class InvalidationBus:
                 retry_delay = 1.0  # 连接成功重置
                 logger.info("InvalidationBus: 订阅成功 (instance=%s)", self._instance_id[:8])
 
-                async for message in pubsub.listen():
-                    if not self._running:
-                        break
-                    if message["type"] != "message":
+                # 轮询读取：get_message 在 poll_timeout 内无消息返回 None（空闲常态），
+                # 继续轮询，不当作断开。只有抛连接异常才跳到 except 重连。
+                while self._running:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=poll_timeout
+                    )
+                    if message is None:
+                        continue
+                    if message.get("type") != "message":
                         continue
                     try:
                         data = json.loads(message["data"])
@@ -104,6 +126,7 @@ class InvalidationBus:
                         except Exception:
                             pass
 
+        self._loop_started = False
         logger.info("InvalidationBus: 订阅循环结束")
 
     def stop(self):
@@ -139,7 +162,15 @@ async def init_invalidation_bus() -> InvalidationBus | None:
             _bus_instance = InvalidationBus(redis_client=None)
             return _bus_instance
 
-        client = aioredis.from_url(redis_url, decode_responses=True)
+        client = aioredis.from_url(
+            redis_url,
+            decode_responses=True,
+            # pubsub 长连接稳定性：开启 keepalive + 周期健康检查，避免空闲连接被中间设备
+            # 静默掐断；不设激进的 socket_timeout（pubsub 空闲时本就长时间无数据，
+            # 由 get_message(timeout=...) 控制轮询节奏，不靠 socket 层超时）。
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
         await client.ping()
         _bus_instance = InvalidationBus(redis_client=client)
         logger.info("InvalidationBus: 初始化成功 (instance=%s)", _bus_instance.instance_id[:8])

@@ -179,6 +179,11 @@ async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
 
     bus = await init_invalidation_bus()
     if bus and bus._redis is not None:
+        # subOnce 防重：bus 单例 + subscribe_loop 内部 _loop_started 守卫，
+        # 即使本函数被重复调用也只会有一个订阅循环（避免多份订阅交替重连刷屏）。
+        if getattr(bus, "_loop_started", False):
+            logger.info("InvalidationBus 后台订阅已在运行，跳过重复启动")
+            return
         # 后台协程，不阻塞启动
         asyncio.create_task(bus.subscribe_loop(handlers))
         logger.info("InvalidationBus 后台订阅已启动")
