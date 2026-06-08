@@ -24,6 +24,7 @@ function Tenants() {
   const [showCreate, setShowCreate] = useState(false)
   const [name, setName] = useState('')
   const [adminUsername, setAdminUsername] = useState('')
+  const [adminUsernameErr, setAdminUsernameErr] = useState<string | null>(null)
   const [createDesc, setCreateDesc] = useState('')
   const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [created, setCreated] = useState<TenantCreateResult | null>(null)
@@ -35,6 +36,7 @@ function Tenants() {
   // 下钻内：超管为该租户新增一名租户管理员（admin 角色）
   const [showAddAdmin, setShowAddAdmin] = useState(false)
   const [newAdminName, setNewAdminName] = useState('')
+  const [newAdminNameErr, setNewAdminNameErr] = useState<string | null>(null)
   // 编辑租户资料（名称/简介/头像，仅超管）
   const [editTenant, setEditTenant] = useState<TenantItem | null>(null)
   const [editName, setEditName] = useState('')
@@ -123,8 +125,8 @@ function Tenants() {
       toast.error('仅支持 png / jpeg / webp 图片')
       return
     }
-    if (file.size > 200 * 1024) {
-      toast.error('图片过大，请控制在 200KB 以内')
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('图片过大，请控制在 2MB 以内')
       return
     }
     const reader = new FileReader()
@@ -167,6 +169,7 @@ function Tenants() {
     setShowCreate(false)
     setName('')
     setAdminUsername('')
+    setAdminUsernameErr(null)
     setCreateDesc('')
     setCreateAvatar(null)
     setCreated(null)
@@ -333,7 +336,16 @@ function Tenants() {
                 </div>
                 <div>
                   <Label>初始管理员用户名</Label>
-                  <Input value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} placeholder="如：admin_a" className="mt-1.5" required />
+                  <Input
+                    value={adminUsername}
+                    onChange={(e) => { setAdminUsername(e.target.value); if (adminUsernameErr) setAdminUsernameErr(null) }}
+                    onBlur={() => setAdminUsernameErr(adminUsername ? validateUsername(adminUsername) : null)}
+                    placeholder="如：admin_a"
+                    className="mt-1.5"
+                    required
+                    aria-invalid={!!adminUsernameErr}
+                  />
+                  {adminUsernameErr && <p className="text-xs text-destructive mt-1">{adminUsernameErr}</p>}
                 </div>
                 <div>
                   <Label>租户简介（可选）</Label>
@@ -464,7 +476,7 @@ function Tenants() {
                 {editAvatar && (
                   <Button type="button" variant="ghost" size="sm" className="ml-2 text-destructive" onClick={() => setEditAvatar(null)}>移除</Button>
                 )}
-                <p className="text-xs text-muted-foreground mt-1">png / jpeg / webp，≤200KB</p>
+                <p className="text-xs text-muted-foreground mt-1">png / jpeg / webp，≤2MB</p>
               </div>
             </div>
             <div>
@@ -491,7 +503,7 @@ function Tenants() {
       </Dialog>
 
       {/* 新增租户管理员（超管在下钻内补充管理员） */}
-      <Dialog open={showAddAdmin} onOpenChange={(o) => { if (!o) { setShowAddAdmin(false); setNewAdminName('') } }}>
+      <Dialog open={showAddAdmin} onOpenChange={(o) => { if (!o) { setShowAddAdmin(false); setNewAdminName(''); setNewAdminNameErr(null) } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>新增租户管理员 · {drillTenant?.name}</DialogTitle>
@@ -510,7 +522,16 @@ function Tenants() {
           >
             <div>
               <Label>管理员用户名</Label>
-              <Input value={newAdminName} onChange={(e) => setNewAdminName(e.target.value)} placeholder="如：admin_b" className="mt-1" required />
+              <Input
+                value={newAdminName}
+                onChange={(e) => { setNewAdminName(e.target.value); if (newAdminNameErr) setNewAdminNameErr(null) }}
+                onBlur={() => setNewAdminNameErr(newAdminName ? validateUsername(newAdminName) : null)}
+                placeholder="如：admin_b"
+                className="mt-1"
+                required
+                aria-invalid={!!newAdminNameErr}
+              />
+              {newAdminNameErr && <p className="text-xs text-destructive mt-1">{newAdminNameErr}</p>}
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => { setShowAddAdmin(false); setNewAdminName('') }}>取消</Button>

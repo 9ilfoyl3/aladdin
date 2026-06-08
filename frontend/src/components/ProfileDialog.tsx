@@ -14,8 +14,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-// 头像上传限制：≤200KB，png/jpeg/webp（与后端 validate_avatar 一致）
-const AVATAR_MAX_BYTES = 200 * 1024
+// 头像上传限制：≤2MB，png/jpeg/webp（与后端 validate_avatar 一致）
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024
 const AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 
 interface ProfileDialogProps {
@@ -47,7 +47,7 @@ export default function ProfileDialog({ open, onOpenChange }: ProfileDialogProps
       return
     }
     if (file.size > AVATAR_MAX_BYTES) {
-      toast.error('图片过大，请控制在 200KB 以内')
+      toast.error('图片过大，请控制在 2MB 以内')
       return
     }
     const reader = new FileReader()
@@ -130,7 +130,7 @@ export default function ProfileDialog({ open, onOpenChange }: ProfileDialogProps
 
         {/* 头像操作提示 */}
         <div className="mx-6 mt-2 flex items-center justify-between text-xs text-muted-foreground">
-          <span>支持 png / jpeg / webp，≤200KB</span>
+          <span>支持 png / jpeg / webp，≤2MB</span>
           {avatar && (
             <button
               type="button"

@@ -44,6 +44,10 @@ export default function Register() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // 失焦校验错误：null/缺省=无错
+  const [usernameErr, setUsernameErr] = useState<string | null>(null)
+  const [passwordErr, setPasswordErr] = useState<string | null>(null)
+  const [confirmErr, setConfirmErr] = useState<string | null>(null)
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -135,11 +139,14 @@ export default function Register() {
               <Input
                 id="username"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => { setUsername(e.target.value); if (usernameErr) setUsernameErr(null) }}
+                onBlur={() => setUsernameErr(username ? validateUsername(username) : null)}
                 placeholder="请输入用户名"
                 autoComplete="username"
                 className="mt-2"
+                aria-invalid={!!usernameErr}
               />
+              {usernameErr && <p className="text-xs text-destructive">{usernameErr}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">
@@ -148,11 +155,14 @@ export default function Register() {
               <PasswordInput
                 id="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => { setPassword(e.target.value); if (passwordErr) setPasswordErr(null) }}
+                onBlur={() => setPasswordErr(password ? validatePassword(password) : null)}
                 placeholder="请输入密码"
                 autoComplete="new-password"
                 className="mt-2"
+                aria-invalid={!!passwordErr}
               />
+              {passwordErr && <p className="text-xs text-destructive">{passwordErr}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirm">
@@ -161,11 +171,14 @@ export default function Register() {
               <PasswordInput
                 id="confirm"
                 value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
+                onChange={(e) => { setConfirm(e.target.value); if (confirmErr) setConfirmErr(null) }}
+                onBlur={() => setConfirmErr(confirm && confirm !== password ? '两次输入的密码不一致' : null)}
                 placeholder="请再次输入密码"
                 autoComplete="new-password"
                 className="mt-2"
+                aria-invalid={!!confirmErr}
               />
+              {confirmErr && <p className="text-xs text-destructive">{confirmErr}</p>}
             </div>
             <Button type="submit" className="w-full" disabled={submitting}>
               {submitting ? '注册中…' : '注册'}

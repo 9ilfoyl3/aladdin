@@ -3,8 +3,8 @@ import { Upload, Building2, UserCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 
-// 头像选择器：选图后读成 data URL 回传父组件。限 ≤200KB、png/jpeg/webp（与后端一致）。
-const MAX_BYTES = 200 * 1024
+// 头像选择器：选图后读成 data URL 回传父组件。限 ≤2MB、png/jpeg/webp（与后端一致）。
+const MAX_BYTES = 2 * 1024 * 1024
 const TYPES = ['image/png', 'image/jpeg', 'image/webp']
 
 interface Props {
@@ -26,7 +26,7 @@ export function AvatarPicker({ value, onChange, shape = 'circle' }: Props) {
       return
     }
     if (file.size > MAX_BYTES) {
-      toast.error('图片过大，请控制在 200KB 以内')
+      toast.error('图片过大，请控制在 2MB 以内')
       return
     }
     const reader = new FileReader()
@@ -55,7 +55,7 @@ export function AvatarPicker({ value, onChange, shape = 'circle' }: Props) {
             移除
           </Button>
         )}
-        <p className="text-xs text-muted-foreground mt-1">png / jpeg / webp，≤200KB（可选）</p>
+        <p className="text-xs text-muted-foreground mt-1">png / jpeg / webp，≤2MB（可选）</p>
       </div>
     </div>
   )

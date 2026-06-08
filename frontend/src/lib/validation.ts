@@ -1,12 +1,13 @@
 // 前端输入校验（与后端 app/auth/validators.py 规则保持一致）。
 // 前端是体验防御，真正校验仍由后端强制；此处提前拦截明显错误，减少无谓请求。
 
-const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$/
+// 用户名：首字符为中文/字母/数字，整体 1–32，正文允许中文、字母数字与 _ . -
+const USERNAME_RE = /^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9_.\-\u4e00-\u9fff]{0,31}$/
 
 export function validateUsername(username: string): string | null {
   const name = username.trim()
-  if (name.length < 3 || name.length > 32) return '用户名长度需为 3–32 个字符'
-  if (!USERNAME_RE.test(name)) return '用户名只能含字母、数字、下划线、点、连字符，且以字母或数字开头'
+  if (name.length < 1 || name.length > 32) return '用户名长度需为 1–32 个字符'
+  if (!USERNAME_RE.test(name)) return '用户名只能含中文、字母、数字、下划线、点、连字符，且不能以点/下划线/连字符开头'
   return null
 }
 

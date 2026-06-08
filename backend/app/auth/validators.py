@@ -4,7 +4,8 @@
 ValidationInputError -> 全局异常处理器映射为 400。
 
 规则要点：
-- 用户名：3–32 字符，仅 [A-Za-z0-9_.-]，必须以字母/数字开头，大小写不敏感语义由唯一约束保证。
+- 用户名：1–32 字符，允许中文、字母、数字、下划线、点、连字符；首字符须为中文/字母/数字
+  （不允许以 . _ - 开头），大小写不敏感语义由唯一约束保证。
 - 口令：8–64 字符且 ≤72 字节（bcrypt 上限），至少包含字母与数字两类，禁止纯空白/控制字符。
   不做"必须含特殊字符"的强约束（可用性与安全的平衡），但拒绝弱长度与单一字符集。
 """
@@ -16,10 +17,11 @@ import re
 from app.api.errors import ValidationInputError
 from app.auth.constants import ORG_PERMISSIONS_ENABLED, TENANT_ROLES_ENABLED, TenantTypeEnum
 
-# 用户名：以字母/数字开头，整体 3–32，允许字母数字与 _ . -
-_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
+# 用户名：首字符为中文/字母/数字，整体 1–32，正文允许中文、字母数字与 _ . -
+# 中文覆盖常用 CJK 统一表意文字区（\u4e00-\u9fff）。
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9_.\-\u4e00-\u9fff]{0,31}$")
 
-USERNAME_MIN = 3
+USERNAME_MIN = 1
 USERNAME_MAX = 32
 PASSWORD_MIN = 8
 PASSWORD_MAX = 64
@@ -35,7 +37,7 @@ def validate_username(username: str) -> str:
         raise ValidationInputError(f"用户名长度需为 {USERNAME_MIN}–{USERNAME_MAX} 个字符")
     if not _USERNAME_RE.match(name):
         raise ValidationInputError(
-            "用户名只能包含字母、数字、下划线、点、连字符，且以字母或数字开头"
+            "用户名只能包含中文、字母、数字、下划线、点、连字符，且不能以点/下划线/连字符开头"
         )
     return name
 

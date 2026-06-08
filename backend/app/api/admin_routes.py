@@ -65,7 +65,7 @@ class TenantCreate(BaseModel):
     admin_username: str = Field(..., min_length=1, description="初始租户管理员用户名")
     admin_password: str | None = Field(default=None, description="不填则生成临时口令")
     description: str | None = Field(default=None, description="租户简介（企业组织介绍）")
-    avatar: str | None = Field(default=None, description="租户头像 data URL（≤200KB）")
+    avatar: str | None = Field(default=None, description="租户头像 data URL（≤2MB）")
 
 
 class TenantResponse(BaseModel):
@@ -219,7 +219,7 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1)
     password: str | None = Field(default=None, description="不填则生成临时口令并强制改密")
     description: str | None = Field(default=None, description="可选：用户简介")
-    avatar: str | None = Field(default=None, description="可选：用户头像 data URL（≤200KB）")
+    avatar: str | None = Field(default=None, description="可选：用户头像 data URL（≤2MB）")
 
 
 class UserResponse(BaseModel):

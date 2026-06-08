@@ -27,6 +27,7 @@ function Users() {
 
   const [showCreate, setShowCreate] = useState(false)
   const [username, setUsername] = useState('')
+  const [usernameErr, setUsernameErr] = useState<string | null>(null)
   const [createDesc, setCreateDesc] = useState('')
   const [createAvatar, setCreateAvatar] = useState<string | null>(null)
   const [tempResult, setTempResult] = useState<{ title: string; username: string; pwd: string } | null>(null)
@@ -238,7 +239,7 @@ function Users() {
       )}
 
       {/* 创建用户 */}
-      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setCreateDesc(''); setCreateAvatar(null) } }}>
+      <Dialog open={showCreate} onOpenChange={(o) => { if (!o) { setShowCreate(false); setUsername(''); setUsernameErr(null); setCreateDesc(''); setCreateAvatar(null) } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>创建用户</DialogTitle>
@@ -253,7 +254,16 @@ function Users() {
             </div>
             <div>
               <Label>用户名</Label>
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="如：faguan1" className="mt-1.5" required />
+              <Input
+                value={username}
+                onChange={(e) => { setUsername(e.target.value); if (usernameErr) setUsernameErr(null) }}
+                onBlur={() => setUsernameErr(username ? validateUsername(username) : null)}
+                placeholder="如：faguan1"
+                className="mt-1.5"
+                required
+                aria-invalid={!!usernameErr}
+              />
+              {usernameErr && <p className="text-xs text-destructive mt-1">{usernameErr}</p>}
             </div>
             <div>
               <Label>简介（可选）</Label>
