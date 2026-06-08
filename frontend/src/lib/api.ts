@@ -218,6 +218,20 @@ export const documentApi = {
     request<PageResult<unknown>>(
       `/documents/${id}/chunks?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
     ),
+  // 拉取文档缩略图：preview 接口需 Authorization 头，原生 <img> 无法携带，
+  // 故用 fetch 带 token 取回 blob 并生成本地 objectURL 供 <img src> 使用。
+  // 调用方负责在不再使用时 URL.revokeObjectURL 释放。
+  preview: async (id: string): Promise<string> => {
+    const response = await fetch(`${BASE_URL}/documents/${id}/preview`, {
+      headers: authHeaders(),
+    })
+    if (!response.ok) {
+      if (response.status === 401) handleUnauthorized()
+      throw new Error(`加载缩略图失败: ${response.status}`)
+    }
+    const blob = await response.blob()
+    return URL.createObjectURL(blob)
+  },
 }
 
 // 文件夹相关接口

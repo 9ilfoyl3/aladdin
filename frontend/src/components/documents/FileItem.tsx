@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Loader2,
   FileText,
@@ -7,6 +7,7 @@ import {
   Presentation,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { documentApi } from '@/lib/api'
 
 // 文档数据类型
 export interface DocumentItem {
@@ -123,7 +124,40 @@ function getFileExt(filename: string) {
 
 // 文件缩略图预览
 function FileThumbnail({ filename, status, docId }: { filename: string; status: string; docId?: string }) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
   const [imgFailed, setImgFailed] = useState(false)
+
+  // 是否需要加载缩略图：图片/PDF，且非本地上传项、非上传中/排队中状态
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  const canPreview =
+    ['jpg', 'jpeg', 'png', 'pdf'].includes(ext) &&
+    !!docId &&
+    !docId.startsWith('local_') &&
+    status !== 'uploading' &&
+    status !== 'pending'
+
+  // 通过 fetch 带 token 拉取缩略图，转为 blob objectURL 供 <img> 使用；
+  // 卸载或 docId 变化时释放上一个 objectURL，避免内存泄漏。
+  useEffect(() => {
+    if (!canPreview || !docId) return
+    let revoked = false
+    let url: string | null = null
+    documentApi
+      .preview(docId)
+      .then((objectUrl) => {
+        if (revoked) {
+          URL.revokeObjectURL(objectUrl)
+          return
+        }
+        url = objectUrl
+        setThumbUrl(objectUrl)
+      })
+      .catch(() => setImgFailed(true))
+    return () => {
+      revoked = true
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [canPreview, docId])
 
   if (status === 'uploading') {
     return (
@@ -133,16 +167,14 @@ function FileThumbnail({ filename, status, docId }: { filename: string; status: 
     )
   }
 
-  // 图片和 PDF 文件直接显示缩略图（仅非上传中/排队中状态，且未加载失败）
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-  if (['jpg', 'jpeg', 'png', 'pdf'].includes(ext) && docId && !docId.startsWith('local_') && status !== 'pending' && !imgFailed) {
+  // 缩略图加载成功则展示
+  if (canPreview && thumbUrl && !imgFailed) {
     return (
       <div className="w-full h-full">
         <img
-          src={`/api/documents/${docId}/preview`}
+          src={thumbUrl}
           alt={filename}
           className="w-full h-full object-cover rounded-sm"
-          loading="lazy"
           onError={() => setImgFailed(true)}
         />
       </div>
