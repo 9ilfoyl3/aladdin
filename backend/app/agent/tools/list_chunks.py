@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from xml.sax.saxutils import escape as xml_escape
 
 from app.agent.tools.base import BaseTool, ToolResult
-from app.schema.db import Chunk
+from app.schema.db import Chunk, SessionChunk
 from app.storage.database import async_session
 
 logger = logging.getLogger(__name__)
@@ -78,12 +78,30 @@ class ListKnowledgeChunksTool(BaseTool):
 
         try:
             async with async_session() as session:
-                # 查询该文档的总 chunk 数
+                # 查询该文档的总 chunk 数（正式知识库 Chunk 表）
                 count_stmt = select(func.count()).select_from(Chunk).where(
                     Chunk.doc_id == doc_id
                 )
                 total_chunks_result = await session.execute(count_stmt)
                 total_chunks: int = total_chunks_result.scalar() or 0
+
+                # 会话文件回退：正式库查不到时，doc_id 可能是会话文件 file_id，
+                # 其 chunk 存于独立的 session_chunks 表。会话文件的 doc_id(=file_id) 对应
+                # 该文件的全部父块（parent_id IS NULL），按父块即可拼出完整文档内容，
+                # 避免父/子块同时返回导致内容重复。
+                is_session_file = False
+                if total_chunks == 0:
+                    session_count_stmt = (
+                        select(func.count())
+                        .select_from(SessionChunk)
+                        .where(
+                            SessionChunk.file_id == doc_id,
+                            SessionChunk.parent_id.is_(None),
+                        )
+                    )
+                    session_count_result = await session.execute(session_count_stmt)
+                    total_chunks = session_count_result.scalar() or 0
+                    is_session_file = total_chunks > 0
 
                 if total_chunks == 0:
                     return ToolResult(
@@ -100,14 +118,26 @@ class ListKnowledgeChunksTool(BaseTool):
 
                 offset = (page - 1) * page_size
 
-                # 按 chunk_index 排序分页查询
-                query_stmt = (
-                    select(Chunk)
-                    .where(Chunk.doc_id == doc_id)
-                    .order_by(Chunk.chunk_index)
-                    .offset(offset)
-                    .limit(page_size)
-                )
+                # 按 chunk_index 排序分页查询（会话文件走 session_chunks 父块）
+                if is_session_file:
+                    query_stmt = (
+                        select(SessionChunk)
+                        .where(
+                            SessionChunk.file_id == doc_id,
+                            SessionChunk.parent_id.is_(None),
+                        )
+                        .order_by(SessionChunk.chunk_index)
+                        .offset(offset)
+                        .limit(page_size)
+                    )
+                else:
+                    query_stmt = (
+                        select(Chunk)
+                        .where(Chunk.doc_id == doc_id)
+                        .order_by(Chunk.chunk_index)
+                        .offset(offset)
+                        .limit(page_size)
+                    )
                 result = await session.execute(query_stmt)
                 chunks = result.scalars().all()
 
