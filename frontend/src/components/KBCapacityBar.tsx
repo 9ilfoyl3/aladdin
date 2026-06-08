@@ -3,12 +3,9 @@
 // 后端返回 `KBCapacityVO`：
 // - used_chunks（精确）/ total_chunks（平台 KB_Chunk_Cap）
 // - percent（封顶 1.0）
-// - approx_total_files（向下取整，"约可容纳 N 份文档"）
-// - approx_used_files（精确，已传文档数）
-// - approx_remaining_files（向下取整，"约还可上传 N 份"）
 //
-// 真实度量单位是 child chunk（Req 7.2）；文件数仅作辅助翻译，标"约"（Req 7.4/7.5）。
-// 用户最关心"还能传多少"，因此 UI 以"约还可上传 N 份"为主信息，chunk 精确值降级到悬浮提示。
+// 真实度量单位是 child chunk（Req 7.2）。UI 以"已用百分比"为主信息，
+// chunk 精确值降级到悬浮提示。
 // 颜色档：normal / warning（≥0.8）/ full（≥1.0），Req 7.7。
 
 import { cn } from '@/lib/utils'
@@ -72,31 +69,21 @@ export default function KBCapacityBar({ capacity, compact = false, className }: 
       ? 'text-amber-600'
       : 'text-foreground'
 
-  const usedFiles = Math.max(0, capacity.approx_used_files)
-  const totalFiles = Math.max(0, capacity.approx_total_files)
-  // 旧响应缺 approx_remaining_files 时，用 总数-已用 兜底（不为负）
-  const remainingFiles = Math.max(
-    0,
-    capacity.approx_remaining_files ?? totalFiles - usedFiles,
-  )
-
-  // 主信息文案：已满 / 接近上限 / 还能上传 N 份
+  // 主信息文案：已满 / 接近上限 / 已用百分比
   const headline = isFull
     ? '容量已满'
-    : `约还可上传 ${remainingFiles} 份`
+    : `已用 ${pctDisplay}%`
 
-  // 悬浮提示里给出精确度量（chunk）+ 估算口径说明，满足想看细节的用户
+  // 悬浮提示里给出精确度量（chunk）+ 百分比
   const tipText =
-    `已用 ${usedFiles} 份 · 约可容纳 ${totalFiles} 份\n` +
-    `精确度量：${formatChunks(capacity.used_chunks)} / ${formatChunks(capacity.total_chunks)} chunk（${pctDisplay}%）\n` +
-    `份数为按单文件大小上限的保守估算，仅供参考`
+    `精确度量：${formatChunks(capacity.used_chunks)} / ${formatChunks(capacity.total_chunks)} chunk（${pctDisplay}%）`
 
   return (
     <TooltipProvider delayDuration={200}>
       <Tooltip>
         <TooltipTrigger asChild>
           <div className={cn('w-full cursor-default', className)}>
-            {/* 主信息行：左侧"还能上传 N 份"，右侧状态徽标 / 百分比 */}
+            {/* 主信息行：左侧"已用百分比"，右侧状态徽标 / 百分比 */}
             <div className={cn('flex items-baseline justify-between gap-2', compact ? 'text-[11px]' : 'text-xs')}>
               <span className={cn('truncate font-medium', textCls)}>
                 {headline}
@@ -115,20 +102,12 @@ export default function KBCapacityBar({ capacity, compact = false, className }: 
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={pctDisplay}
-              aria-label={`知识库容量，约还可上传 ${remainingFiles} 份文档`}
+              aria-label={`知识库容量，已用 ${pctDisplay}%`}
             >
               <div
                 className={cn('h-full transition-all duration-300', fillCls)}
                 style={{ width: `${pct * 100}%` }}
               />
-            </div>
-
-            {/* 辅助文字：已用 X / 共约 Y 份（精确份数口径，标"约"） */}
-            <div className={cn('mt-1 flex items-center justify-between gap-2', compact ? 'text-[10px]' : 'text-xs', 'text-muted-foreground')}>
-              <span className="truncate">已用 {usedFiles} 份 / 共约 {totalFiles} 份</span>
-              {!compact && (
-                <span className="shrink-0">{pctDisplay}% 已用</span>
-              )}
             </div>
           </div>
         </TooltipTrigger>
