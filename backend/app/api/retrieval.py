@@ -29,11 +29,26 @@ from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.sparse import SparseRetriever
 from app.retrieval.vector import VectorRetriever
 from app.storage.database import async_session
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import MilvusClient, get_milvus_client
+
+from fastapi import Depends
+from app.api.deps import require_authenticated
+from app.api.errors import PermissionDeniedError
+from app.auth.identity import IdentityContext
+from app.auth.kb_authz import KbAccessEnum
+from app.auth.kb_scope import authorize_requested_kbs
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/retrieval", tags=["Retrieval"])
+
+
+async def _authorize_and_boundary(identity: IdentityContext, kb_id: str) -> None:
+    """召回前置：内容边界（超管默认不可读正文）+ KB 读授权（触达 Milvus 前先拒）。"""
+    if identity.is_super_admin and not get_settings().content_view_boundary_open:
+        raise PermissionDeniedError("超级管理员默认不可查看业务内容正文")
+    async with async_session() as session:
+        await authorize_requested_kbs(session, identity, [kb_id], KbAccessEnum.READ)
 
 
 # ============================================================
@@ -105,16 +120,21 @@ class RetrievalTestResponse(BaseModel):
 
 def _get_milvus() -> MilvusClient:
     """获取 Milvus 客户端"""
-    settings = get_settings()
-    return MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+    return get_milvus_client()
 
 
 @router.post("/test", response_model=RetrievalTestResponse)
-async def retrieval_test(body: RetrievalTestRequest) -> RetrievalTestResponse:
+async def retrieval_test(
+    body: RetrievalTestRequest,
+    identity: IdentityContext = Depends(require_authenticated()),
+) -> RetrievalTestResponse:
     """纯检索测试：direct（稠密）/ hybrid（三路混合 + 链路追踪）
 
     不经过 LLM 生成，仅返回检索召回的 chunk 及其分数信号，专用于调参。
     """
+    # 触达 Milvus 前先校验 KB 读权限（跨租户/不可读 404）+ 内容边界
+    await _authorize_and_boundary(identity, body.knowledge_base_id)
+
     start = time.perf_counter()
     manager = get_model_manager()
     milvus = _get_milvus()

@@ -1,5 +1,7 @@
 // API 客户端：统一请求封装
 
+import { authHeaders, handleUnauthorized } from './auth'
+
 const BASE_URL = '/api'
 
 // 通用请求方法
@@ -8,17 +10,39 @@ async function request<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${BASE_URL}${endpoint}`
+  // 先展开其余选项（method/body 等），headers 放最后合并，避免 options.headers
+  // 覆盖掉这里注入的 Content-Type / Authorization；同时把调用方自定义头
+  // （如 X-Tenant-ID）经 authHeaders 透传并保留。
+  const { headers: extraHeaders, ...rest } = options
   const response = await fetch(url, {
+    ...rest,
     headers: {
       'Content-Type': 'application/json',
-      ...options.headers,
+      ...authHeaders(extraHeaders as Record<string, string> | undefined),
     },
-    ...options,
   })
 
   if (!response.ok) {
+    // 401：清除登录态并跳转登录页（展示层防御；真正鉴权在后端）
+    if (response.status === 401) {
+      handleUnauthorized()
+    }
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || `请求失败: ${response.status}`)
+    const detail = error.detail
+    // 422 范围校验失败：detail 是数组 [{field, value, allowed_range}, ...]，友好拼接
+    if (Array.isArray(detail)) {
+      const msg = detail
+        .map((d) =>
+          d && typeof d === 'object' && 'field' in d
+            ? `${d.field}=${d.value} 超出允许范围 ${d.allowed_range}`
+            : typeof d === 'string'
+              ? d
+              : JSON.stringify(d)
+        )
+        .join('；')
+      throw new Error(msg || `请求失败: ${response.status}`)
+    }
+    throw new Error(typeof detail === 'string' ? detail : `请求失败: ${response.status}`)
   }
 
   // 204 No Content 无响应体
@@ -38,12 +62,44 @@ export interface PageResult<T> {
   has_more: boolean
 }
 
+// 知识库共享入参（user 多选 + 权限）
+export interface ShareRequest {
+  user_ids: string[]
+  permission: string
+}
+
+// 知识库列表查询参数（分页 + 关系筛选 + 排序 + 名称搜索）
+export interface KnowledgeBaseListParams {
+  page?: number
+  page_size?: number
+  relation?: 'mine' | 'shared' | 'org' | 'others'
+  sort?: 'recommended' | 'updated' | 'created' | 'name' | 'docs'
+  q?: string
+}
+
+// 知识库容量进度条（与后端 KBCapacityVO 对齐，session-file-upload Req 7）
+// 真实度量单位是 child chunk；文件数（approx_*_files）是辅助翻译，标"约"。
+export interface KBCapacity {
+  used_chunks: number
+  total_chunks: number
+  percent: number
+  approx_total_files: number
+  approx_used_files: number
+  // 约还可上传文档数（向下取整，近似），用户最关心的「还能传多少」
+  approx_remaining_files: number
+}
+
 // 知识库相关接口
 export const knowledgeBaseApi = {
-  list: (params?: { page?: number; page_size?: number }) =>
-    request<PageResult<unknown>>(
-      `/knowledge-bases?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
-    ),
+  list: (params?: KnowledgeBaseListParams) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.relation) qs.set('relation', params.relation)
+    if (params?.sort) qs.set('sort', params.sort)
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim())
+    return request<PageResult<unknown>>(`/knowledge-bases?${qs.toString()}`)
+  },
   get: (id: string) => request<unknown>(`/knowledge-bases/${id}`),
   create: (data: unknown) =>
     request<unknown>('/knowledge-bases', {
@@ -57,6 +113,27 @@ export const knowledgeBaseApi = {
     }),
   delete: (id: string) =>
     request<void>(`/knowledge-bases/${id}`, { method: 'DELETE' }),
+  // 共享给指定用户（owner/admin 可调用）；user_ids 批量、permission=read|write
+  share: (kbId: string, data: { user_ids: string[]; permission: string }) =>
+    request<unknown>(`/knowledge-bases/${kbId}/share`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  // 撤销某个用户的共享授权
+  revokeShare: (kbId: string, userId: string) =>
+    request<void>(`/knowledge-bases/${kbId}/share/user/${userId}`, { method: 'DELETE' }),
+  // 变更可见性（private | organization）；owner 可调用。
+  // organization 时可选 orgPermission（read|write）控制组织成员是否可写内容。
+  setVisibility: (kbId: string, visibility: string, orgPermission?: string) =>
+    request<unknown>(`/knowledge-bases/${kbId}/visibility`, {
+      method: 'PUT',
+      body: JSON.stringify({ visibility, org_permission: orgPermission ?? null }),
+    }),
+  // 查看某库已共享用户（仅 owner）
+  shares: (kbId: string) =>
+    request<{ user_id: string; username: string; avatar: string | null; permission: string }[]>(
+      `/knowledge-bases/${kbId}/shares`
+    ),
 }
 
 // 文档相关接口
@@ -80,8 +157,12 @@ export const documentApi = {
       : `${BASE_URL}/knowledge-bases/${kbId}/documents/upload`
     return fetch(url, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
-    }).then((res) => res.json())
+    }).then((res) => {
+      if (res.status === 401) handleUnauthorized()
+      return res.json()
+    })
   },
   validateFolder: (kbId: string, paths: string[]) =>
     request<{
@@ -101,8 +182,10 @@ export const documentApi = {
     }
     return fetch(`${BASE_URL}/knowledge-bases/${kbId}/documents/upload-folder`, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
     }).then(async (res) => {
+      if (res.status === 401) handleUnauthorized()
       if (!res.ok) {
         const error = await res.json().catch(() => ({}))
         throw new Error(error.detail || `请求失败: ${res.status}`)
@@ -135,6 +218,20 @@ export const documentApi = {
     request<PageResult<unknown>>(
       `/documents/${id}/chunks?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
     ),
+  // 拉取文档缩略图：preview 接口需 Authorization 头，原生 <img> 无法携带，
+  // 故用 fetch 带 token 取回 blob 并生成本地 objectURL 供 <img src> 使用。
+  // 调用方负责在不再使用时 URL.revokeObjectURL 释放。
+  preview: async (id: string): Promise<string> => {
+    const response = await fetch(`${BASE_URL}/documents/${id}/preview`, {
+      headers: authHeaders(),
+    })
+    if (!response.ok) {
+      if (response.status === 401) handleUnauthorized()
+      throw new Error(`加载缩略图失败: ${response.status}`)
+    }
+    const blob = await response.blob()
+    return URL.createObjectURL(blob)
+  },
 }
 
 // 文件夹相关接口
@@ -208,10 +305,13 @@ export const retrievalApi = {
 }
 
 // API Key 相关接口
+// capability-config-to-platform：API Key 为平台能力出口（外部系统凭 Key + 自身用户标识
+// 在 External 租户内维护并查询自己的知识库），仅超级管理员签发/撤销。创建走代理 Key 端点
+// （external_agent，require_platform）。
 export const apiKeyApi = {
   list: () => request<{ items: unknown[]; total: number }>('/api-keys').then(res => res.items),
   create: (data: { name?: string }) =>
-    request<unknown>('/api-keys', {
+    request<unknown>('/api-keys/external-agent', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
@@ -220,11 +320,57 @@ export const apiKeyApi = {
 }
 
 // 系统配置接口
+//
+// 租户级配置（/system/config 及 reset）支持可选 tenantId：
+// - 普通租户管理员：不传 tenantId，后端据 JWT 身份定位自身租户；
+// - 超级管理员：必须传 tenantId（经租户管理列表进入），注入 X-Tenant-ID 指定目标租户，
+//   否则后端返回 400。
+// 平台配置（/system/platform-config）为超管专属，承载 Load_Cache_TTL。
+const tenantHeader = (tenantId?: string): RequestInit =>
+  tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
+
+// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 单库/单会话 chunk 硬上限。
+export interface PlatformConfig {
+  load_cache_ttl: number
+  kb_chunk_cap: number
+}
+
+// 单库 chunk 上限的内存推荐值（仅 GET 返回；信息性建议，不自动写入，Req 5.1）
+export interface MemoryRecommendation {
+  detected_memory_gb: number
+  recommended_kb_chunk_cap: number
+  safety_factor: number
+  active_kbs_assumption: number
+  assumption: string
+}
+
+// 平台配置 GET/PUT 响应：附带 memory_recommendation（仅 GET 填充）与 changes（仅 PUT 填充）
+export interface PlatformConfigResponse extends PlatformConfig {
+  memory_recommendation?: MemoryRecommendation | null
+  changes?: { field: string; old: unknown; new: unknown }[]
+}
+
 export const systemApi = {
   health: () => request<unknown>('/system/health'),
-  getConfig: () => request<unknown>('/system/config'),
-  updateConfig: (data: unknown) =>
+  getConfig: (tenantId?: string) =>
+    request<unknown>('/system/config', tenantHeader(tenantId)),
+  updateConfig: (data: unknown, tenantId?: string) =>
     request<unknown>('/system/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+      ...tenantHeader(tenantId),
+    }),
+  // 恢复检索参数默认值（后端：POST /api/system/config/retrieval/reset）
+  resetRetrievalConfig: (tenantId?: string) =>
+    request<unknown>('/system/config/retrieval/reset', {
+      method: 'POST',
+      ...tenantHeader(tenantId),
+    }),
+  // 平台配置（超管专属）：collection 加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
+  getPlatformConfig: () => request<PlatformConfigResponse>('/system/platform-config'),
+  // 仅提交本次改动的字段（后端 model_dump(exclude_unset=True, exclude_none=True)）
+  updatePlatformConfig: (data: Partial<PlatformConfig>) =>
+    request<PlatformConfigResponse>('/system/platform-config', {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
@@ -390,6 +536,12 @@ export interface AgentPresetItem {
   is_default: boolean
   created_at: string
   updated_at: string
+  // 归属与可见性（agent-preset-sharing）
+  is_shared: boolean
+  is_builtin: boolean
+  is_owner: boolean
+  owner_user_id: string | null
+  owner_username: string | null
 }
 
 export const agentPresetApi = {
@@ -403,7 +555,7 @@ export const agentPresetApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean }) =>
+  create: (data: { name: string; description?: string; config_json?: Record<string, unknown>; is_default?: boolean; is_shared?: boolean }) =>
     request<unknown>('/agent-presets', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -445,9 +597,88 @@ export interface SessionMessageItem {
     max_context_tokens?: number
     current_context_tokens?: number
   }[] | null
+  attachments: MessageAttachment[] | null
   kb_id: string | null
   kb_ids: string[] | null
   created_at: string
+}
+
+/** 用户消息携带的会话文件附件（发送时绑定的已上传文件快照）。 */
+export interface MessageAttachment {
+  file_id: string
+  filename: string
+  file_size?: number | null
+  file_type?: string | null
+}
+
+// 会话级文件上传（session-file-upload Task 8 / Design C8）
+//
+// 后端入口 /api/sessions/{session_id}/files：
+// - POST  multipart(file)  → 同步建索引，返回 SessionFileResponse
+// - GET                    → 列出本会话已上传文件
+// - DELETE /{file_id}      → 移除单文件并释放配额（204）
+//
+// 鉴权：仅会话所有者本人；非 owner / 非存在 → 后端统一 404（存在性非泄露）。
+// 限制超额：413（FileTooLargeError / UploadCapExceeded），
+// detail 是后端已格式化的友好中文，由 request()/uploadFile() 透传到 toast。
+export interface SessionFileResponse {
+  id: string
+  session_id: string
+  filename: string
+  file_type: string | null
+  file_size: number | null
+  chunk_count: number
+  /** processing | completed | failed —— 同步建索引完成后通常为 completed */
+  status: string
+  created_at: string
+}
+
+// multipart 上传专用：复用 request() 的错误解析（含 413/422 友好中文 detail）
+// 支持传入 AbortSignal，便于上传中途取消（abort 时 fetch 抛 AbortError）。
+async function uploadFile<T>(
+  endpoint: string,
+  formData: FormData,
+  signal?: AbortSignal,
+): Promise<T> {
+  const url = `${BASE_URL}${endpoint}`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+    signal,
+  })
+  if (!response.ok) {
+    if (response.status === 401) handleUnauthorized()
+    const error = await response.json().catch(() => ({}))
+    const detail = error.detail
+    if (Array.isArray(detail)) {
+      const msg = detail
+        .map((d) =>
+          d && typeof d === 'object' && 'field' in d
+            ? `${d.field}=${d.value} 超出允许范围 ${d.allowed_range}`
+            : typeof d === 'string'
+              ? d
+              : JSON.stringify(d)
+        )
+        .join('；')
+      throw new Error(msg || `请求失败: ${response.status}`)
+    }
+    throw new Error(typeof detail === 'string' ? detail : `请求失败: ${response.status}`)
+  }
+  if (response.status === 204) return undefined as T
+  return response.json()
+}
+
+export const sessionFileApi = {
+  list: (sessionId: string) =>
+    request<SessionFileResponse[]>(`/sessions/${sessionId}/files`),
+  upload: (sessionId: string, file: File, signal?: AbortSignal) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return uploadFile<SessionFileResponse>(`/sessions/${sessionId}/files`, fd, signal)
+  },
+  remove: (sessionId: string, fileId: string) =>
+    request<void>(`/sessions/${sessionId}/files/${fileId}`, { method: 'DELETE' }),
 }
 
 // 会话管理接口
@@ -469,4 +700,236 @@ export const sessionApi = {
     request<SessionMessageItem[]>(`/sessions/${id}/messages`),
   clearMessages: (id: string) =>
     request<void>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+}
+
+
+// ============================================================
+// 认证相关接口（tenant-auth）
+// ============================================================
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  must_change_password: boolean
+  is_super_admin: boolean
+}
+
+// 当前登录者的身份摘要（替代旧的 /auth/me/permissions）
+export interface MeResponse {
+  user_id: string
+  tenant_id: string | null
+  is_super_admin: boolean
+  role: 'admin' | 'member' | null
+}
+
+export interface MeProfile {
+  user_id: string
+  username: string
+  tenant_id: string | null
+  tenant_name: string | null
+  is_super_admin: boolean
+  role: string | null
+  role_label: string
+  description: string | null
+  avatar: string | null
+}
+
+export const authApi = {
+  login: (username: string, password: string) =>
+    request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    request<{ detail: string }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
+  me: () => request<MeResponse>('/auth/me'),
+  // 同租户可选用户（用户名模糊搜索，多选用）：任意登录成员可调
+  selectableUsers: (q?: string) =>
+    request<{ id: string; username: string; avatar: string | null }[]>(
+      `/auth/users/selectable${q ? `?q=${encodeURIComponent(q)}` : ''}`
+    ),
+  // 当前登录者资料（左下角展示 + 个人资料页）
+  myProfile: () => request<MeProfile>('/auth/me/profile'),
+  updateMyProfile: (data: { description?: string | null; avatar?: string | null }) =>
+    request<MeProfile>('/auth/me/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  // 是否开放租户自助注册（公开端点，决定登录页是否显示"注册"入口）
+  registrationMode: () => request<{ self_serve: boolean }>('/auth/registration-mode'),
+  // 租户自助注册：开一个独立租户，注册人即该租户管理员
+  register: (username: string, password: string, tenantName: string) =>
+    request<LoginResponse & { tenant_id: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, tenant_name: tenantName }),
+    }),
+}
+
+
+// ============================================================
+// 管理接口（tenant-auth）：平台级租户管理 + 租户级用户/角色管理
+// ============================================================
+
+export interface TenantItem {
+  id: string
+  name: string
+  tenant_type: string
+  is_active: boolean
+  description: string | null
+  avatar: string | null
+}
+
+export interface TenantCreateResult extends TenantItem {
+  admin_username: string
+  admin_temp_password: string | null
+}
+
+export interface AdminUserItem {
+  id: string
+  tenant_id: string | null
+  username: string
+  is_active: boolean
+  must_change_password: boolean
+  role: string | null
+  temp_password: string | null
+  description: string | null
+  avatar: string | null
+}
+
+export interface AdminUserCreateResult extends AdminUserItem {}
+
+export interface AuditLogItem {
+  id: string
+  actor_user_id: string | null
+  actor_username: string | null
+  actor_tenant_id: string | null
+  actor_is_super_admin: boolean
+  actor_role: string | null
+  action: string
+  target_type: string | null
+  target_id: string | null
+  target_name: string | null
+  detail: Record<string, unknown> | null
+  result: string
+  ip: string | null
+  created_at: string
+}
+
+export interface InvitationItem {
+  id: string
+  token: string | null
+  scope: string
+  tenant_id: string | null
+  max_uses: number | null
+  used_count: number
+  expires_at: string
+  is_active: boolean
+  created_by_username: string | null
+  created_at: string
+}
+
+export interface InvitationCreateResult {
+  id: string
+  token: string
+  scope: string
+  tenant_id: string | null
+  expires_at: string
+  max_uses: number | null
+}
+
+export const adminApi = {
+  // —— 租户（Super_Admin / tenant:manage）——
+  listTenants: () => request<TenantItem[]>('/admin/tenants'),
+  createTenant: (name: string, adminUsername: string, adminPassword?: string, description?: string | null, avatar?: string | null) =>
+    request<TenantCreateResult>('/admin/tenants', {
+      method: 'POST',
+      body: JSON.stringify({ name, admin_username: adminUsername, admin_password: adminPassword ?? null, description: description ?? null, avatar: avatar ?? null }),
+    }),
+  setTenantStatus: (tenantId: string, isActive: boolean) =>
+    request<TenantItem>(`/admin/tenants/${tenantId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: isActive }),
+    }),
+  updateTenantProfile: (tenantId: string, data: { name?: string; description?: string | null; avatar?: string | null }) =>
+    request<TenantItem>(`/admin/tenants/${tenantId}/profile`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  listTenantUsers: (tenantId: string) =>
+    request<AdminUserItem[]>(`/admin/tenants/${tenantId}/users`),
+  createTenantAdmin: (tenantId: string, username: string, password?: string) =>
+    request<AdminUserCreateResult>(`/admin/tenants/${tenantId}/admins`, {
+      method: 'POST',
+      body: JSON.stringify({ username, password: password ?? null }),
+    }),
+
+  // —— 用户（user:manage）——
+  listUsers: (params?: { page?: number; page_size?: number; q?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.q) qs.set('q', params.q)
+    return request<PageResult<AdminUserItem>>(`/admin/users?${qs.toString()}`)
+  },
+  createUser: (username: string, password?: string, description?: string | null, avatar?: string | null) =>
+    request<AdminUserCreateResult>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password: password ?? null, description: description ?? null, avatar: avatar ?? null }),
+    }),
+  setUserStatus: (userId: string, isActive: boolean) =>
+    request<AdminUserItem>(`/admin/users/${userId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: isActive }),
+    }),
+  resetPassword: (userId: string) =>
+    request<AdminUserCreateResult>(`/admin/users/${userId}/reset-password`, { method: 'POST' }),
+  transferKnowledgeBases: (userId: string, targetUserId: string) =>
+    request<{ detail: string; transferred_count: number }>(`/admin/users/${userId}/transfer-knowledge-bases`, {
+      method: 'POST',
+      body: JSON.stringify({ target_user_id: targetUserId }),
+    }),
+
+  // —— 审计日志（user:manage 可读；租管限本租户，超管全局）——
+  auditLogs: (params?: { page?: number; page_size?: number; action?: string; actor?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    if (params?.action) qs.set('action', params.action)
+    if (params?.actor) qs.set('actor', params.actor)
+    return request<PageResult<AuditLogItem>>(`/admin/audit-logs?${qs.toString()}`)
+  },
+
+  // —— 邀请链接 ——
+  listInvitations: (params?: { page?: number; page_size?: number }) => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(params?.page ?? 1))
+    qs.set('page_size', String(params?.page_size ?? 20))
+    return request<PageResult<InvitationItem>>(`/admin/invitations?${qs.toString()}`)
+  },
+  createInvitation: (data: { scope: string; expires_in_hours: number; max_uses?: number | null }) =>
+    request<InvitationCreateResult>('/admin/invitations', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  revokeInvitation: (id: string) =>
+    request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
+  // 通过某邀请链接创建的用户（按时间倒序）
+  invitationUsers: (id: string) =>
+    request<{ id: string; username: string; tenant_id: string | null; is_active: boolean; created_at: string }[]>(
+      `/admin/invitations/${id}/users`
+    ),
+}
+
+// 免登录邀请接受（无 token 注入；接受页用）
+export const inviteApi = {
+  info: (token: string) =>
+    request<{ scope: string; tenant_name: string | null; valid: boolean }>(`/invitations/${token}`),
+  accept: (token: string, data: { username: string; password: string; tenant_name?: string; description?: string | null; avatar?: string | null }) =>
+    request<{ detail: string; tenant_id?: string; user_id?: string }>(`/invitations/${token}/accept`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 }

@@ -1,6 +1,8 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
+import { copyToClipboard } from '@/lib/clipboard'
+import { toast } from 'sonner'
 import { FileText, Copy } from 'lucide-react'
 import { documentApi } from '@/lib/api'
 import type { PageResult } from '@/lib/api'
@@ -119,7 +121,7 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
                       )}
                     </div>
                     <button
-                      onClick={() => navigator.clipboard.writeText(chunk.content)}
+                      onClick={() => { copyToClipboard(chunk.content); toast('已复制') }}
                       className="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 cursor-pointer"
                     >
                       <Copy className="h-3 w-3" />

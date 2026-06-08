@@ -9,6 +9,9 @@ from typing import AsyncIterator
 
 import httpx
 
+from app.models.llm.json_field_extractor import JSONFieldExtractor
+from app.models.llm.provider_detect import LLMProviderName, detect_provider
+from app.models.llm.thinking_dialect import apply_thinking
 from app.models.provider import (
     ChatResponse,
     LLMProvider,
@@ -21,7 +24,13 @@ from app.models.provider import (
 class VllmLLM(LLMProvider):
     """vLLM LLM Provider，基于 OpenAI 兼容接口"""
 
-    def __init__(self, base_url: str, model: str, api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "",
+        provider: str | None = None,
+    ):
         """初始化 vLLM 客户端
 
         Args:
@@ -30,15 +39,53 @@ class VllmLLM(LLMProvider):
                       或 https://ark.cn-beijing.volces.com/api/coding/v3
             model: 模型名称
             api_key: API 密钥（远端服务需要）
+            provider: 可选，显式指定模型厂商（thinking 方言分派用）。
+                      为空时根据 base_url 自动检测。前端无需配置——仅在需要覆盖
+                      自动检测时使用。
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        # 模型厂商：决定 thinking 开关注入到请求体的哪个字段（见 thinking_dialect）。
+        # 显式指定优先；否则按 base_url 自动检测。
+        if provider:
+            try:
+                self.provider = LLMProviderName(provider)
+            except ValueError:
+                self.provider = detect_provider(self.base_url, self.model)
+        else:
+            self.provider = detect_provider(self.base_url, self.model)
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        print(f"[vLLM] 初始化 - base_url: {self.base_url}, model: {self.model}, api_key 长度: {len(api_key) if api_key else 0}")
+        print(
+            f"[vLLM] 初始化 - base_url: {self.base_url}, model: {self.model}, "
+            f"provider: {self.provider.value}, api_key 长度: {len(api_key) if api_key else 0}"
+        )
         self._client = httpx.AsyncClient(timeout=120.0, headers=headers)
+
+    def _build_payload(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        """统一构造请求体，并按厂商方言注入 thinking 开关。
+
+        从 kwargs 中拦截 enable_thinking（前端唯一的思考开关），转交 thinking_dialect
+        按厂商写入正确的字段（chat_template_kwargs / 顶层 enable_thinking / thinking.type
+        等），而非盲目拼进顶层 payload。其余 kwargs（temperature、tool_choice 等）透传。
+        """
+        enable_thinking = kwargs.pop("enable_thinking", None)
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            **kwargs,
+        }
+        payload = apply_thinking(
+            payload,
+            enable_thinking,
+            self.base_url,
+            self.model,
+            self.provider,
+        )
+        return payload
 
     async def generate(self, messages: list[dict], **kwargs) -> str:
         """同步生成完整回复
@@ -49,16 +96,11 @@ class VllmLLM(LLMProvider):
         Returns:
             模型生成的完整文本
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 请求 URL: {url}")
-            print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, enable_thinking={payload.get('enable_thinking', 'not set')}")
+            print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, chat_template_kwargs={payload.get('chat_template_kwargs', 'not set')}")
             print(f"[vLLM] Client Headers: {dict(self._client.headers)}")
             resp = await self._client.post(url, json=payload)
             print(f"[vLLM] 实际请求 Headers: {dict(resp.request.headers)}")
@@ -86,12 +128,7 @@ class VllmLLM(LLMProvider):
         Yields:
             模型生成的文本片段
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 流式请求 URL: {url}")
@@ -149,20 +186,20 @@ class VllmLLM(LLMProvider):
         Returns:
             ChatResponse 包含 content、tool_calls、finish_reason、usage
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "tools": tools,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=False, tools=tools, **kwargs)
         # 如果 tools 为空列表，不发送 tools 参数（某些 API 不接受空 tools）
         if not tools:
             payload.pop("tools", None)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] chat_with_tools: {len(tools)} tools, url={url}")
+            print(f"[vLLM] chat_with_tools payload keys: {list(payload.keys())}")
             resp = await self._client.post(url, json=payload)
+            if resp.status_code != 200:
+                print(
+                    f"[vLLM] chat_with_tools 失败 状态码: {resp.status_code}, "
+                    f"响应内容: {resp.text[:1000]}"
+                )
             resp.raise_for_status()
             data = resp.json()
 
@@ -227,13 +264,7 @@ class VllmLLM(LLMProvider):
         Yields:
             StreamChunk 包含 content/tool_calls/finish_reason/response_type
         """
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            "tools": tools,
-            **kwargs,
-        }
+        payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
 
         # 累积 tool_calls 的状态（按 index 存储）
         tool_call_map: dict[int, dict] = {}
@@ -329,47 +360,23 @@ class VllmLLM(LLMProvider):
                             if func_data.get("arguments"):
                                 entry["arguments"] += func_data["arguments"]
 
-                                # 参考 WeKnora: 当 tool_name 是 final_answer 时，
-                                # 将 arguments 增量作为 answer 类型的 StreamChunk 流式发射
-                                # 这样前端可以实时渲染 final_answer 的内容
+                                # 当 tool_name 是 final_answer 时，用 JSONFieldExtractor
+                                # 从增量 arguments 中安全提取 answer 字段，逐 token 作为
+                                # answer 类型流式发射。状态机正确处理跨 chunk 的转义序列，
+                                # 不会吐出残留的反斜杠/半个 \uXXXX（旧手写 replace 链的乱码根因）。
                                 if entry["function_name"] == "final_answer":
-                                    # final_answer 的 arguments 格式: {"answer": "...内容..."}
-                                    # 我们需要从累积的 arguments 中实时提取 answer 值的增量
-                                    # 策略：追踪已发射的长度，只发射新增部分
-                                    args_so_far = entry["arguments"]
-                                    # 尝试找到 answer 值的起始位置
-                                    # 查找 "answer": " 或 "answer":" 后的内容
-                                    answer_start = -1
-                                    for marker in ['"answer": "', '"answer":"']:
-                                        pos = args_so_far.find(marker)
-                                        if pos != -1:
-                                            answer_start = pos + len(marker)
-                                            break
-                                    
-                                    if answer_start > 0:
-                                        # 提取从 answer_start 到末尾的内容（去掉可能的结尾 "} ）
-                                        raw_value = args_so_far[answer_start:]
-                                        # 去掉结尾的 "} 或 "}
-                                        if raw_value.endswith('"}'):
-                                            raw_value = raw_value[:-2]
-                                        elif raw_value.endswith('"'):
-                                            raw_value = raw_value[:-1]
-                                        
-                                        # 处理转义
-                                        raw_value = raw_value.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
-                                        
-                                        # 计算本次增量（相对于上次已发射的长度）
-                                        prev_len = entry.get("_answer_emitted_len", 0)
-                                        if len(raw_value) > prev_len:
-                                            answer_delta = raw_value[prev_len:]
-                                            entry["_answer_emitted_len"] = len(raw_value)
-                                            if answer_delta:
-                                                yield StreamChunk(
-                                                    content=answer_delta,
-                                                    tool_calls=None,
-                                                    finish_reason="",
-                                                    response_type="answer",
-                                                )
+                                    extractor = entry.get("_answer_extractor")
+                                    if extractor is None:
+                                        extractor = JSONFieldExtractor("answer")
+                                        entry["_answer_extractor"] = extractor
+                                    answer_delta = extractor.feed(func_data["arguments"])
+                                    if answer_delta:
+                                        yield StreamChunk(
+                                            content=answer_delta,
+                                            tool_calls=None,
+                                            finish_reason="",
+                                            response_type="answer",
+                                        )
                                     continue
 
                         # 发送 tool_call 类型的 StreamChunk（通知有工具调用进行中）

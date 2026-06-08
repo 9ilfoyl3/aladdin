@@ -3,6 +3,7 @@
 API 服务和 Worker 进程共用的初始化函数，避免代码重复。
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -15,6 +16,29 @@ from app.schema.db import EmbedConfig, OCRConfig
 from app.storage.database import async_session
 
 logger = logging.getLogger(__name__)
+
+
+def configure_thread_pool() -> None:
+    """设置当前事件循环的默认线程池（asyncio.to_thread 使用它）。
+
+    文档解析/切片、pymilvus 同步检索、bcrypt 等阻塞调用都经 asyncio.to_thread
+    卸载到此线程池。默认 executor 上限是 min(32, CPU+4)，CPU 核多的机器够用；
+    但在受限容器里希望显式控量，故由 THREAD_POOL_MAX_WORKERS 配置：
+      0  -> 沿用 Python 默认（不显式设置 executor）
+      >0 -> 固定为该上限
+
+    API 与 Worker 进程各自的事件循环都需调用一次（启动早期、首个 to_thread 之前）。
+    """
+    settings = get_settings()
+    max_workers = settings.thread_pool_max_workers
+    if max_workers and max_workers > 0:
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="artoo-worker")
+        )
+        logger.info("线程池默认 executor 已设上限: max_workers=%d", max_workers)
 
 
 async def load_embed_configs() -> None:
@@ -144,3 +168,22 @@ async def load_ocr_manager() -> OCRManager | None:
     except Exception as e:
         logger.warning("加载 OCR 配置失败: %s", e)
         return None
+
+
+async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
+    """初始化并启动 InvalidationBus 后台订阅（subOnce 防重）。
+
+    API 和 Worker 进程启动时调用，传入各自的 handler 映射。
+    """
+    from app.storage.invalidation import init_invalidation_bus
+
+    bus = await init_invalidation_bus()
+    if bus and bus._redis is not None:
+        # subOnce 防重：bus 单例 + subscribe_loop 内部 _loop_started 守卫，
+        # 即使本函数被重复调用也只会有一个订阅循环（避免多份订阅交替重连刷屏）。
+        if getattr(bus, "_loop_started", False):
+            logger.info("InvalidationBus 后台订阅已在运行，跳过重复启动")
+            return
+        # 后台协程，不阻塞启动
+        asyncio.create_task(bus.subscribe_loop(handlers))
+        logger.info("InvalidationBus 后台订阅已启动")

@@ -1,8 +1,7 @@
 """BPE Token 估算器 - 基于 tiktoken 精确计数
 
-照搬 WeKnora `internal/agent/token/estimator.go` 的实现，使用 tiktoken 的
-cl100k_base 编码进行 BPE token 计数，用于上下文窗口管理中的增量（delta）估算
-与首轮全量估算。
+使用 tiktoken 的 cl100k_base 编码进行 BPE token 计数，用于上下文窗口管理中的
+增量（delta）估算与首轮全量估算。
 
 token 计数的权威来源仍是 LLM API 返回的 usage 字段；本估算器仅在以下场景使用：
 1. Delta 估算：每轮 LLM 调用后追加的新消息（assistant 回复 + tool 结果）的
@@ -22,10 +21,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 每条消息的固定开销（role/content 包装等），照搬 WeKnora perMessageOverhead
+# 每条消息的固定开销（role/content 包装等）
 PER_MESSAGE_OVERHEAD = 3
 
-# 对话尾部的固定开销（assistant 起始标记等），照搬 WeKnora perConversationTail
+# 对话尾部的固定开销（assistant 起始标记等）
 PER_CONVERSATION_TAIL = 3
 
 # 每个 tool_call 的固定开销
@@ -105,7 +104,7 @@ class TokenEstimator:
     def estimate_message(self, msg: dict) -> int:
         """估算单条消息的 token 数
 
-        计算规则（照搬 WeKnora EstimateMessage）：
+        计算规则：
         - 每条消息固定开销 PER_MESSAGE_OVERHEAD(3)
         - 累加 role、content、name 字段的 token 数（缺失/None 视为空）
         - 对 tool_calls 中每个 tool_call，累加其 function.name 和

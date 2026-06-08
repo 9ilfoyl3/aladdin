@@ -1,33 +1,41 @@
-# 部署用 Dockerfile
-# Embedding/Rerank 统一使用远程服务，无需 ML 模型库
+# Artoo 后端镜像（多阶段构建）
+# Embedding/Rerank/OCR 统一使用远程服务，无需 ML 模型库。
 #
-# 示例：
-#   docker build -t artoo-backend .
+#   docker build -t artoo-backend:latest .
 
+# ============ 阶段一：安装依赖 ============
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# build-essential 仅用于个别无预编译 wheel 的包；装在 builder 阶段，不进最终镜像。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 如果下载超时，可加镜像源：
+#   -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+
+# ============ 阶段二：运行镜像 ============
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# 安装运行时系统依赖（不装 build-essential，依赖都有预编译 wheel）
+# 运行时系统依赖：libglib2.0-0（pymupdf 等）、curl（healthcheck）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data
 
-# 创建数据目录
-RUN mkdir -p /app/data
+# 从 builder 复制已装好的 Python 包
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# 安装 Python 依赖
-# 如果下载超时，取消注释下面的镜像源参数：
-#   -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-COPY requirements-base.txt .
-RUN pip install --no-cache-dir --prefer-binary -r requirements-base.txt
-
-# 复制应用源码
 COPY app/ ./app/
 
-# 暴露服务端口
 EXPOSE 8000
 
-# 启动 FastAPI 服务
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

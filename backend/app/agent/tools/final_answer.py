@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.agent.events import AgentEvent, EventBus, EventType
+from app.agent.events import EventBus
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 
@@ -42,15 +42,11 @@ class FinalAnswerTool(BaseTool):
         }
 
     async def execute(self, args: dict) -> ToolResult:
+        # 注意：在 AgentEngine 的 ReAct 循环中，final_answer 调用会被
+        # _analyze_response 拦截并由引擎统一发射 FINAL_ANSWER 事件（含 done 标记）。
+        # 本 execute() 不再发射任何事件，避免与引擎重复发 done；仅作为兜底，
+        # 保证 state 一致并返回成功结果。
         answer = args.get("answer", "")
         self._state.final_answer = answer
         self._state.is_complete = True
-        await self._event_bus.emit(
-            AgentEvent(
-                type=EventType.FINAL_ANSWER,
-                session_id=self._session_id,
-                data={"content": answer},
-                done=True,
-            )
-        )
         return ToolResult(success=True, output="Answer submitted")

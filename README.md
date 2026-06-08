@@ -139,22 +139,22 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 git clone <repo-url>
 cd artoo
 
-# 启动基础设施（Milvus + PostgreSQL + Redis）
-docker compose up -d
-
-# 配置环境变量
+# 配置环境变量（本地开发读 backend/.env）
 cp backend/.env.example backend/.env
-# 编辑 backend/.env，至少配置 LLM_BASE_URL、LLM_MODEL、LLM_API_KEY
+# 编辑 backend/.env：至少填 JWT_SECRET（必填）；LLM / Embedding 可启动后在前端配
 ```
 
-<details>
+<details open>
 <summary><b>macOS / Linux</b></summary>
 
 ```bash
-# 安装依赖（自动创建 .venv）
+# 1. 启动中间件（Milvus + PostgreSQL + Redis；自动暴露端口到本机）
+make infra
+
+# 2. 安装依赖（自动创建 .venv）
 make install
 
-# 启动服务（API + Worker + 前端）
+# 3. 启动服务（API + Worker + 前端，一条命令并行拉起）
 make dev
 ```
 
@@ -163,33 +163,33 @@ make dev
 <details>
 <summary><b>Windows (PowerShell)</b></summary>
 
+Windows 没有 make，分步执行（中间件仍用 Docker）：
+
 ```powershell
-# 创建 Python 环境（必须 3.12）
+# 1. 启动中间件
+docker compose --profile infra up -d
+
+# 2. 创建 Python 环境（必须 3.12）并装依赖
 conda create -n artoo python=3.12 -y
 conda activate artoo
-
-# 安装依赖
 pip install --upgrade pip
 pip install -r backend/requirements.txt
-cd frontend && npm install && cd ..
+cd frontend; npm install; cd ..
 
-# 分三个终端启动
-# 终端 1：API
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 3. 开三个终端分别启动
+# 终端 1：API（端口必须 8000，前端代理写死了它）
+cd backend; python -m uvicorn app.main:app --reload --port 8000
 
 # 终端 2：Worker
-cd backend
-python -m app.worker_main
+cd backend; python -m app.worker_main
 
 # 终端 3：前端
-cd frontend
-npm run dev
+cd frontend; npm run dev
 ```
 
 </details>
 
-启动后访问 **http://localhost:5173** 即可使用。
+启动后访问 **http://localhost:3000** 即可使用。
 
 > **Embedding / Rerank / LLM 都可以启动后再配置。** 通过前端「Embedding & Rerank 配置」「模型管理」页面添加远程服务地址，即时生效无需重启。
 
@@ -197,7 +197,7 @@ npm run dev
 
 | 服务 | 地址 |
 |------|------|
-| 前端界面 | `http://localhost:5173` |
+| 前端界面 | `http://localhost:3000` |
 | API 文档 | `http://localhost:8000/docs` |
 | MCP Server | `http://localhost:8000/mcp` |
 
@@ -208,20 +208,35 @@ npm run dev
 3. **知识库** → 创建 → 上传文档 → 等待 Worker 处理完成
 4. **对话** → 选择知识库与 Agent 预设 → 提问
 
-## 🐳 Docker 部署（生产 / 内网）
+## 🐳 部署打包（生产 / 内网离线）
+
+一份统一 `docker-compose.yml`（`profiles: infra / app`）+ 一份 `.env`，打包与部署都走 `deploy/` 下脚本：
 
 ```bash
-mkdir -p /opt/artoo && cd /opt/artoo
+# ① 在有网的机器构建离线包（应用镜像 + 中间件镜像 + compose + .env.example）
+#    macOS / Linux：
+make build                  # 当前架构
+make build ARCH=arm64       # 指定架构（amd64 | arm64）
+make build-app              # 仅应用镜像的更新包（迭代更新，不含中间件）
 
-docker load -i artoo-backend.tar
-docker load -i artoo-frontend.tar
-# 首次部署还需加载基础设施镜像与模型包
+#    Windows (PowerShell)：
+.\deploy\build.ps1                 # 当前架构
+.\deploy\build.ps1 -Arch arm64     # 指定架构（amd64 | arm64）
+.\deploy\build.ps1 -AppOnly        # 仅应用镜像的更新包
+# 产物均在 dist/
 
-cp .env.example .env && vim .env
-docker compose up -d
+# ② 把 dist/ 整体拷到（Linux）服务器，一键部署
+cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(infra) → 起应用(app)
 ```
 
-镜像打包（ARM64 / AMD64）与内网离线部署详见 [部署运维手册](./DEPLOY_OPERATIONS.md) 与 [macOS 打包指南](./DEPLOYMENT_GUIDE_MAC.md)。
+`install.sh` 首次运行会从 `.env.example` 生成 `.env` 并提示填写必填项（`JWT_SECRET`、`SUPER_ADMIN_*`、`LLM_*`、`EMBED_BASE_URL`、`RERANK_BASE_URL`），填好后再次执行即可拉起全部服务。
+
+手动等价命令（在 `dist/` 内）：
+
+```bash
+docker compose -f docker-compose.yml --profile infra up -d   # 起中间件，等 healthy
+docker compose -f docker-compose.yml --profile app up -d     # 起应用
+```
 
 ## 🔍 检索模式
 
@@ -289,10 +304,11 @@ artoo/
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/                    # React 前端
-├── docker-compose.yml           # 开发基础设施
-├── docker-compose-production.yml
-├── Makefile
-└── scripts/
+├── docker-compose.yml           # 统一编排（profiles: infra / app）
+├── docker-compose.override.yml  # 本地开发覆盖（暴露中间件端口）
+├── deploy/                      # 离线部署（build.sh / install.sh / milvus 调优）
+├── .env.example                 # 部署配置清单
+└── Makefile
 ```
 
 ## 🛠️ 常用命令
@@ -305,18 +321,21 @@ make dev-worker         # 仅 Worker
 make dev-frontend       # 仅前端
 make infra              # 启动基础设施（Milvus + Redis + PostgreSQL）
 make infra-down         # 停止基础设施
-make download-models    # 下载 Embedding / Rerank 模型到本地
 make test               # 运行后端测试
+make build              # 构建离线部署包（deploy/build.sh）
+make build ARCH=arm64   # 指定架构构建（amd64 | arm64）
+make build-app          # 仅应用镜像的更新包（不含中间件）
 ```
+
+## 🚀 部署
+
+完整的生产 / 内网离线部署打包流程见上文 [部署打包](#-部署打包生产--内网离线)。
 
 ## 📘 文档
 
 | 文档 | 说明 |
 |------|------|
 | [技术架构详解](./ARCHITECTURE.md) | ReAct 引擎、工具层、上下文管理、切片策略、OCR 扩展 |
-| [部署运维手册](./DEPLOY_OPERATIONS.md) | 生产部署、运维命令、环境配置 |
-| [macOS 打包指南](./DEPLOYMENT_GUIDE_MAC.md) | Docker 镜像打包与内网部署 |
-| [Windows 开发指南](./DEPLOYMENT_GUIDE.md) | Windows 本地开发环境搭建 |
 
 ## 🗺️ Roadmap
 
@@ -329,7 +348,7 @@ make test               # 运行后端测试
 
 ## 🧭 开发指南
 
-快速开发模式无需每次重建 Docker 镜像：`make infra` 启动基础设施后，分别运行 `make dev-backend`、`make dev-worker`、`make dev-frontend`，后端支持 `--reload` 热重载，前端 Vite 自动热更新。详见 [Windows 开发指南](./DEPLOYMENT_GUIDE.md)。
+快速开发模式无需每次重建 Docker 镜像：`make infra` 启动基础设施后，分别运行 `make dev-backend`、`make dev-worker`、`make dev-frontend`，后端支持 `--reload` 热重载，前端 Vite 自动热更新。Windows 下无 make，按上文「快速开始 → Windows」分三个终端手动启动。
 
 ## 🤝 贡献
 

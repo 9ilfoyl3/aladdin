@@ -10,10 +10,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_platform
 from app.schema.db import OCRConfig
 from app.storage.database import get_db
 
-router = APIRouter(prefix="/api/ocr-configs", tags=["OCR Config"])
+# 能力配置（OCR 服务）属平台底座，全平台一份，仅超级管理员维护
+# （capability-config-to-platform）。OCRConfig 表本就无 tenant_id（全局单份），
+# 此处仅收紧守卫为 require_platform：超管可管，租户管理员不再可见可改。
+router = APIRouter(
+    prefix="/api/ocr-configs",
+    tags=["OCR Config"],
+    dependencies=[Depends(require_platform())],
+)
 
 
 class OCRConfigCreate(BaseModel):

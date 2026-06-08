@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Loader2,
   FileText,
@@ -7,6 +7,7 @@ import {
   Presentation,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { documentApi } from '@/lib/api'
 
 // 文档数据类型
 export interface DocumentItem {
@@ -123,7 +124,40 @@ function getFileExt(filename: string) {
 
 // 文件缩略图预览
 function FileThumbnail({ filename, status, docId }: { filename: string; status: string; docId?: string }) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
   const [imgFailed, setImgFailed] = useState(false)
+
+  // 是否需要加载缩略图：图片/PDF，且非本地上传项、非上传中/排队中状态
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  const canPreview =
+    ['jpg', 'jpeg', 'png', 'pdf'].includes(ext) &&
+    !!docId &&
+    !docId.startsWith('local_') &&
+    status !== 'uploading' &&
+    status !== 'pending'
+
+  // 通过 fetch 带 token 拉取缩略图，转为 blob objectURL 供 <img> 使用；
+  // 卸载或 docId 变化时释放上一个 objectURL，避免内存泄漏。
+  useEffect(() => {
+    if (!canPreview || !docId) return
+    let revoked = false
+    let url: string | null = null
+    documentApi
+      .preview(docId)
+      .then((objectUrl) => {
+        if (revoked) {
+          URL.revokeObjectURL(objectUrl)
+          return
+        }
+        url = objectUrl
+        setThumbUrl(objectUrl)
+      })
+      .catch(() => setImgFailed(true))
+    return () => {
+      revoked = true
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [canPreview, docId])
 
   if (status === 'uploading') {
     return (
@@ -133,16 +167,14 @@ function FileThumbnail({ filename, status, docId }: { filename: string; status: 
     )
   }
 
-  // 图片和 PDF 文件直接显示缩略图（仅非上传中/排队中状态，且未加载失败）
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-  if (['jpg', 'jpeg', 'png', 'pdf'].includes(ext) && docId && !docId.startsWith('local_') && status !== 'pending' && !imgFailed) {
+  // 缩略图加载成功则展示
+  if (canPreview && thumbUrl && !imgFailed) {
     return (
       <div className="w-full h-full">
         <img
-          src={`/api/documents/${docId}/preview`}
+          src={thumbUrl}
           alt={filename}
           className="w-full h-full object-cover rounded-sm"
-          loading="lazy"
           onError={() => setImgFailed(true)}
         />
       </div>
@@ -192,16 +224,21 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
           </div>
         )}
 
-        {/* 非完成状态指示器 - 底部居中 */}
+        {/* 处理中：底部进度条 + 旋转图标，简洁直观 */}
         {doc.status === 'processing' && (
-          <div className="absolute bottom-0 inset-x-0">
-            <div className="h-1 bg-muted/60 rounded-b overflow-hidden">
-              <div
-                className="h-full bg-primary transition-all duration-500 ease-out"
-                style={{ width: `${doc.progress || 0}%` }}
-              />
+          <>
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+              <Loader2 className="h-4 w-4 text-primary/70 animate-spin" />
             </div>
-          </div>
+            <div className="absolute bottom-0 inset-x-0">
+              <div className="h-1.5 bg-muted/60 rounded-b overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all duration-500 ease-out"
+                  style={{ width: `${doc.progress || 0}%` }}
+                />
+              </div>
+            </div>
+          </>
         )}
         {doc.status === 'pending' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
@@ -211,9 +248,12 @@ function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
           </div>
         )}
 
-        {/* 失败状态 - 图标中间显示失败+重试 */}
+        {/* 失败状态 - 图标中间显示失败+重试（hover 显示失败原因） */}
         {doc.status === 'failed' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded"
+            title={doc.error_message || doc.progress_message || '处理失败'}
+          >
             <span className="text-[9px] text-red-500 font-medium">失败</span>
             {onRetry && (
               <button

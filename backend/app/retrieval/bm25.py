@@ -29,7 +29,11 @@ class BM25Retriever(BaseRetriever):
         直接传入文本查询，Milvus 内部自动分词并计算 BM25 分数。
         对于旧 schema 的 collection，返回空列表（优雅降级）。
         """
-        hits = await self.milvus.search_bm25(kb_id, query, top_k, expr=expr)
+        # load_cache_ttl 从 kwargs 取出透传给 milvus（与 vector 侧 ef 处理一致），默认 0 = 每次 load
+        load_cache_ttl = kwargs.pop("load_cache_ttl", 0)
+        hits = await self.milvus.search_bm25(
+            kb_id, query, top_k, expr=expr, load_cache_ttl=load_cache_ttl
+        )
 
         results = [
             RetrievalResult(

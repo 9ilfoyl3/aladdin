@@ -12,6 +12,16 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/artoo"
+    # 数据库连接池（每进程）。单进程连接上限 = pool_size + max_overflow。
+    # 部署须满足：上限 ×（backend 进程数 + worker 进程数）≤ Postgres max_connections
+    # （中间件已设 200）。按服务器内存与并发上调，但别超过 PG 上限。
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+
+    # 线程池（asyncio.to_thread 的默认 executor）。承载同步阻塞调用：
+    # 文档解析/切片、pymilvus 同步检索、bcrypt 口令哈希等。
+    # 0 = 用 Python 默认 min(32, CPU+4)；设正整数则显式固定上限（按 CPU 核数调）。
+    thread_pool_max_workers: int = 0
 
     # Milvus
     milvus_host: str = "localhost"
@@ -97,10 +107,44 @@ class Settings(BaseSettings):
     upload_max_concurrent: int = 3  # 前端并发上传数
     upload_max_file_size_mb: int = 500  # 单文件最大 MB
 
+    # ============================================================
+    # 认证与授权（tenant-rbac-refactor）
+    # ============================================================
+    # 鉴权始终强制：已移除 auth_enabled 旁路后门（清理 E），任何受保护端点缺有效凭据恒 401。
+
+    # JWT（HS256）。jwt_secret 为启动期硬依赖：缺失则在 get_settings() fail-fast。
+    jwt_secret: str = ""
+    jwt_expire_minutes: int = 720  # JWT 有效期（分钟），默认 12 小时
+
+    # Super_Admin 引导（SuperAdminBootstrap）。首次启动且无 Super_Admin 时据此创建，
+    # 并强制改密。缺失时 fail-fast，禁止用默认口令静默兜底。
+    super_admin_username: str = ""
+    super_admin_password: str = ""
+
+    # 注册模式（env 可配置）：
+    #   invite_only（默认）—— 关闭自助注册：登录页无注册入口，/api/auth/register 返回 403；
+    #     建号仅由租户管理员在本租户内创建，或经邀请链接。
+    #   self_serve —— 开放“租户自助注册”：任何人可注册并**自动开通一个独立租户**，
+    #     注册人成为该租户管理员（不暴露/穿透他人租户，符合硬隔离）。
+    registration_mode: str = "invite_only"
+
+    # 超管业务内容可见边界：False（默认）= Super_Admin 不可查看业务内容正文。
+    content_view_boundary_open: bool = False
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    """获取全局配置单例"""
-    return Settings()
+    """获取全局配置单例。
+
+    启动期 fail-fast：jwt_secret 为空即抛 RuntimeError，禁止用空密钥静默兜底进入
+    可服务状态（清理 E 后鉴权始终强制，密钥缺失必须显式失败）。
+    """
+    settings = Settings()
+    if not settings.jwt_secret:
+        raise RuntimeError(
+            "jwt_secret 未配置：请设置环境变量 JWT_SECRET（HS256 签名密钥），"
+            "缺失时服务拒绝启动（fail-fast）。"
+        )
+    return settings

@@ -142,20 +142,18 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 git clone <repo-url>
 cd artoo
 
-# Start infrastructure (Milvus + PostgreSQL + Redis)
-docker compose up -d
-
-# Configure environment
+# Configure environment (local dev reads backend/.env)
 cp backend/.env.example backend/.env
-# Edit backend/.env: at minimum set LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
+# Edit backend/.env: at minimum set JWT_SECRET (required); LLM / Embedding can be set later in the UI
 ```
 
-<details>
+<details open>
 <summary><b>macOS / Linux</b></summary>
 
 ```bash
-make install   # installs deps, auto-creates .venv
-make dev       # starts API + Worker + frontend
+make infra     # 1. start infra (Milvus + PostgreSQL + Redis), ports exposed to host
+make install   # 2. install deps, auto-creates .venv
+make dev       # 3. start API + Worker + frontend in parallel
 ```
 
 </details>
@@ -163,30 +161,33 @@ make dev       # starts API + Worker + frontend
 <details>
 <summary><b>Windows (PowerShell) — three terminals</b></summary>
 
+No `make` on Windows; run the steps manually (infra still via Docker):
+
 ```powershell
+# 1. Start infrastructure
+docker compose --profile infra up -d
+
+# 2. Create Python env (must be 3.12) and install deps
 conda create -n artoo python=3.12 -y
 conda activate artoo
-
 pip install --upgrade pip
 pip install -r backend/requirements.txt
-cd frontend && npm install && cd ..
+cd frontend; npm install; cd ..
 
-# Terminal 1: API
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 3. Start in three terminals
+# Terminal 1: API (port must be 8000 — the frontend proxy hardcodes it)
+cd backend; python -m uvicorn app.main:app --reload --port 8000
 
 # Terminal 2: Worker
-cd backend
-python -m app.worker_main
+cd backend; python -m app.worker_main
 
 # Terminal 3: Frontend
-cd frontend
-npm run dev
+cd frontend; npm run dev
 ```
 
 </details>
 
-Once started, visit **http://localhost:5173**.
+Once started, visit **http://localhost:3000**.
 
 > **Embedding / Rerank / LLM can all be configured after startup** via the frontend "Embedding & Rerank Config" and "Model Management" pages — changes take effect immediately, no restart needed.
 
@@ -194,7 +195,7 @@ Once started, visit **http://localhost:5173**.
 
 | Service | URL |
 |---------|-----|
-| Frontend UI | `http://localhost:5173` |
+| Frontend UI | `http://localhost:3000` |
 | API Docs | `http://localhost:8000/docs` |
 | MCP Server | `http://localhost:8000/mcp` |
 
@@ -205,20 +206,36 @@ Once started, visit **http://localhost:5173**.
 3. **Knowledge Base** → create → upload documents → wait for the Worker to finish processing
 4. **Chat** → select a knowledge base and an Agent preset → ask questions
 
-## 🐳 Docker Deployment (Production / Intranet)
+## 🐳 Packaging & Deployment (Production / Offline Intranet)
+
+A single unified `docker-compose.yml` (`profiles: infra / app`) plus one `.env`; both packaging and deployment go through the scripts under `deploy/`:
 
 ```bash
-mkdir -p /opt/artoo && cd /opt/artoo
+# ① On a networked machine, build the offline package
+#    (app images + infra images + compose + .env.example)
+#    macOS / Linux:
+make build                  # current architecture
+make build ARCH=arm64       # specific arch (amd64 | arm64)
+make build-app              # app-only update package (no infra images)
 
-docker load -i artoo-backend.tar
-docker load -i artoo-frontend.tar
-# First deployment also requires loading infrastructure images and the model package
+#    Windows (PowerShell):
+.\deploy\build.ps1                 # current architecture
+.\deploy\build.ps1 -Arch arm64     # specific arch (amd64 | arm64)
+.\deploy\build.ps1 -AppOnly        # app-only update package
+# output always goes to dist/
 
-cp .env.example .env && vim .env
-docker compose up -d
+# ② Copy the whole dist/ to the (Linux) server and deploy in one shot
+cd dist && ./install.sh     # load images → guide .env → start infra → start app
 ```
 
-Image packaging (ARM64 / AMD64) and offline intranet deployment are detailed in the [Deployment & Operations Guide](./DEPLOY_OPERATIONS.md) and [macOS Packaging Guide](./DEPLOYMENT_GUIDE_MAC.md).
+On first run, `install.sh` generates `.env` from `.env.example` and prompts for the required fields (`JWT_SECRET`, `SUPER_ADMIN_*`, `LLM_*`, `EMBED_BASE_URL`, `RERANK_BASE_URL`); fill them in and run it again to bring everything up.
+
+Manual equivalent (inside `dist/`):
+
+```bash
+docker compose -f docker-compose.yml --profile infra up -d   # start infra, wait until healthy
+docker compose -f docker-compose.yml --profile app up -d     # start app
+```
 
 ## 🔍 Retrieval Modes
 
@@ -286,10 +303,11 @@ artoo/
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/                    # React frontend
-├── docker-compose.yml           # Local dev infrastructure
-├── docker-compose-production.yml
-├── Makefile
-└── scripts/
+├── docker-compose.yml           # Unified orchestration (profiles: infra / app)
+├── docker-compose.override.yml  # Local dev override (exposes infra ports)
+├── deploy/                      # Offline deploy (build.sh / install.sh / milvus tuning)
+├── .env.example                 # Deployment config template
+└── Makefile
 ```
 
 ## 🛠️ Commands
@@ -302,18 +320,21 @@ make dev-worker         # Worker only
 make dev-frontend       # Frontend only
 make infra              # Start infrastructure (Milvus + Redis + PostgreSQL)
 make infra-down         # Stop infrastructure
-make download-models    # Download Embedding / Rerank models locally
 make test               # Run backend tests
+make build              # Build offline deploy package (deploy/build.sh)
+make build ARCH=arm64   # Build for a specific arch (amd64 | arm64)
+make build-app          # App-only update package (no infra images)
 ```
+
+## 🚀 Deployment
+
+See [Packaging & Deployment](#-packaging--deployment-production--offline-intranet) above for the full offline / intranet flow.
 
 ## 📘 Documentation
 
 | Document | Description |
 |----------|-------------|
 | [Technical Architecture](./ARCHITECTURE_EN.md) | ReAct engine, tool layer, context management, chunking, OCR extension |
-| [Deployment & Operations](./DEPLOY_OPERATIONS.md) | Production deployment, operations, configuration |
-| [macOS Packaging Guide](./DEPLOYMENT_GUIDE_MAC.md) | Docker image packaging for intranet deployment |
-| [Windows Developer Guide](./DEPLOYMENT_GUIDE.md) | Windows local dev setup |
 
 ## 🗺️ Roadmap
 
@@ -326,7 +347,7 @@ make test               # Run backend tests
 
 ## 🧭 Developer Guide
 
-Fast development mode requires no Docker rebuilds: run `make infra` for infrastructure, then `make dev-backend`, `make dev-worker`, and `make dev-frontend` separately. The backend supports `--reload` hot-reload and the frontend uses Vite hot module replacement. See the [Windows Developer Guide](./DEPLOYMENT_GUIDE.md).
+Fast development mode requires no Docker rebuilds: run `make infra` for infrastructure, then `make dev-backend`, `make dev-worker`, and `make dev-frontend` separately. The backend supports `--reload` hot-reload and the frontend uses Vite hot module replacement. On Windows there is no `make` — start the three processes manually as shown under Quick Start → Windows.
 
 ## 🤝 Contributing
 

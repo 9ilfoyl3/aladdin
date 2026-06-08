@@ -3,8 +3,10 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { AuthProvider } from '@/lib/auth-context'
 import { SessionProvider } from '@/lib/session-context'
 import { ConfirmProvider } from '@/lib/confirm-context'
+import { ThemeProvider } from '@/lib/theme-context'
 import { Toaster } from '@/components/ui/sonner'
 import './index.css'
 
@@ -22,12 +24,16 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <SessionProvider>
-          <ConfirmProvider>
-            <App />
-            <Toaster position="top-center" />
-          </ConfirmProvider>
-        </SessionProvider>
+        <AuthProvider>
+          <SessionProvider>
+            <ConfirmProvider>
+              <ThemeProvider>
+                <App />
+                <Toaster position="top-center" />
+              </ThemeProvider>
+            </ConfirmProvider>
+          </SessionProvider>
+        </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>,

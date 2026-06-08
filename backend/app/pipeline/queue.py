@@ -16,6 +16,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable
 
 import redis.asyncio as aioredis
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.retry import Retry
 from pydantic import BaseModel
 
 logger = logging.getLogger("pipeline.queue")
@@ -31,6 +35,9 @@ class TaskMessage:
     retry_count: int = 0
     created_at: float = 0.0  # timestamp
     trace_id: str = ""  # UUID4
+    # tenant-auth：冗余/可观测字段。Chunk 盖章的权威来源仍是所属 KB 的 tenant_id
+    # （见 pipeline 与 design 显式兼容清单 C4），此处仅便于追踪与日志。
+    tenant_id: str | None = None
 
 
 class QueueStats(BaseModel):
@@ -359,10 +366,16 @@ class TaskQueue:
                 socket_connect_timeout=5,
                 # socket 读超时必须大于 consume() 的 block 时长（XREADGROUP block=5s 长轮询）。
                 # 否则队列空闲时，客户端会在服务端长轮询返回前先判定读超时，
-                # 持续抛出 "Timeout reading from redis"。取 10s 给足网络往返余量。
-                socket_timeout=10,
-                # 定期 PING 保活，连接异常时自动重连，避免长时间空闲后连接失效。
-                health_check_interval=30,
+                # 持续抛出 "Timeout reading from redis"。取 15s 给足网络往返余量。
+                socket_timeout=15,
+                # 超时/断连后按退避自动重试，避免 stale 连接导致消费循环永久卡死。
+                # redis-py 6.0+ 已废弃 retry_on_timeout，统一用 retry + retry_on_error。
+                retry=Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3),
+                retry_on_error=[RedisConnectionError, RedisTimeoutError],
+                # 注意：health_check_interval 与 XREADGROUP BLOCK 命令在某些
+                # redis-py 版本下冲突（保活 PING 在 block 期间触发导致协议错乱），
+                # 禁用保活，由 retry 负责断线重连。
+                health_check_interval=0,
             )
             # 测试连接
             await client.ping()
@@ -403,6 +416,7 @@ class TaskQueue:
                 retry_count=int(data.get("retry_count", 0)),
                 created_at=float(data.get("created_at", 0.0)),
                 trace_id=data.get("trace_id", ""),
+                tenant_id=data.get("tenant_id"),
             )
             return (mid, task_msg)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

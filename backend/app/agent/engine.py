@@ -3,8 +3,6 @@
 实现 Reasoning + Acting 循环：LLM 自主决策调用工具、分析结果、
 决定是否继续检索或提交最终答案。引擎本身无状态，每次 execute()
 创建新的 AgentState。
-
-参考: WeKnora/internal/agent/engine.go
 """
 
 from __future__ import annotations
@@ -16,18 +14,17 @@ import time
 from dataclasses import dataclass
 
 from app.agent.config import AgentConfig
+from app.agent.content_router import ContentStreamRouter
 from app.agent.events import AgentEvent, EventBus, EventType
-from app.agent.memory.context_manager import (
-    ContextManager,
-    estimate_tokens,
-)
 from app.agent.memory.compress import compress_context
 from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
 from app.agent.tools.base import ToolResult
+from app.agent.tools.final_answer_parse import parse_final_answer_args
 from app.agent.tools.registry import ToolRegistry
+from app.agent.tools.text_sanitize import strip_think_blocks
 from app.models.provider import ChatResponse, LLMProvider, LLMToolCall, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -66,6 +63,13 @@ _KB_TOOL_NAMES = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
 # 历史 KB 结果脱敏占位符
 _KB_REDACTION_MARKER = "[Previous retrieval omitted — please perform a fresh search.]"
 
+# final_answer 参数三级容错解析均失败时的兜底文案。
+# final_answer 是终止信号：即使无法解析也必须结束循环，否则模型会在下一轮看到
+# 工具结果后重复调用 final_answer，向用户输出重复答案。
+_FINAL_ANSWER_PARSE_FALLBACK = (
+    "抱歉，模型输出的最终答案格式异常，无法解析。请重试或换种方式提问。"
+)
+
 
 def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
     """将历史轮次的 KB 检索工具结果替换为脱敏占位符，强制每轮重新检索
@@ -73,8 +77,6 @@ def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
     遍历消息列表，找到 role="tool" 的消息，通过前面 assistant 消息中的
     tool_calls 确定工具名称。如果是 KB 工具且不是最后一组工具调用的结果，
     则替换内容为脱敏标记。
-
-    参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
 
     Args:
         messages: 消息列表（OpenAI 格式）
@@ -143,6 +145,10 @@ class ResponseVerdict:
     should_stop: bool
     reason: str = ""  # "natural_stop" | "final_answer" | "stuck_loop" | "max_iterations"
     content: str = ""
+    # 答案是否已在流式阶段逐 token 作为正文（FINAL_ANSWER）发射给前端。
+    # 仅 final_answer 路径且模型支持增量工具调用时为 True；
+    # natural_stop / Ollama 非增量工具调用 / 兜底文案均为 False，需引擎补发正文。
+    answer_streamed: bool = False
 
 
 class AgentEngine:
@@ -164,8 +170,6 @@ class AgentEngine:
         self._event_bus = event_bus
         # 用于 stuck loop 检测
         self._previous_responses: list[str] = []
-        # 上下文窗口管理器（已废弃，保留字段不再调用 compress_messages）
-        self._context_manager = ContextManager()
         # 三层递进式上下文管理组件
         # ① BPE Token 估算器 ② API Usage 追踪器 ③ LLM 摘要合并器
         self._token_estimator = TokenEstimator()
@@ -230,17 +234,17 @@ class AgentEngine:
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         # 追加历史上下文（redact 历史 KB 工具结果，强制每轮重新检索）
-        # 参考 WeKnora: observe.go buildMessagesWithLLMContext() 中的 redactHistoryKBResults
         if llm_context:
             redacted_context = _redact_history_kb_results(llm_context)
             messages.extend(redacted_context)
-        
-
-        # Query Rewrite: 当有历史上下文时，消解指代词
-        if llm_context:
-            query = await self._rewrite_query(query, llm_context)
 
         # 追加当前用户查询
+        #
+        # 不做前置 Query Rewrite：从不改写 query。指代消解交给带工具的 ReAct
+        # 模型在生成检索参数时自行完成——它能看到完整对话历史，比前置改写更准确，且不会
+        # 把闲聊/确认类输入（"好的"、"谢谢"）脑补成上一轮的问题从而误触发检索。
+        # （单轮检索链路的前置改写在 api/query_understanding.py，仅用于检索、不替换
+        # 答案生成所用的 query，与此处的 Agent 链路不是同一回事。）
         messages.append({"role": "user", "content": query})
 
         # 获取工具定义
@@ -293,7 +297,7 @@ class AgentEngine:
             )
 
             # 1. Think: 调用 LLM（含重试）
-            # 三层递进式上下文管理（参考 WeKnora observe.go manageContextWindow）：
+            # 三层递进式上下文管理：
             # ① UsageTracker 估算当前 token 数（API Usage + BPE Delta）
             # ② MemoryConsolidator 在超过 consolidation 阈值（默认 50%）时用 LLM 摘要早期历史
             # ③ compress_context 在超过 80% 阈值时分组截断兜底
@@ -392,45 +396,51 @@ class AgentEngine:
             verdict = self._analyze_response(response, iteration, session_id)
 
             if verdict.should_stop:
-                # 处理终止
-                if verdict.reason == "final_answer":
-                    state.final_answer = verdict.content
-                elif verdict.reason == "natural_stop":
-                    # 参考 WeKnora: LLM 应该通过 final_answer 工具提交答案
-                    # 如果 LLM 直接停止（natural_stop），追加消息要求它调用 final_answer
-                    # 这样下一轮 LLM 会通过工具提交，实现流式 answer 输出
-                    if iteration < self._config.max_iterations - 1:
-                        logger.info(
-                            "[Agent][Round-%d] Natural stop detected, nudging to call final_answer",
-                            iteration + 1,
-                        )
-                        # 追加 assistant 消息（LLM 的输出）
-                        messages.append({"role": "assistant", "content": response.content})
-                        # 追加 user 消息要求调用 final_answer
-                        messages.append({
-                            "role": "user",
-                            "content": "Please provide your answer by calling the final_answer tool.",
-                        })
-                        step.thought = response.content
-                        state.steps.append(step)
-                        state.current_round += 1
-                        continue
-                    else:
-                        # 已经是最后一轮，接受 content 作为答案
-                        state.final_answer = verdict.content
-                elif verdict.reason == "stuck_loop":
-                    state.final_answer = verdict.content
-                elif verdict.reason == "max_iterations":
-                    pass
+                # max_iterations：交给合成流程（其内部自行流式发射 FINAL_ANSWER）
+                if verdict.reason == "max_iterations":
+                    state.steps.append(step)
+                    state.current_round += 1
+                    await self._synthesize_final_answer(state, session_id)
+                    state.is_complete = True
+                    logger.info(
+                        "[Agent] Stopped: reason=max_iterations, iteration=%d", iteration
+                    )
+                    return
 
+                # final_answer / natural_stop / stuck_loop：答案已确定
+                answer = verdict.content
+                state.final_answer = answer
                 state.is_complete = True
-                step.thought = response.content if not step.thought else step.thought
+                # 注意：不把 response.content 落为 step.thought。
+                # natural_stop 时 content 是答案本身（已作 thought 流式发射、由前端转为
+                # answer 段）；内联 final_answer 时 content 是原始 JSON（不应作为思考持久化）。
+                # 仅保留之前轮次已记录的 step.thought（如有）。
                 state.steps.append(step)
 
-                # 发射 FINAL_ANSWER done 标记
-                # 所有情况下内容都已通过流式发射过（final_answer 通过 answer chunk，
-                # natural_stop/stuck_loop 通过 thought chunk），这里只发 done 标记
-                # 前端收到 done=true 时会把最后的 thought 段落转为 answer 段落
+                # 是否需要补发答案正文（FINAL_ANSWER content）：
+                # 唯一依据是"答案是否已作为正文流式发射"，与具体模型无关。
+                #   • final_answer 标准工具 + 已流式（vLLM 增量解析）→ 仅发 done
+                #   • final_answer 内联文本（千问把 JSON 写成文本）→ 路由器已流式发过
+                #     answer，answer_streamed=True → 仅发 done
+                #   • final_answer 标准工具 + 未流式（Ollama 工具调用非增量返回 / 兜底文案）
+                #     → 补发完整正文，否则前端正文面板为空
+                #   • natural_stop / stuck_loop → content 已作为 thought 流式发射，
+                #     前端在收到 done 时把最后一段 thought 转为 answer，
+                #     此处不补发，避免思考面板与正文面板重复显示同一段内容
+                need_emit_answer = (
+                    verdict.reason == "final_answer"
+                    and not verdict.answer_streamed
+                    and bool(answer)
+                )
+                if need_emit_answer:
+                    await self._event_bus.emit(AgentEvent(
+                        type=EventType.FINAL_ANSWER,
+                        session_id=session_id,
+                        data={"content": answer},
+                        done=False,
+                    ))
+
+                # 统一发射 done 标记
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,
                     session_id=session_id,
@@ -439,9 +449,11 @@ class AgentEngine:
                 ))
 
                 logger.info(
-                    "[Agent] Stopped: reason=%s, iteration=%d",
+                    "[Agent] Stopped: reason=%s, iteration=%d, answer_streamed=%s, emitted_answer=%s",
                     verdict.reason,
                     iteration,
+                    verdict.answer_streamed,
+                    need_emit_answer,
                 )
                 return
 
@@ -499,7 +511,6 @@ class AgentEngine:
     ) -> ChatResponse:
         """流式调用 LLM，实时发射 THOUGHT 事件，含瞬态错误重试
 
-        参考 WeKnora streamThinkingToEventBus：
         - 流式接收 LLM 响应，逐 token 发射 THOUGHT 事件
         - 累积 tool_calls，流结束后构建完整 ChatResponse 返回
         - 如果最终无 tool_calls 且 finish_reason="stop"，说明内容是最终答案
@@ -566,7 +577,6 @@ class AgentEngine:
     ) -> ChatResponse:
         """流式调用 LLM 并实时发射事件到 EventBus
 
-        参考 WeKnora streamLLMToEventBus + streamThinkingToEventBus：
         1. 迭代 StreamChunk，content 实时发射 THOUGHT 事件
         2. 累积 tool_calls（来自最终 chunk）
         3. 流结束后构建 ChatResponse 返回
@@ -577,35 +587,55 @@ class AgentEngine:
         full_content = ""
         tool_calls_accumulated: list[LLMToolCall] = []
         finish_reason = ""
+        answer_streamed = False  # final_answer 的正文是否已逐 token 作为 answer 发射
+        # content 路由器：区分普通 content 是「思考」还是「被写成文本 JSON 的 final_answer」
+        # （千问等弱 function-calling 模型会把 final_answer 调用写成纯文本输出）
+        router = ContentStreamRouter()
+        inline_answer = ""  # 路由器识别出的内联 final_answer 答案文本
 
         async for chunk in self._llm.stream_with_tools(
             messages, tools,
             temperature=self._config.temperature,
             enable_thinking=self._config.thinking_enabled,
         ):
-            # 流式 content → 实时发射 THOUGHT 事件
-            if chunk.content and chunk.response_type in ("content", "thinking"):
+            # 普通 content → 经路由器判别后发射为思考或内联答案
+            if chunk.content and chunk.response_type == "content":
+                full_content += chunk.content
+                kind, text = router.feed(chunk.content)
+                if text and kind == "thought":
+                    await self._event_bus.emit(AgentEvent(
+                        type=EventType.THOUGHT,
+                        session_id=session_id,
+                        data={"content": text, "iteration": iteration},
+                        done=False,
+                    ))
+                elif text and kind == "answer":
+                    answer_streamed = True
+                    inline_answer += text
+                    await self._event_bus.emit(AgentEvent(
+                        type=EventType.FINAL_ANSWER,
+                        session_id=session_id,
+                        data={"content": text},
+                        done=False,
+                    ))
+
+            # reasoning_content（模型原生思考字段）→ 一律思考面板
+            elif chunk.content and chunk.response_type == "thinking":
                 full_content += chunk.content
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.THOUGHT,
                     session_id=session_id,
-                    data={
-                        "content": chunk.content,
-                        "iteration": iteration,
-                    },
+                    data={"content": chunk.content, "iteration": iteration},
                     done=False,
                 ))
 
-            # 流式 final_answer 工具的 arguments → 实时发射 FINAL_ANSWER 事件
-            # 参考 WeKnora: think.go 中 ResponseTypeAnswer + source="final_answer_tool"
-            if chunk.content and chunk.response_type == "answer":
-                full_content += chunk.content
+            # 标准 final_answer 工具的 answer 字段（vLLM 增量解析）→ 答案正文
+            elif chunk.content and chunk.response_type == "answer":
+                answer_streamed = True
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,
                     session_id=session_id,
-                    data={
-                        "content": chunk.content,
-                    },
+                    data={"content": chunk.content},
                     done=False,
                 ))
 
@@ -617,19 +647,33 @@ class AgentEngine:
             if chunk.finish_reason:
                 finish_reason = chunk.finish_reason
 
+        # 冲刷路由器缓冲（流末仍未判定的残留按思考处理）
+        kind, text = router.flush()
+        if text and kind == "thought":
+            await self._event_bus.emit(AgentEvent(
+                type=EventType.THOUGHT,
+                session_id=session_id,
+                data={"content": text, "iteration": iteration},
+                done=False,
+            ))
+
         logger.info(
             "[Agent][Stream] Iteration-%d completed: content=%d chars, "
-            "tool_calls=%d, finish_reason=%s",
+            "tool_calls=%d, finish_reason=%s, answer_streamed=%s, inline_answer=%d chars",
             iteration + 1,
             len(full_content),
             len(tool_calls_accumulated),
             finish_reason,
+            answer_streamed,
+            len(inline_answer),
         )
 
         return ChatResponse(
             content=full_content,
             tool_calls=tool_calls_accumulated,
             finish_reason=finish_reason or "stop",
+            answer_streamed=answer_streamed,
+            inline_answer=inline_answer,
         )
 
     def _analyze_response(
@@ -641,32 +685,50 @@ class AgentEngine:
         """分析 LLM 响应，判断是否应该终止循环
 
         停止条件（按优先级）：
-        1. final_answer: tool_calls 中包含 final_answer 工具
-        2. natural_stop: finish_reason=="stop" 且无 tool_calls
-        3. stuck_loop: 连续 2 轮相同 content 且无 tool_calls
-        4. max_iterations: iteration >= max_iterations - 1
+        1. final_answer (标准工具调用): tool_calls 中包含 final_answer
+        2. final_answer (内联文本): 模型把 final_answer 写成纯文本 JSON（千问等）
+        3. natural_stop: finish_reason=="stop" 且无 tool_calls
+        4. stuck_loop: 连续相同 content 且无 tool_calls
+        5. max_iterations
         """
-        # 检查 final_answer tool call
+        # 1. 标准 final_answer tool call
         if response.tool_calls:
             for tc in response.tool_calls:
                 if tc.function_name == "final_answer":
-                    # 从 arguments 中提取 answer
-                    try:
-                        args = json.loads(tc.arguments)
-                        answer = args.get("answer", "")
-                    except (json.JSONDecodeError, TypeError):
-                        answer = tc.arguments
+                    # 三级容错解析（strict → repair → regex），保证保存与展示的
+                    # 都是答案正文本身，而非畸形的原始 JSON
+                    answer, ok = parse_final_answer_args(tc.arguments)
+                    if not ok:
+                        logger.warning(
+                            "[Agent] Failed to parse final_answer args, using fallback: %s",
+                            tc.arguments[:200],
+                        )
+                        answer = _FINAL_ANSWER_PARSE_FALLBACK
+                    # 剥离模型可能嵌入答案的 <think>…</think> 块
+                    answer = strip_think_blocks(answer)
                     return ResponseVerdict(
                         should_stop=True,
                         reason="final_answer",
                         content=answer,
+                        answer_streamed=response.answer_streamed,
                     )
             # 有 tool_calls 但不是 final_answer → 继续执行
             self._previous_responses = []
             return ResponseVerdict(should_stop=False)
 
+        # 2. 内联 final_answer：模型把 final_answer 调用写成纯文本 JSON 输出
+        #    （流式路由器已将 answer 字段值作为 answer 类型流式发射，answer_streamed=True）
+        if response.inline_answer:
+            answer = strip_think_blocks(response.inline_answer)
+            return ResponseVerdict(
+                should_stop=True,
+                reason="final_answer",
+                content=answer,
+                answer_streamed=True,
+            )
+
         # 无 tool_calls 的情况
-        content = response.content or ""
+        content = strip_think_blocks(response.content or "")
 
         # stuck loop 检测：连续相同 content 且无 tool call
         # REQ-7: 连续 3 轮相同 content 且无 tool call 时自动终止并返回最后内容
@@ -686,11 +748,14 @@ class AgentEngine:
         self._previous_responses.append(content)
 
         # natural_stop: finish_reason=="stop" 且无 tool_calls
+        # content 已在流式阶段作为 THOUGHT 发射（answer_streamed=False），
+        # 终止处理时会补发为答案正文。
         if response.finish_reason == "stop" and not response.tool_calls:
             return ResponseVerdict(
                 should_stop=True,
                 reason="natural_stop",
                 content=content,
+                answer_streamed=False,
             )
 
         # max_iterations 检测
@@ -917,7 +982,7 @@ class AgentEngine:
             ))
             return
 
-        # 尝试调用 LLM 流式生成答案（参考 WeKnora finalize.go）
+        # 尝试调用 LLM 流式生成答案
         try:
             from app.agent.prompts.progressive_rag import render_system_prompt
 
@@ -932,7 +997,7 @@ class AgentEngine:
                 {"role": "user", "content": self._last_query},
             ]
 
-            # 追加所有工具结果作为上下文（参考 WeKnora finalize.go）
+            # 追加所有工具结果作为上下文
             for step in state.steps:
                 for tc_record in step.tool_calls:
                     if tc_record.result and tc_record.result.success and tc_record.result.output:
@@ -941,7 +1006,7 @@ class AgentEngine:
                             "content": f"Tool {tc_record.name} returned: {tc_record.result.output}",
                         })
 
-            # 追加最终答案生成 prompt（参考 WeKnora finalize.go）
+            # 追加最终答案生成 prompt
             synthesis_messages.append({
                 "role": "user",
                 "content": (
@@ -967,7 +1032,8 @@ class AgentEngine:
                     done=False,
                 ))
 
-            state.final_answer = full_answer
+            # 落库前清理可能的 <think> 残留（流式展示已逐 token 发出，此处仅规整存储值）
+            state.final_answer = strip_think_blocks(full_answer)
             # 发射完成标记
             await self._event_bus.emit(AgentEvent(
                 type=EventType.FINAL_ANSWER,
@@ -988,49 +1054,6 @@ class AgentEngine:
             ))
 
         state.is_complete = True
-
-    async def _rewrite_query(self, query: str, llm_context: list[dict]) -> str:
-        """Query Rewrite: 消解指代词，将查询改写为独立可理解的形式
-
-        当历史上下文非空时，调用 LLM 将当前 query 中的指代词
-        （它/这个/上面提到的/那个）替换为具体实体。
-
-        Args:
-            query: 原始用户查询
-            llm_context: 历史对话消息列表
-
-        Returns:
-            改写后的查询（失败时返回原始查询）
-        """
-        try:
-            # 取最近 2 条消息作为历史摘要
-            last_msgs = llm_context[-4:] if len(llm_context) > 4 else llm_context
-            history_text = "\n".join(
-                f"{m['role']}: {m['content'][:200]}" for m in last_msgs
-            )
-
-            rewrite_prompt = (
-                f"将以下问题改写为独立可理解的查询（消解指代词）：\n"
-                f"历史：{history_text}\n"
-                f"当前问题：{query}\n"
-                f"改写后："
-            )
-
-            rewritten = await self._llm.generate(
-                [{"role": "user", "content": rewrite_prompt}]
-            )
-
-            if rewritten and rewritten.strip():
-                logger.info(
-                    "[Agent] Query rewritten: %r -> %r",
-                    query[:50],
-                    rewritten.strip()[:50],
-                )
-                return rewritten.strip()
-        except Exception as e:
-            logger.warning("[Agent] Query rewrite failed, using original: %s", e)
-
-        return query
 
     async def _query_kb_names(self, kb_ids: list[str]) -> list[str]:
         """从数据库查询知识库名称列表

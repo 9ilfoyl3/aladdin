@@ -1,3 +1,4 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -21,7 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
-import type { PageResult } from '@/lib/api'
+import type { PageResult, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
@@ -46,6 +47,7 @@ import FolderBreadcrumb from '@/components/documents/FolderBreadcrumb'
 import NewFolderDialog from '@/components/documents/NewFolderDialog'
 import RenameDialog from '@/components/documents/RenameDialog'
 import ChunkViewer from '@/components/documents/ChunkViewer'
+import KBCapacityBar from '@/components/KBCapacityBar'
 import DocumentGridSkeleton from '@/components/skeletons/DocumentGridSkeleton'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
@@ -57,6 +59,9 @@ import type { FolderData } from '@/components/documents/FolderItem'
 interface KnowledgeBaseItem {
   id: string
   name: string
+  can_write?: boolean | null
+  // 容量进度条（session-file-upload Req 7）
+  capacity?: KBCapacity | null
 }
 
 // 面包屑项
@@ -119,6 +124,11 @@ function Documents() {
     queryFn: () => knowledgeBaseApi.get(kbId!) as Promise<KnowledgeBaseItem>,
     enabled: !!kbId,
   })
+
+  // 当前用户对该库是否有写权限（owner/组织读写/write 共享）。
+  // 只读访客（含管理员看他人私有库）隐藏全部写操作入口（上传/新建/删除/重试/拖拽）。
+  // 后端 get 接口未返回 can_write 时（加载中）默认按只读处理，避免误显示写入口。
+  const canWrite = kb?.can_write === true
 
   // 获取当前目录下的文件夹（分页 + 滚动加载）
   const PAGE_SIZE = 20
@@ -441,11 +451,12 @@ function Documents() {
     }
   }
 
-  // 拖拽事件
+  // 拖拽事件（只读库禁用上传）
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
+    if (!canWrite) return
     setIsDragging(true)
-  }, [])
+  }, [canWrite])
 
   const handleDragLeave = useCallback(() => {
     setIsDragging(false)
@@ -454,8 +465,9 @@ function Documents() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
+    if (!canWrite) return
     handleFileSelect(e.dataTransfer.files)
-  }, [currentFolderId, kbId])
+  }, [currentFolderId, kbId, canWrite])
 
   // 选中项
   function handleSelectFolder(id: string) {
@@ -588,9 +600,9 @@ function Documents() {
           </div>
         </div>
 
-        {/* 操作按钮 */}
+        {/* 操作按钮（只读库隐藏全部写操作入口） */}
         <div className="flex items-center gap-2">
-          {selectionMode ? (
+          {canWrite && (selectionMode ? (
             <>
               <Button
                 variant="outline"
@@ -675,7 +687,7 @@ function Documents() {
                 上传文件夹
               </Button>
             </>
-          )}
+          ))}
           <input
             ref={fileInputRef}
             type="file"
@@ -693,6 +705,13 @@ function Documents() {
           />
         </div>
       </div>
+
+      {/* 容量进度条（chunk 真实度量；接近/已满变色，session-file-upload Req 7） */}
+      {kb?.capacity && (
+        <div className="mb-4 shrink-0 max-w-2xl">
+          <KBCapacityBar capacity={kb.capacity} />
+        </div>
+      )}
 
       {/* 面包屑导航 */}
       <div className="flex items-center justify-between mb-4 shrink-0">
@@ -729,25 +748,31 @@ function Documents() {
             <p className="text-muted-foreground mb-1">
               {currentFolderId ? '此文件夹为空' : '暂无文档'}
             </p>
-            <p className="text-sm text-muted-foreground/70 mb-4">拖拽文件到此处或点击上传按钮</p>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-                className="gap-2 cursor-pointer"
-              >
-                <FolderPlus className="h-4 w-4" />
-                新建文件夹
-              </Button>
-              <Button
-                variant="outline"
-                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-                className="gap-2 cursor-pointer"
-              >
-                <Upload className="h-4 w-4" />
-                选择文件
-              </Button>
-            </div>
+            {canWrite ? (
+              <>
+                <p className="text-sm text-muted-foreground/70 mb-4">拖拽文件到此处或点击上传按钮</p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
+                    className="gap-2 cursor-pointer"
+                  >
+                    <FolderPlus className="h-4 w-4" />
+                    新建文件夹
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                    className="gap-2 cursor-pointer"
+                  >
+                    <Upload className="h-4 w-4" />
+                    选择文件
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground/70">该知识库暂无可查看的文档</p>
+            )}
           </div>
         ) : viewMode === 'grid' ? (
           <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2 animate-in fade-in-0 duration-500">
@@ -767,18 +792,22 @@ function Documents() {
                     <FolderInput className="h-4 w-4 mr-2" />
                     打开
                   </ContextMenuItem>
-                  <ContextMenuItem onClick={() => setRenamingFolder(folder)}>
-                    <Pencil className="h-4 w-4 mr-2" />
-                    重命名
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem
-                    destructive
-                    onClick={() => handleDeleteFolder(folder)}
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    删除文件夹
-                  </ContextMenuItem>
+                  {canWrite && (
+                    <>
+                      <ContextMenuItem onClick={() => setRenamingFolder(folder)}>
+                        <Pencil className="h-4 w-4 mr-2" />
+                        重命名
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        destructive
+                        onClick={() => handleDeleteFolder(folder)}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        删除文件夹
+                      </ContextMenuItem>
+                    </>
+                  )}
                 </ContextMenuContent>
               </ContextMenu>
             ))}
@@ -829,7 +858,7 @@ function Documents() {
                         doc={doc}
                         isSelected={selectionMode ? selectedIds.has(doc.id) : selectedId === doc.id}
                         onSelect={selectionMode ? toggleDocSelection : handleSelectFile}
-                        onRetry={(id) => retryMutation.mutate(id)}
+                        onRetry={canWrite ? (id) => retryMutation.mutate(id) : undefined}
                       />
                     </div>
                   </ContextMenuTrigger>
@@ -843,29 +872,33 @@ function Documents() {
                     </ContextMenuItem>
                     <ContextMenuItem
                       onClick={() => {
-                        navigator.clipboard.writeText(doc.filename)
+                        copyToClipboard(doc.filename)
                         toast('已复制文件名')
                       }}
                     >
                       <Copy className="h-4 w-4 mr-2" />
                       复制文件名
                     </ContextMenuItem>
-                    <ContextMenuSeparator />
-                    {doc.status !== 'processing' && (
-                      <ContextMenuItem
-                        onClick={() => retryMutation.mutate(doc.id)}
-                      >
-                        <RotateCcw className="h-4 w-4 mr-2" />
-                        重新识别
-                      </ContextMenuItem>
+                    {canWrite && (
+                      <>
+                        <ContextMenuSeparator />
+                        {doc.status !== 'processing' && (
+                          <ContextMenuItem
+                            onClick={() => retryMutation.mutate(doc.id)}
+                          >
+                            <RotateCcw className="h-4 w-4 mr-2" />
+                            重新识别
+                          </ContextMenuItem>
+                        )}
+                        <ContextMenuItem
+                          destructive
+                          onClick={() => handleDeleteDocument(doc)}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          删除文件
+                        </ContextMenuItem>
+                      </>
                     )}
-                    <ContextMenuItem
-                      destructive
-                      onClick={() => handleDeleteDocument(doc)}
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      删除文件
-                    </ContextMenuItem>
                   </ContextMenuContent>
                 </ContextMenu>
               )
@@ -999,14 +1032,16 @@ function Documents() {
                             >
                               <Eye className="h-3 w-3" />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer"
-                              onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc) }}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
+                            {canWrite && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer"
+                                onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc) }}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            )}
                           </>
                         )}
                       </div>

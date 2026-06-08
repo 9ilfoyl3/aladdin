@@ -18,12 +18,12 @@ import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 from app.config import get_settings
 from app.models.manager import ModelManager
@@ -41,8 +41,11 @@ from app.schema.db import Chunk, Document, KnowledgeBase
 from app.storage.milvus import MilvusClient
 
 if TYPE_CHECKING:
+    from app.pipeline.chunker import ChunkResult
+    from app.pipeline.embedder import EmbedResult
     from app.pipeline.ocr.manager import OCRManager
     from app.pipeline.ocr.provider import OCRResult
+    from app.session_upload.limits import UploadLimits
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,58 @@ logger = logging.getLogger(__name__)
 class CancelledError(Exception):
     """文档处理被取消（文档已删除或用户主动取消）"""
     pass
+
+
+class UploadCapExceeded(Exception):
+    """容量闸门拒绝：Chunk 阶段后、Embed 前判定本次入库将超过生效 chunk 上限（design C5）。
+
+    在昂贵的 embedding（占用全局并发 slot、用户在线等待）发生前精确拦截并拒绝，零浪费
+    （Req 4.2 / 4.3 / 6.6 / 9.4）。属业务异常（对齐团队规范 ``BusinessException`` 思路），
+    由上层转为明确的用户提示：
+    - KB_Upload（异步）：置文档 ``failed`` 并写 ``error_message``。
+    - Session_Upload（同步）：直接返回拒绝（"内容过多"，不截断、不转异步）。
+
+    Attributes:
+        scope: 闸门口径，``"kb"``（单库 chunk 上限）或 ``"session"``（会话累计 chunk 上限）。
+        cap: 生效上限（Effective_Limit）。
+        used: 该库 / 该会话当前已用 child chunk 数。
+        incoming: 本次精确 child chunk 数（``len(chunk_result.child_chunks)``）。
+    """
+
+    def __init__(self, scope: str, cap: int, used: int, incoming: int):
+        self.scope = scope
+        self.cap = cap
+        self.used = used
+        self.incoming = incoming
+        super().__init__(
+            f"容量超限（{scope}）：已用 {used} + 本次 {incoming} = {used + incoming} "
+            f"超过上限 {cap}"
+        )
+
+
+@dataclass
+class ProcessedDocument:
+    """不依赖 Document 表的同步处理单元产物（design C5）。
+
+    ``DocumentPipeline.process_to_vectors`` 完成 Load→OCR→Clean→Chunk→（Pre_Embed_Gate）→Embed
+    后返回本结构，供会话同步路径（``SessionUploadService``）与正式异步路径（``process``）共用。
+    正式 ``process`` 在该单元外围保留 Document 状态更新 / 取消检查 / Index 写库。
+
+    Attributes:
+        chunk_result: 切分结果（含父块 / 子块 / 父子映射 / 面包屑标题）。
+        enriched_children: 经 Enrich（当前 pass-through）后的子块文本，与 embedding 一一对应。
+        metadata_list: 与 ``enriched_children`` 一一对应的 chunk 元数据。
+        embed_result: 子块的稠密 / 稀疏向量。
+        doc_metadata: 文档级元数据（含 ``ocr_provider`` 等）。
+        child_to_parent: 子→父反向索引（O(1) 查找，Index 阶段构造 parent_id 用）。
+    """
+
+    chunk_result: "ChunkResult"
+    enriched_children: list[str]
+    metadata_list: list["ChunkMetadata"]
+    embed_result: "EmbedResult"
+    doc_metadata: dict
+    child_to_parent: dict[int, int]
 
 
 class DocumentPipeline:
@@ -75,10 +130,321 @@ class DocumentPipeline:
             per_doc_concurrency=settings.pipeline_embed_per_doc_concurrency,
         )
 
+    # ------------------------------------------------------------------
+    # 不依赖 Document 表的同步处理单元（design C5 / Task 6）
+    # ------------------------------------------------------------------
+
+    # 切分阶段警告阈值：子块过多时打 warning（仅信息性，硬闸门由 Pre_Embed_Gate 精确判定）。
+    _CHUNK_COUNT_WARN_THRESHOLD = 50000
+
+    async def process_to_vectors(
+        self,
+        file_path: str,
+        *,
+        source_kind: str,
+        source_id: str,
+        tenant_id: str | None,
+        limits: "UploadLimits",
+        incoming_doc_id: str | None = None,
+    ) -> ProcessedDocument:
+        """执行 Load→OCR→Clean→Chunk→Pre_Embed_Gate→Embed 的同步处理单元（design C5）。
+
+        本方法**不依赖 Document 表**，不调 ``_check_cancelled`` / ``ProgressTracker`` /
+        ``_update_status``，供两条路径共用：
+
+        - 会话同步路径（``SessionUploadService.upload``）：``source_kind="session"``，
+          ``source_id=session_id``。Pre_Embed_Gate 按该会话已用 chunk 累计判定。
+        - 知识库异步路径（``DocumentPipeline.process``）：``source_kind="kb"``，
+          ``source_id=kb_id``。Pre_Embed_Gate 按该知识库已用 chunk 累计判定，
+          ``incoming_doc_id`` 用于排除当前文档自身（重处理场景下避免双计）。
+
+        闸门判定使用精确 ``len(chunk_result.child_chunks)``（Req 4.3 / 6.6 / 9.4），
+        发生在 Embed 之前；超限抛 :class:`UploadCapExceeded`，由上层转为明确提示。
+
+        Args:
+            file_path: 文件路径。
+            source_kind: 来源标识，``"kb"`` 或 ``"session"``。
+            source_id: KB 上传时为 ``kb_id``，会话上传时为 ``session_id``。
+            tenant_id: 租户 ID（None 表示无租户上下文，分块参数走全默认）。
+            limits: 单次上传校验取一次的生效限制快照（同一次校验全程复用，Req 9.3）。
+            incoming_doc_id: KB 上传时本文档 ID，用于聚合时排除自身（避免重处理双计）；
+                会话上传可不传。
+
+        Returns:
+            :class:`ProcessedDocument` 产物（含 chunk_result / enriched_children / metadata_list /
+            embed_result / doc_metadata / child_to_parent），由调用方据此写入索引。
+
+        Raises:
+            UploadCapExceeded: 该 scope 已用 chunk 与本次精确 child chunk 数之和超过生效上限。
+            ValueError: 文档提取文本为空且未配置 OCR 服务。
+        """
+        if source_kind not in ("kb", "session"):
+            raise ValueError(f"非法的 source_kind: {source_kind!r}（仅支持 'kb' / 'session'）")
+
+        ext = Path(file_path).suffix.lstrip(".")
+        loader = get_loader(ext)
+
+        # ─── 1. Load ───
+        # loader.load 是同步 CPU 密集调用（PDF/docx 解析等），丢线程池避免独占事件循环。
+        load_result = await asyncio.to_thread(loader.load, file_path)
+        images_to_cleanup = load_result.images
+        try:
+            # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
+            stripped_content = load_result.content.strip()
+            needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
+            has_embedded_images = bool(load_result.images and self.ocr_manager)
+
+            if needs_ocr:
+                ocr_result = await self._recognize_with_limit(file_path)
+                load_result = LoadResult(
+                    content=ocr_result.full_text,
+                    metadata={
+                        **load_result.metadata,
+                        "ocr_provider": ocr_result.provider_name,
+                    },
+                    images=[],
+                )
+            elif not stripped_content or len(stripped_content) < 10:
+                if not self.ocr_manager:
+                    # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
+                    # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
+                    # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("文档提取文本为空，且未配置 OCR 服务")
+
+            final_content = load_result.content
+            if load_result.images and self.ocr_manager:
+                # 嵌入图片 OCR：与 process() 路径一致（按页插入），
+                # 但 _process_embedded_images 仅把 doc_id 用作日志，无 Document 表副作用。
+                final_content = await self._process_embedded_images(
+                    load_result, doc_id=incoming_doc_id or source_id
+                )
+            elif load_result.images and not self.ocr_manager:
+                logger.warning(
+                    "[%s=%s] 文档包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
+                    source_kind, source_id, len(load_result.images),
+                )
+
+            # ─── 2.5 TextCleaner 去噪 ───
+            # KB 路径按 KnowledgeBase.config.enable_cleaner 决定（默认 True，与既有 process() 一致，
+            # 保留旧行为，避免对历史 KB 的去噪行为产生回归）；会话路径无 KB 配置，统一启用 cleaner
+            # （cleaner 仅去噪、不丢内容，对会话级临时上传安全且与 KB 默认一致）。
+            enable_cleaner = True
+            if source_kind == "kb":
+                async with self.db_session_factory() as kb_session:
+                    kb_row = await kb_session.execute(
+                        select(KnowledgeBase).where(KnowledgeBase.id == source_id)
+                    )
+                    kb_obj = kb_row.scalar_one_or_none()
+                    if kb_obj and kb_obj.config and isinstance(kb_obj.config, dict):
+                        enable_cleaner = kb_obj.config.get("enable_cleaner", True)
+
+            if enable_cleaner:
+                cleaner = TextCleaner()
+                use_page_blocks = load_result.page_blocks if load_result.page_blocks else None
+                if final_content != load_result.content:
+                    # 嵌入图片 OCR 已合并，page_blocks 不再准确（不含图片 OCR 文本）。
+                    use_page_blocks = None
+                final_content = await asyncio.to_thread(
+                    cleaner.clean,
+                    content=final_content,
+                    page_texts=load_result.page_texts if load_result.page_texts else None,
+                    page_blocks=use_page_blocks,
+                )
+
+            # 清洗后兜底 OCR：与 process() 一致
+            cleaned_stripped = final_content.strip()
+            if (
+                (not cleaned_stripped or len(cleaned_stripped) < 10)
+                and self.ocr_manager
+                and not needs_ocr
+            ):
+                ocr_result = await self._recognize_with_limit(file_path)
+                final_content = ocr_result.full_text
+                load_result = LoadResult(
+                    content=final_content,
+                    metadata={
+                        **load_result.metadata,
+                        "ocr_provider": ocr_result.provider_name,
+                    },
+                    images=[],
+                )
+
+            # ─── 3. Chunk ───
+            if load_result.pre_chunked:
+                from app.pipeline.chunker import ChunkResult as _ChunkResult
+
+                pre_chunks = load_result.pre_chunked
+                chunk_result = _ChunkResult(
+                    parent_chunks=pre_chunks,
+                    child_chunks=pre_chunks,
+                    parent_child_map={i: [i] for i in range(len(pre_chunks))},
+                )
+            else:
+                chunker = await self._select_chunker_for_source(
+                    source_kind=source_kind,
+                    source_id=source_id,
+                    tenant_id=tenant_id,
+                    file_type=ext,
+                    content=final_content,
+                )
+                chunk_result = await asyncio.to_thread(
+                    chunker.chunk, final_content, load_result.metadata
+                )
+
+            child_count = len(chunk_result.child_chunks)
+            if child_count > self._CHUNK_COUNT_WARN_THRESHOLD:
+                logger.warning(
+                    "[%s=%s] 子块数量 %d 较多，处理时间可能较长",
+                    source_kind, source_id, child_count,
+                )
+
+            # ─── 3.5 Pre_Embed_Gate 容量闸门（design C5 / Req 4.2 / 4.3 / 6.6 / 9.4） ───
+            # 用精确 child_count（而非估算）在 Embed 之前判定，超限抛 UploadCapExceeded；
+            # KB 与 Session 统一用 kb_chunk_cap（临时文件 = 会话级 KB，共用同一硬上限）。
+            if source_kind == "kb":
+                cap = limits.kb_chunk_cap
+                used = await self._kb_used_chunks(source_id, exclude_doc_id=incoming_doc_id)
+            else:  # source_kind == "session"
+                cap = limits.kb_chunk_cap
+                used = await self._session_used_chunks(source_id)
+
+            if used + child_count > cap:
+                raise UploadCapExceeded(
+                    scope=source_kind, cap=cap, used=used, incoming=child_count
+                )
+
+            # Enrich（当前 pass-through）
+            enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
+
+            # ─── 4. Embed ───
+            extractor = MetadataExtractor()
+            metadata_list = extractor.extract(
+                child_chunks=enriched_children,
+                parent_chunks=chunk_result.parent_chunks,
+                parent_child_map=chunk_result.parent_child_map,
+                doc_metadata=load_result.metadata,
+                page_texts=load_result.page_texts if load_result.page_texts else None,
+            )
+
+            child_to_parent = self._build_child_to_parent_map(chunk_result.parent_child_map)
+            ctx_embedder = ContextualEmbedder()
+            context_headers = chunk_result.context_headers or []
+            embed_texts: list[str] = []
+            for child_idx, (child_text, meta) in enumerate(zip(enriched_children, metadata_list)):
+                parent_idx = child_to_parent.get(child_idx)
+                parent_text = (
+                    chunk_result.parent_chunks[parent_idx] if parent_idx is not None else None
+                )
+                header = context_headers[child_idx] if child_idx < len(context_headers) else None
+                embed_texts.append(
+                    ctx_embedder.build_embed_text(
+                        child_text, meta, parent_text, context_header=header
+                    )
+                )
+
+            # 不传 ProgressTracker / doc_id（会话同步路径无 Document 行；KB 路径外围另行追踪）
+            embed_result = await self._embed_with_progress(
+                embed_texts, tracker=None, doc_id=""
+            )
+
+            return ProcessedDocument(
+                chunk_result=chunk_result,
+                enriched_children=enriched_children,
+                metadata_list=metadata_list,
+                embed_result=embed_result,
+                doc_metadata=load_result.metadata,
+                child_to_parent=child_to_parent,
+            )
+        finally:
+            # 清理图片临时目录：本方法在两条路径下都需兜底清理图片临时目录。
+            # 外围 process() 已不再持有 images 引用（已委托给本方法），故此处必须执行
+            # 清理；_cleanup_image_temp_dirs 对空列表与已删路径均幂等（os.path.exists 守卫）。
+            self._cleanup_image_temp_dirs(images_to_cleanup)
+
+    async def _kb_used_chunks(
+        self, kb_id: str, exclude_doc_id: str | None = None
+    ) -> int:
+        """聚合该知识库当前已用 child chunk 数（``Document.chunk_count`` 之和）。
+
+        用于 KB_Upload 的 Pre_Embed_Gate 判定（design C5）。``exclude_doc_id`` 排除当前
+        正在处理的文档自身——重处理场景下，同一 doc_id 的旧 chunk 会被覆盖（Index 阶段
+        先按 doc_id 删旧向量再写入），不应在闸门里被双计。
+        """
+        async with self.db_session_factory() as session:
+            stmt = select(func.coalesce(func.sum(Document.chunk_count), 0)).where(
+                Document.kb_id == kb_id
+            )
+            if exclude_doc_id is not None:
+                stmt = stmt.where(Document.id != exclude_doc_id)
+            result = await session.execute(stmt)
+            return int(result.scalar_one() or 0)
+
+    async def _session_used_chunks(self, session_id: str) -> int:
+        """聚合该会话当前已用 child chunk 数（``SessionFile.chunk_count`` 之和）。
+
+        用于 Session_Upload 的 Pre_Embed_Gate 判定（design C5 / Req 6.4）。移除文件后
+        ``session_files`` 行被删除，配额自动释放（Req 6.7）。本地导入避免 ``app.pipeline``
+        与 ``app.schema.db`` 形成不必要的顶层耦合（``SessionFile`` 仅在会话路径需要）。
+        """
+        from app.schema.db import SessionFile
+
+        async with self.db_session_factory() as session:
+            result = await session.execute(
+                select(func.coalesce(func.sum(SessionFile.chunk_count), 0)).where(
+                    SessionFile.session_id == session_id
+                )
+            )
+            return int(result.scalar_one() or 0)
+
+    async def _select_chunker_for_source(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        tenant_id: str | None,
+        file_type: str,
+        content: str,
+    ):
+        """为 ``process_to_vectors`` 选择 Chunker，按来源分流：
+
+        - KB 路径：复用既有 ``_select_chunker``（读 KB.config.chunker_type + 租户分块参数）。
+        - 会话路径：无 KB 配置，按 ``ChunkerRouter.select`` 自动路由 + 租户分块参数。
+
+        分块参数（parent/child/overlap）按租户从 ``RetrievalConfig`` 读取（与 KB 路径一致），
+        ``tenant_id`` 为 None → 全默认。
+        """
+        if source_kind == "kb":
+            async with self.db_session_factory() as session:
+                return await self._select_chunker(session, source_id, file_type, content)
+
+        # 会话路径：无 KB 配置，直接路由 + 按租户读分块参数
+        from app.retrieval.config import get_retrieval_config_store
+
+        cfg = await get_retrieval_config_store().get_effective(tenant_id)
+        chunk_kwargs = {
+            "parent_size": cfg.parent_chunk_size,
+            "child_size": cfg.child_chunk_size,
+            "overlap": cfg.chunk_overlap,
+        }
+        selected_type = ChunkerRouter.select(file_type, content)
+        logger.info(
+            "[session=%s] 自动路由 chunker_type=%s (file_type=%s)",
+            source_id, selected_type, file_type,
+        )
+        # 仅 naive 类型接受 chunk 参数
+        kwargs = chunk_kwargs if selected_type == "naive" else {}
+        return ChunkerFactory.create(selected_type, **kwargs)
+
     async def process(
         self, file_path: str, doc_id: str, kb_id: str, trace_id: str | None = None
     ) -> None:
         """完整文档处理流程
+
+        Load→OCR→Clean→Chunk→Pre_Embed_Gate→Embed 委托给 :meth:`process_to_vectors`
+        （不依赖 Document 表的同步处理单元，design C5 / Task 6）；本方法在其外围保留
+        Document 表状态更新 / 取消检查 / Index 写库（Chunk 写 SQLite + 向量写 Milvus）。
 
         Args:
             file_path: 文件路径
@@ -101,7 +467,7 @@ class DocumentPipeline:
 
         pipeline_start = time.monotonic()
         current_stage = PipelineStage.LOAD
-        images_to_cleanup: list[EmbeddedImage] = []
+        processed: ProcessedDocument | None = None
 
         async with self.db_session_factory() as session:
             try:
@@ -109,262 +475,53 @@ class DocumentPipeline:
                 await self._update_status(session, doc_id, "processing")
                 await session.commit()
 
-                # ─── 1. Load 阶段 ───
+                # 取一次租户级生效限制快照（KB 路径仅消费 kb_chunk_cap，由 process_to_vectors
+                # 内部用于 Pre_Embed_Gate 判定；Req 9.3 单次校验全程复用）。
+                # tenant_id 以 KnowledgeBase.tenant_id 为权威来源（Worker 无请求上下文）。
+                from app.session_upload.limits import get_upload_limit_resolver
+
+                kb_tenant_result = await session.execute(
+                    select(KnowledgeBase.tenant_id).where(KnowledgeBase.id == kb_id)
+                )
+                kb_tenant_id = kb_tenant_result.scalar_one_or_none()
+                limits = await get_upload_limit_resolver().resolve(kb_tenant_id)
+
+                # ─── 1–4. Load → OCR → Clean → Chunk → Pre_Embed_Gate → Embed ───
+                # 委托给不依赖 Document 表的同步处理单元（design C5）。
+                # Pre_Embed_Gate 在 Embed 之前用精确 child chunk 数判定单库容量
+                # （Req 4.2 / 4.3 / 9.4）；超限抛 UploadCapExceeded，由下方 except 分支
+                # 置文档 failed 并写明确 error_message。
                 current_stage = PipelineStage.LOAD
                 await tracker.start_stage(PipelineStage.LOAD, "正在加载文档")
                 stage_start = time.monotonic()
 
-                ext = Path(file_path).suffix.lstrip(".")
-                loader = get_loader(ext)
-                print(f"[Pipeline] 文档 {doc_id} 开始加载，类型: {ext}")
-                load_result = loader.load(file_path)
-                images_to_cleanup = load_result.images
-                print(f"[Pipeline] 文档 {doc_id} 加载完成，内容长度: {len(load_result.content)}")
-                logger.info("文档 %s 加载完成，内容长度: %d", doc_id, len(load_result.content))
+                # 取消检查：Load 前先看一次（process_to_vectors 内部不查 Document 表）。
+                await self._check_cancelled(doc_id)
 
-                load_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                processed = await self.process_to_vectors(
+                    file_path,
+                    source_kind="kb",
+                    source_id=kb_id,
+                    tenant_id=kb_tenant_id,
+                    limits=limits,
+                    incoming_doc_id=doc_id,
+                )
+
+                # process_to_vectors 一次性走完 Load→Embed；按既有进度模型把各阶段标完成
+                # （进度粒度由"逐阶段"退化为"批量完成"，但前端 0–100 进度仍单调推进）。
+                load_to_embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
                 await tracker.complete_stage(PipelineStage.LOAD)
-                pl.stage_complete(
-                    stage="load",
-                    duration_ms=load_duration_ms,
-                    input_size=1,  # 1 个文件
-                    output_size=len(load_result.content),
-                )
-
-                # ─── 2. OCR 阶段 ───
-                await self._check_cancelled(doc_id)
-                current_stage = PipelineStage.OCR
-                stripped_content = load_result.content.strip()
-                needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
-                has_embedded_images = bool(load_result.images and self.ocr_manager)
-
-                if needs_ocr or has_embedded_images:
-                    await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别")
-                    stage_start = time.monotonic()
-
-                    if needs_ocr:
-                        print(f"[Pipeline] 文档 {doc_id} 文本为空或过短(长度={len(stripped_content)})，触发整文件 OCR")
-                        ocr_result = await self._recognize_with_limit(file_path)
-                        load_result = LoadResult(
-                            content=ocr_result.full_text,
-                            metadata={
-                                **load_result.metadata,
-                                "ocr_provider": ocr_result.provider_name,
-                            },
-                            images=[],
-                        )
-                        print(f"[Pipeline] 文档 {doc_id} OCR 完成, Provider: {ocr_result.provider_name}, 文本长度: {len(ocr_result.full_text)}")
-                        logger.info(
-                            "文档 %s 通过 OCR (%s) 获取文本，长度: %d",
-                            doc_id, ocr_result.provider_name, len(ocr_result.full_text),
-                        )
-                    elif not stripped_content or len(stripped_content) < 10:
-                        # 文本为空且无 OCR manager
-                        raise ValueError("文档提取文本为空，且未配置 OCR 服务")
-
-                    # 处理嵌入图片
-                    final_content = load_result.content
-                    if load_result.images and self.ocr_manager:
-                        final_content = await self._process_embedded_images(
-                            load_result, doc_id
-                        )
-                    elif load_result.images and not self.ocr_manager:
-                        logger.warning(
-                            "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
-                            doc_id, len(load_result.images),
-                        )
-                    else:
-                        final_content = load_result.content
-
-                    ocr_duration_ms = int((time.monotonic() - stage_start) * 1000)
-                    await tracker.complete_stage(PipelineStage.OCR)
-                    pl.stage_complete(
-                        stage="ocr",
-                        duration_ms=ocr_duration_ms,
-                        input_size=len(stripped_content),
-                        output_size=len(final_content),
-                    )
-                else:
-                    # 跳过 OCR 阶段
-                    if not stripped_content or len(stripped_content) < 10:
-                        if not self.ocr_manager:
-                            raise ValueError("文档提取文本为空，且未配置 OCR 服务")
-
-                    final_content = load_result.content
-                    if load_result.images and not self.ocr_manager:
-                        logger.warning(
-                            "文档 %s 包含 %d 张嵌入图片，但未配置 OCR 服务，图片内容将被忽略",
-                            doc_id, len(load_result.images),
-                        )
-
-                    await tracker.skip_stage(PipelineStage.OCR)
-
-                # ─── 2.5 TextCleaner 去噪阶段 ───
-                # 从知识库 config 读取 enable_cleaner 开关（默认 True）
-                enable_cleaner = True
-                result_kb = await session.execute(
-                    select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-                )
-                kb_obj = result_kb.scalar_one_or_none()
-                if kb_obj and kb_obj.config and isinstance(kb_obj.config, dict):
-                    enable_cleaner = kb_obj.config.get("enable_cleaner", True)
-
-                if enable_cleaner:
-                    cleaner = TextCleaner()
-                    # 如果 final_content 经过了嵌入图片 OCR 合并，page_blocks 不再准确
-                    # （page_blocks 只包含 pymupdf 提取的原始文本块，不含图片 OCR 文本）
-                    use_page_blocks = load_result.page_blocks if load_result.page_blocks else None
-                    if final_content != load_result.content:
-                        use_page_blocks = None
-                    final_content = cleaner.clean(
-                        content=final_content,
-                        page_texts=load_result.page_texts if load_result.page_texts else None,
-                        page_blocks=use_page_blocks,
-                    )
-                    logger.info(
-                        "文档 %s TextCleaner 去噪完成，文本长度: %d",
-                        doc_id, len(final_content),
-                    )
-
-                # ─── 2.6 清洗后文本为空时，尝试整文件 OCR 兜底 ───
-                cleaned_stripped = final_content.strip()
-                if (not cleaned_stripped or len(cleaned_stripped) < 10) and self.ocr_manager and not needs_ocr:
-                    print(f"[Pipeline] 文档 {doc_id} 清洗后文本为空或过短(长度={len(cleaned_stripped)})，触发整文件 OCR 兜底")
-                    logger.info(
-                        "文档 %s 清洗后文本为空，触发整文件 OCR 兜底", doc_id
-                    )
-                    # 之前没有走过整文件 OCR，现在补做
-                    await tracker.start_stage(PipelineStage.OCR, "正在进行 OCR 识别（清洗后兜底）")
-                    stage_start = time.monotonic()
-
-                    ocr_result = await self._recognize_with_limit(file_path)
-                    final_content = ocr_result.full_text
-                    load_result = LoadResult(
-                        content=final_content,
-                        metadata={
-                            **load_result.metadata,
-                            "ocr_provider": ocr_result.provider_name,
-                        },
-                        images=[],
-                    )
-                    print(f"[Pipeline] 文档 {doc_id} OCR 兜底完成, Provider: {ocr_result.provider_name}, 文本长度: {len(final_content)}")
-
-                    ocr_duration_ms = int((time.monotonic() - stage_start) * 1000)
-                    await tracker.complete_stage(PipelineStage.OCR)
-                    pl.stage_complete(
-                        stage="ocr",
-                        duration_ms=ocr_duration_ms,
-                        input_size=0,
-                        output_size=len(final_content),
-                    )
-
-                # ─── 3. Chunk 阶段 ───
-                await self._check_cancelled(doc_id)
-                current_stage = PipelineStage.CHUNK
-                await tracker.start_stage(PipelineStage.CHUNK, "正在切分文档")
-                stage_start = time.monotonic()
-
-                print(f"[Pipeline] 文档 {doc_id} 开始分块，文本长度: {len(final_content)}")
-
-                if load_result.pre_chunked:
-                    pre_chunks = load_result.pre_chunked
-                    from app.pipeline.chunker import ChunkResult
-                    chunk_result = ChunkResult(
-                        parent_chunks=pre_chunks,
-                        child_chunks=pre_chunks,
-                        parent_child_map={i: [i] for i in range(len(pre_chunks))},
-                    )
-                    print(f"[Pipeline] 文档 {doc_id} 使用 loader 预切分，共 {len(pre_chunks)} 个 chunk")
-                else:
-                    # 选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
-                    chunker = await self._select_chunker(session, kb_id, ext, final_content)
-                    chunk_result = chunker.chunk(final_content, load_result.metadata)
-                    print(f"[Pipeline] 文档 {doc_id} 分块完成，父块: {len(chunk_result.parent_chunks)}，子块: {len(chunk_result.child_chunks)}")
-
-                if len(chunk_result.child_chunks) > 50000:
-                    print(f"[Pipeline] ⚠️ 文档 {doc_id} 子块数量较多: {len(chunk_result.child_chunks)}，处理时间可能较长")
-                    logger.warning(
-                        "文档 %s 子块数量 %d，处理时间可能较长",
-                        doc_id, len(chunk_result.child_chunks),
-                    )
-
-                # Enrich（当前为 pass-through）
-                enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
-
-                chunk_duration_ms = int((time.monotonic() - stage_start) * 1000)
+                await tracker.skip_stage(PipelineStage.OCR)
                 await tracker.complete_stage(PipelineStage.CHUNK)
-                pl.stage_complete(
-                    stage="chunk",
-                    duration_ms=chunk_duration_ms,
-                    input_size=len(final_content),
-                    output_size=len(enriched_children),
-                )
-
-                # ─── 4. Embed 阶段 ───
-                await self._check_cancelled(doc_id)
-                current_stage = PipelineStage.EMBED
-                await tracker.start_stage(
-                    PipelineStage.EMBED,
-                    f"正在生成向量 (共 {len(enriched_children)} 个文本块)",
-                )
-                stage_start = time.monotonic()
-
-                print(f"[Pipeline] 文档 {doc_id} 开始 embedding，共 {len(enriched_children)} 个子块")
-
-                # 提取元数据（供上下文增强和 Index 阶段使用）
-                extractor = MetadataExtractor()
-                metadata_list = extractor.extract(
-                    child_chunks=enriched_children,
-                    parent_chunks=chunk_result.parent_chunks,
-                    parent_child_map=chunk_result.parent_child_map,
-                    doc_metadata=load_result.metadata,
-                    page_texts=load_result.page_texts if load_result.page_texts else None,
-                )
-                print(f"[Pipeline] 文档 {doc_id} 元数据提取完成，共 {len(metadata_list)} 条")
-
-                # 使用 ContextualEmbedder 构造上下文增强的 embedding 输入
-                # 构建子→父反向索引（O(1) 查找，避免 O(n²) 遍历）
-                child_to_parent = self._build_child_to_parent_map(chunk_result.parent_child_map)
-                ctx_embedder = ContextualEmbedder()
-                embed_texts = []
-                # 获取 context_headers（与 child_chunks 一一对应）
-                context_headers = chunk_result.context_headers or []
-                for child_idx, (child_text, meta) in enumerate(zip(enriched_children, metadata_list)):
-                    parent_idx = child_to_parent.get(child_idx)
-                    parent_text = chunk_result.parent_chunks[parent_idx] if parent_idx is not None else None
-                    header = context_headers[child_idx] if child_idx < len(context_headers) else None
-                    embed_text = ctx_embedder.build_embed_text(child_text, meta, parent_text, context_header=header)
-                    embed_texts.append(embed_text)
-                print(f"[Pipeline] 文档 {doc_id} 上下文增强构造完成，共 {len(embed_texts)} 个文本，准备调用 _embed_with_progress")
-                import sys
-                sys.stdout.flush()
-
-                # 使用增强后的文本进行 embedding
-                embed_result = await self._embed_with_progress(
-                    embed_texts, tracker, doc_id
-                )
-
-                embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
                 await tracker.complete_stage(PipelineStage.EMBED)
 
-                # 计算 embed 阶段额外统计
-                batch_size = self.embedder.batch_size
-                total_chunks = len(enriched_children)
-                batch_count = (total_chunks + batch_size - 1) // batch_size
-                avg_batch_duration_ms = (
-                    embed_duration_ms // batch_count if batch_count > 0 else 0
-                )
-
+                child_count = len(processed.enriched_children)
                 pl.stage_complete(
-                    stage="embed",
-                    duration_ms=embed_duration_ms,
-                    input_size=len(enriched_children),
-                    output_size=len(enriched_children),
-                    batch_count=batch_count,
-                    total_chunks=total_chunks,
-                    avg_batch_duration_ms=avg_batch_duration_ms,
+                    stage="load_to_embed",
+                    duration_ms=load_to_embed_duration_ms,
+                    input_size=1,
+                    output_size=child_count,
                 )
-                print(f"[Pipeline] 文档 {doc_id} embedding 完成")
 
                 # ─── 5. Index 阶段 ───
                 await self._check_cancelled(doc_id)
@@ -372,7 +529,16 @@ class DocumentPipeline:
                 await tracker.start_stage(PipelineStage.INDEX, "正在写入索引")
                 stage_start = time.monotonic()
 
-                print(f"[Pipeline] 文档 {doc_id} 开始写入索引，父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}")
+                chunk_result = processed.chunk_result
+                enriched_children = processed.enriched_children
+                metadata_list = processed.metadata_list
+                embed_result = processed.embed_result
+                child_to_parent = processed.child_to_parent
+
+                print(
+                    f"[Pipeline] 文档 {doc_id} 开始写入索引，"
+                    f"父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}"
+                )
 
                 # 获取文档文件名，用于 BM25 content 前缀增强
                 doc_result = await session.execute(
@@ -382,9 +548,9 @@ class DocumentPipeline:
                 # 去掉文件扩展名，只保留文档名称
                 doc_title = Path(doc_filename).stem if doc_filename else ""
 
-                parent_ids: list[str] = []
-                for i in range(len(chunk_result.parent_chunks)):
-                    parent_ids.append(str(uuid.uuid4()))
+                parent_ids: list[str] = [
+                    str(uuid.uuid4()) for _ in range(len(chunk_result.parent_chunks))
+                ]
 
                 # 写入父 chunk 到 SQLite
                 for idx, (pid, content) in enumerate(
@@ -397,13 +563,12 @@ class DocumentPipeline:
                         parent_id=None,
                         content=content,
                         chunk_index=idx,
+                        tenant_id=kb_tenant_id,
                     )
                     session.add(parent_chunk)
 
                 # 写入子 chunk 到 SQLite + Milvus
                 milvus_data: list[dict] = []
-                child_count = len(enriched_children)
-
                 for child_idx, child_text in enumerate(enriched_children):
                     child_id = str(uuid.uuid4())
 
@@ -422,6 +587,7 @@ class DocumentPipeline:
                         content=child_text,
                         chunk_index=child_idx,
                         chunk_metadata=chunk_metadata_dict,
+                        tenant_id=kb_tenant_id,
                     )
                     session.add(child_chunk)
 
@@ -444,20 +610,24 @@ class DocumentPipeline:
 
                 # 确保 collection 存在
                 if not await self.milvus.has_collection(kb_id):
-                    await self.milvus.create_collection(kb_id)
+                    # 新建 collection 时按**该知识库所属租户**的检索配置 HNSW 建索引参数生效
+                    # （存量 collection 不受影响，不触发重建）。kb_tenant_id 已在本阶段开头
+                    # 反查得到；取不到租户 → get_effective(None) 全默认（128/16）。
+                    from app.retrieval.config import get_retrieval_config_store
+
+                    cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+                    await self.milvus.create_collection(
+                        kb_id,
+                        ef_construction=cfg.hnsw_ef_construction,
+                        m=cfg.hnsw_m,
+                    )
 
                 # 写入前先清理本文档可能残留的旧向量（幂等，治本去孤儿）。
                 # 覆盖三类重处理场景：手动 retry、批量 retry、机制 A 崩溃重投。
                 # 上一次处理若在本阶段分批写入途中被硬杀（OOM/SIGKILL），
                 # 已写入的批次会成为孤儿向量（DB 未 commit 故无对应 chunk 记录），
                 # 且本次 chunk_id 全新，不覆盖旧向量。先按 doc_id 删一次确保干净。
-                try:
-                    await self.milvus.delete_by_doc_id(kb_id, doc_id)
-                except Exception as e:
-                    logger.warning(
-                        "文档 %s 写入前清理旧向量失败（非致命，继续写入）: %s",
-                        doc_id, e,
-                    )
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
 
                 # 检查 collection schema 版本，兼容旧 schema
                 schema_info = await self.milvus.check_schema_version(kb_id)
@@ -469,6 +639,9 @@ class DocumentPipeline:
 
                 # 批量写入 Milvus
                 if milvus_data:
+                    # Index 写 Milvus 前再查一次取消（复用既有 _check_cancelled）
+                    await self._check_cancelled(doc_id)
+
                     batch_size = 1000
                     total = len(milvus_data)
                     if total <= batch_size:
@@ -477,6 +650,9 @@ class DocumentPipeline:
                     else:
                         print(f"[Pipeline] 文档 {doc_id} 分批写入 Milvus，共 {total} 条向量，每批 {batch_size} 条")
                         for i in range(0, total, batch_size):
+                            # 大批量分批写入时，批次间查取消（对齐 embed 阶段每 N 批查一次）
+                            if i > 0 and (i // batch_size) % 10 == 0:
+                                await self._check_cancelled(doc_id)
                             batch = milvus_data[i:i + batch_size]
                             await self.milvus.insert(kb_id, batch)
                             if (i // batch_size + 1) % 10 == 0:
@@ -497,6 +673,12 @@ class DocumentPipeline:
                 await session.commit()
                 await tracker.complete()
 
+                # 通知其他进程：该知识库有新文档入库（跨进程失效广播）
+                from app.storage.invalidation import get_invalidation_bus
+                bus = get_invalidation_bus()
+                if bus:
+                    await bus.publish("kb_data", kb_id)
+
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
 
@@ -513,20 +695,38 @@ class DocumentPipeline:
 
                 # 清理可能已写入 Milvus 的孤儿向量
                 # （Index 阶段分批写入时被取消，部分批次已写入 Milvus 但 DB 已 rollback）
-                try:
-                    await self._cleanup_milvus_on_cancel(kb_id, doc_id)
-                except Exception as cleanup_err:
-                    logger.warning(
-                        "文档 %s 取消后清理 Milvus 失败（非致命）: %s",
-                        doc_id, cleanup_err,
-                    )
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
                 # 不标记失败，不 re-raise（任务静默终止）
+
+            except UploadCapExceeded as cap_err:
+                # KB 异步路径的容量闸门拒绝：发生在 Embed 之前（design C5 / Req 4.2），
+                # 不会写入任何向量；此处仅置 Document failed + 写明确 error_message
+                # 供前端展示；不调用孤儿清理（无向量可清）。
+                print(f"[Pipeline] 文档 {doc_id} 容量超限拒绝: {cap_err}")
+                logger.warning("文档 %s 容量超限拒绝: %s", doc_id, cap_err)
+                await session.rollback()
+
+                error_message = (
+                    f"知识库容量超限：本次 {cap_err.incoming} 个 chunk + 已用 "
+                    f"{cap_err.used} 个 chunk 超过单库上限 {cap_err.cap}"
+                )
+                await tracker.fail(current_stage, error_message)
+
+                async with self.db_session_factory() as err_session:
+                    await self._update_status(
+                        err_session, doc_id, "failed", error_message=error_message
+                    )
+                    await err_session.commit()
+                # 不 re-raise：业务异常，已落地状态，外围 Worker 不需进入失败重试。
 
             except Exception as e:
                 import traceback
                 print(f"[Pipeline] 文档 {doc_id} 处理失败: {type(e).__name__}: {e}")
                 traceback.print_exc()
                 await session.rollback()
+
+                # 清理可能已写入 Milvus 的孤儿向量（与 CancelledError 分支一致）
+                await self._cleanup_milvus_orphans(kb_id, doc_id)
 
                 # 进度追踪：标记失败（progress 值不变）
                 await tracker.fail(current_stage, f"{type(e).__name__}: {e}")
@@ -538,17 +738,15 @@ class DocumentPipeline:
                     await err_session.commit()
                 logger.error("文档 %s 处理失败: %s", doc_id, e)
                 raise
-            finally:
-                # 清理图片临时目录
-                self._cleanup_image_temp_dirs(images_to_cleanup)
 
     async def _select_chunker(
         self, session: AsyncSession, kb_id: str, file_type: str, content: str
     ):
         """选择 Chunker：优先使用知识库 config 中的 chunker_type，否则自动路由
 
-        从系统配置读取 chunk 参数（parent_chunk_size, child_chunk_size, chunk_overlap）
-        传递给 Chunker 实例。
+        分块参数（parent_chunk_size, child_chunk_size, chunk_overlap）按**该知识库所属
+        租户**从 RetrievalConfig 读取并传递给 Chunker 实例（Worker 无请求级租户上下文，
+        以 KnowledgeBase.tenant_id 为权威来源反查；取不到租户回落全默认）。
 
         Args:
             session: 数据库会话
@@ -559,19 +757,27 @@ class DocumentPipeline:
         Returns:
             BaseChunker 实例
         """
-        settings = get_settings()
-        chunk_kwargs = {
-            "parent_size": settings.parent_chunk_size,
-            "child_size": settings.child_chunk_size,
-            "overlap": settings.chunk_overlap,
-        }
-
-        # 查询知识库 config 中是否指定了 chunker_type
-        chunker_type = None
+        # 先取该知识库行：一次查询同时拿到 tenant_id（按租户读分块参数）与 config（chunker_type）。
         result = await session.execute(
             select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
         )
         kb = result.scalar_one_or_none()
+
+        # 按该知识库所属租户读取分块参数：Worker 是独立进程、无请求级租户上下文，
+        # 以 KnowledgeBase.tenant_id 为权威来源反查租户；取不到租户（kb 为 None 或
+        # tenant_id 为 None）→ get_effective(None) 全默认（2500/450/70），与现状一致。
+        from app.retrieval.config import get_retrieval_config_store
+
+        kb_tenant_id = kb.tenant_id if kb else None
+        cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+        chunk_kwargs = {
+            "parent_size": cfg.parent_chunk_size,
+            "child_size": cfg.child_chunk_size,
+            "overlap": cfg.chunk_overlap,
+        }
+
+        # 查询知识库 config 中是否指定了 chunker_type
+        chunker_type = None
         if kb and kb.config and isinstance(kb.config, dict):
             chunker_type = kb.config.get("chunker_type")
 
@@ -598,7 +804,7 @@ class DocumentPipeline:
     async def _embed_with_progress(
         self,
         texts: list[str],
-        tracker: ProgressTracker,
+        tracker: ProgressTracker | None = None,
         doc_id: str = "",
     ):
         """带进度追踪的 embed 调用
@@ -625,10 +831,11 @@ class DocumentPipeline:
         # 批次较少时直接一次性处理
         if total_batches <= 2:
             result = await self.embedder.embed(texts)
-            await tracker.update_sub_progress(
-                PipelineStage.EMBED, total_batches, total_batches,
-                f"正在生成向量 ({total_batches}/{total_batches} 批)"
-            )
+            if tracker is not None:
+                await tracker.update_sub_progress(
+                    PipelineStage.EMBED, total_batches, total_batches,
+                    f"正在生成向量 ({total_batches}/{total_batches} 批)"
+                )
             return result
 
         # 批次较多时，逐批处理并实时更新进度
@@ -697,14 +904,15 @@ class DocumentPipeline:
                 completed_count += 1
                 print(f"[Embedder] 批次 {completed_count}/{total_batches} 完成 ({completed_count * 100 // total_batches}%，本批 {len(batch)} 个文本)")
                 # 每 5 批或最后一批更新一次 DB 进度（避免过于频繁的 DB 写入）
-                if completed_count % 5 == 0 or completed_count == total_batches:
+                if tracker is not None and (completed_count % 5 == 0 or completed_count == total_batches):
                     await tracker.update_sub_progress(
                         PipelineStage.EMBED, completed_count, total_batches,
                         f"正在生成向量 ({completed_count}/{total_batches} 批)"
                     )
 
                 # 每 5 批检查一次是否已取消（平衡响应速度和 DB 查询开销）
-                if completed_count % 5 == 0:
+                # 仅在有 doc_id（正式 Document 路径）时检查；会话同步路径无 Document 行，跳过。
+                if doc_id and completed_count % 5 == 0:
                     try:
                         async with self.db_session_factory() as check_session:
                             r = await check_session.execute(
@@ -891,21 +1099,29 @@ class DocumentPipeline:
                 return parent_idx
         return None
 
-    async def _cleanup_milvus_on_cancel(self, kb_id: str, doc_id: str) -> None:
-        """取消时清理 Milvus 中可能已写入的孤儿向量
+    async def _cleanup_milvus_orphans(self, kb_id: str, doc_id: str) -> None:
+        """按 doc_id 清理 Milvus 向量。拒绝空 kb_id/doc_id（防误删整库）。失败记 WARNING。
 
-        Index 阶段分批写入 Milvus，如果中途被取消，已写入的批次会成为孤儿。
-        通过 doc_id 过滤表达式删除该文档的所有向量。
+        统一用于：
+        - Index 阶段写入前先删旧（幂等，治本去孤儿）
+        - CancelledError 分支回滚后清理已写入的孤儿向量
+        - 普通 Exception 分支回滚后清理已写入的孤儿向量
         """
+        if not doc_id or not kb_id:
+            logger.warning("跳过孤儿清理：kb_id/doc_id 为空")
+            return
         try:
             if not await self.milvus.has_collection(kb_id):
                 return
-            # 使用 doc_id 表达式删除该文档的所有向量
             await self.milvus.delete_by_doc_id(kb_id, doc_id)
-            logger.info("文档 %s 取消后清理 Milvus 向量完成", doc_id)
-            print(f"[Pipeline] 文档 {doc_id} 取消后清理 Milvus 孤儿向量完成")
+            logger.info("文档 %s 孤儿向量清理完成", doc_id)
         except Exception as e:
-            logger.warning("文档 %s 取消后清理 Milvus 失败: %s", doc_id, e)
+            logger.warning("文档 %s 孤儿向量清理失败（非致命）: %s", doc_id, e)
+
+    # 保留旧名作为向后兼容别名
+    async def _cleanup_milvus_on_cancel(self, kb_id: str, doc_id: str) -> None:
+        """向后兼容别名，委托给 _cleanup_milvus_orphans"""
+        await self._cleanup_milvus_orphans(kb_id, doc_id)
 
     @staticmethod
     def _truncate_utf8(text: str, max_bytes: int = 60000) -> str:

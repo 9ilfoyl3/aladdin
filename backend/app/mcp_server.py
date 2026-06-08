@@ -162,8 +162,18 @@ async def call_tool(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-        # 执行工具
-        result = await _execute_mcp_tool(tool_name, arguments)
+        # tenant-auth：MCP 工具经 API Key 鉴权解析身份（无有效 Key -> 401）。
+        from app.api.errors import AppError
+        try:
+            identity = await _authenticate_mcp(request)
+        except AppError as ae:
+            return JSONResponse(
+                content={"content": [{"type": "text", "text": ae.detail}], "isError": True},
+                status_code=ae.http_status,
+            )
+
+        # 执行工具（身份透传，范围收敛到该身份可读 KB）
+        result = await _execute_mcp_tool(tool_name, arguments, identity)
         return JSONResponse(content=result)
 
     except json.JSONDecodeError:
@@ -217,21 +227,17 @@ async def sse_endpoint(request: Request):
     return EventSourceResponse(event_generator())
 
 
-async def _execute_mcp_tool(name: str, arguments: dict) -> dict:
-    """执行 MCP 工具的内部逻辑
-
-    根据工具名称分发到对应的处理函数。
-    返回 MCP 协议格式的结果。
-    """
+async def _execute_mcp_tool(name: str, arguments: dict, identity) -> dict:
+    """执行 MCP 工具的内部逻辑（identity 用于租户范围收敛与授权）。"""
     try:
         if name == "knowledge_search":
-            result = await _tool_knowledge_search(arguments)
+            result = await _tool_knowledge_search(arguments, identity)
         elif name == "hybrid_search":
-            result = await _tool_hybrid_search(arguments)
+            result = await _tool_hybrid_search(arguments, identity)
         elif name == "list_documents":
-            result = await _tool_list_documents(arguments)
+            result = await _tool_list_documents(arguments, identity)
         elif name == "chat":
-            result = await _tool_chat(arguments)
+            result = await _tool_chat(arguments, identity)
         else:
             return {
                 "content": [{"type": "text", "text": f"Tool not implemented: {name}"}],
@@ -250,8 +256,40 @@ async def _execute_mcp_tool(name: str, arguments: dict) -> dict:
         }
 
 
-async def _tool_knowledge_search(arguments: dict) -> str:
-    """knowledge_search 工具实现 - 语义检索"""
+async def _authenticate_mcp(request: Request):
+    """从 Authorization 头解析 API Key 身份；无有效凭据抛 AppError(401/...)。"""
+    from app.api.errors import UnauthenticatedError
+    from app.auth.apikey_auth import ApiKeyAuthenticator
+    from app.storage.database import async_session
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise UnauthenticatedError("缺少 Authorization 凭据")
+    token = auth[7:].strip()
+    if not token.startswith("sk-"):
+        raise UnauthenticatedError("MCP 仅支持 API Key 调用")
+    async with async_session() as session:
+        return await ApiKeyAuthenticator(session).authenticate(token, request.headers)
+
+
+async def _resolve_mcp_kb_ids(identity, requested_kb_id: str | None) -> list[str]:
+    """把 MCP 的 kb 参数收敛为身份可读范围：
+    - 指定 kb_id：经 kb_authorization_decision(READ) 校验（越权抛 -> 上层转错误）。
+    - 不指定：返回身份可读 KB 集合（替换原"搜索所有知识库"的危险默认）。
+    """
+    from app.auth.kb_authz import KbAccessEnum
+    from app.auth.kb_scope import assemble_allowed_kb_ids, authorize_requested_kbs
+    from app.storage.database import async_session
+
+    async with async_session() as session:
+        if requested_kb_id:
+            await authorize_requested_kbs(session, identity, [requested_kb_id], KbAccessEnum.READ)
+            return [requested_kb_id]
+        return list(await assemble_allowed_kb_ids(session, identity))
+
+
+async def _tool_knowledge_search(arguments: dict, identity) -> str:
+    """knowledge_search 工具实现 - 语义检索（范围收敛到身份可读 KB）"""
     from app.retrieval.hybrid import HybridRetriever
 
     queries = arguments.get("queries", [])
@@ -261,16 +299,21 @@ async def _tool_knowledge_search(arguments: dict) -> str:
     if not queries:
         return "Error: 'queries' parameter is required and must be non-empty"
 
+    # 范围收敛：指定 kb 经读授权；不指定则取身份可读范围（替换"搜索所有库"危险默认）
+    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
+    if not allowed_kb_ids:
+        return "No results found."
+
     retriever = HybridRetriever()
     all_results = []
-
     for query in queries[:5]:  # 最多 5 个查询
-        results = await retriever.search(
-            query=query,
-            knowledge_base_id=kb_id,
-            top_k=top_k,
-        )
-        all_results.extend(results)
+        for target_kb in allowed_kb_ids:
+            results = await retriever.search(
+                query=query,
+                knowledge_base_id=target_kb,
+                top_k=top_k,
+            )
+            all_results.extend(results)
 
     # chunk_id 去重，保留最高分
     seen = {}
@@ -296,8 +339,8 @@ async def _tool_knowledge_search(arguments: dict) -> str:
     return "\n".join(output_lines)
 
 
-async def _tool_hybrid_search(arguments: dict) -> str:
-    """hybrid_search 工具实现 - 混合检索"""
+async def _tool_hybrid_search(arguments: dict, identity) -> str:
+    """hybrid_search 工具实现 - 混合检索（范围收敛到身份可读 KB）"""
     from app.retrieval.hybrid import HybridRetriever
 
     query = arguments.get("query", "")
@@ -307,16 +350,20 @@ async def _tool_hybrid_search(arguments: dict) -> str:
     if not query:
         return "Error: 'query' parameter is required"
 
+    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
+    if not allowed_kb_ids:
+        return "No results found."
+
     retriever = HybridRetriever()
-    results = await retriever.search(
-        query=query,
-        knowledge_base_id=kb_id,
-        top_k=top_k,
-    )
+    results = []
+    for target_kb in allowed_kb_ids:
+        r = await retriever.search(query=query, knowledge_base_id=target_kb, top_k=top_k)
+        results.extend(r)
 
     if not results:
         return "No results found."
 
+    results = sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
     output_lines = [f"Found {len(results)} results:"]
     for i, r in enumerate(results, 1):
         content = r.get("content", r.get("text", ""))[:500]
@@ -327,8 +374,8 @@ async def _tool_hybrid_search(arguments: dict) -> str:
     return "\n".join(output_lines)
 
 
-async def _tool_list_documents(arguments: dict) -> str:
-    """list_documents 工具实现 - 列出文档"""
+async def _tool_list_documents(arguments: dict, identity) -> str:
+    """list_documents 工具实现 - 列出文档（仅身份可读 KB 范围内）"""
     from sqlalchemy import select
 
     from app.schema.db import Document
@@ -338,13 +385,19 @@ async def _tool_list_documents(arguments: dict) -> str:
     page = arguments.get("page", 1)
     page_size = arguments.get("page_size", 20)
 
-    async with async_session() as session:
-        stmt = select(Document)
-        if kb_id:
-            stmt = stmt.where(Document.knowledge_base_id == kb_id)
-        stmt = stmt.order_by(Document.created_at.desc())
-        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
+    if not allowed_kb_ids:
+        return "No documents found."
 
+    async with async_session() as session:
+        # 修正原 knowledge_base_id 笔误为 kb_id；范围限定在可读 KB
+        stmt = (
+            select(Document)
+            .where(Document.kb_id.in_(allowed_kb_ids))
+            .order_by(Document.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
         result = await session.execute(stmt)
         docs = result.scalars().all()
 
@@ -361,21 +414,25 @@ async def _tool_list_documents(arguments: dict) -> str:
     return "\n".join(output_lines)
 
 
-async def _tool_chat(arguments: dict) -> str:
-    """chat 工具实现 - 知识库对话"""
+async def _tool_chat(arguments: dict, identity) -> str:
+    """chat 工具实现 - 知识库对话（范围收敛到身份可读 KB）"""
     query = arguments.get("query", "")
     if not query:
         return "Error: 'query' parameter is required"
 
-    # 使用 HybridRetriever 检索 + LLM 生成答案
     from app.retrieval.hybrid import HybridRetriever
 
     kb_ids = arguments.get("knowledge_base_ids", [])
-    retriever = HybridRetriever()
+    requested = kb_ids[0] if kb_ids else None
+    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, requested)
+    if not allowed_kb_ids:
+        return "未找到相关知识库内容来回答此问题。"
 
-    # 检索相关内容
-    kb_id = kb_ids[0] if kb_ids else None
-    results = await retriever.search(query=query, knowledge_base_id=kb_id, top_k=5)
+    retriever = HybridRetriever()
+    results = []
+    for target_kb in allowed_kb_ids:
+        r = await retriever.search(query=query, knowledge_base_id=target_kb, top_k=5)
+        results.extend(r)
 
     if not results:
         return "未找到相关知识库内容来回答此问题。"

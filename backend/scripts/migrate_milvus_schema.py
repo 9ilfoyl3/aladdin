@@ -44,7 +44,13 @@ from app.models.manager import get_model_manager
 from app.pipeline.context_embedder import ContextualEmbedder
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.metadata import ChunkMetadata
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import (
+    _DEFAULT_EF_CONSTRUCTION,
+    _DEFAULT_M,
+    _SPARSE_INDEX_PARAMS,
+    MilvusClient,
+    _build_dense_index_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +68,9 @@ _NEW_FIELDS = [
 ]
 
 # 索引配置
-_DENSE_INDEX_PARAMS = {
-    "index_type": "HNSW",
-    "metric_type": "COSINE",
-    "params": {"M": 16, "efConstruction": 256},
-}
-_SPARSE_INDEX_PARAMS = {
-    "index_type": "SPARSE_INVERTED_INDEX",
-    "metric_type": "IP",
-}
+# dense 索引参数由 app.storage.milvus._build_dense_index_params 统一构造
+# （主动重建时按当前检索配置的 efConstruction / M 生效）；
+# sparse 索引参数复用 milvus 模块常量，保持单一事实源。
 
 # 批量读取/写入大小
 _READ_BATCH_SIZE = 1000
@@ -201,12 +201,30 @@ class SchemaMigrator:
         collection_name = self.milvus_client._collection_name(kb_id)
         v2_name = f"{collection_name}_v2"
 
+        # 主动重建：按**该知识库所属租户**的检索配置 HNSW 建索引参数（efConstruction / M）
+        # 生效（Req 11.2 / 11.3）。迁移脚本无请求级租户上下文，以 KnowledgeBase.tenant_id 为
+        # 权威来源反查；取不到租户（行不存在或 tenant_id 为 None）→ get_effective(None) 全默认。
+        from sqlalchemy import select
+        from app.retrieval.config import get_retrieval_config_store
+        from app.schema.db import KnowledgeBase
+        from app.storage.database import async_session
+
+        async with async_session() as session:
+            kb_tenant_result = await session.execute(
+                select(KnowledgeBase.tenant_id).where(KnowledgeBase.id == kb_id)
+            )
+            kb_tenant_id = kb_tenant_result.scalar_one_or_none()
+
+        cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+        ef_construction = cfg.hnsw_ef_construction
+        m = cfg.hnsw_m
+
         # Step 1: 创建新 collection
         logger.info("  [Step 1] 创建新 collection: %s", v2_name)
         if self.dry_run:
             logger.info("  [DRY-RUN] 跳过创建 collection")
         else:
-            self._create_v2_collection(v2_name)
+            self._create_v2_collection(v2_name, ef_construction=ef_construction, m=m)
 
         # Step 2: 从旧 collection 读取所有数据
         logger.info("  [Step 2] 从旧 collection 读取数据...")
@@ -218,7 +236,9 @@ class SchemaMigrator:
             logger.info("  旧 collection 为空，直接删除并重建")
             if not self.dry_run:
                 self._drop_collection(collection_name)
-                await self.milvus_client.create_collection(kb_id)
+                await self.milvus_client.create_collection(
+                    kb_id, ef_construction=ef_construction, m=m,
+                )
             return
 
         # Step 3: 从 SQLite 读取 chunk 元数据
@@ -256,8 +276,16 @@ class SchemaMigrator:
         self._rename_collection(v2_name, collection_name)
         logger.info("  切换完成: %s → %s", v2_name, collection_name)
 
-    def _create_v2_collection(self, name: str) -> None:
-        """创建新版 schema 的 collection"""
+    def _create_v2_collection(
+        self, name: str,
+        ef_construction: int | None = None, m: int | None = None,
+    ) -> None:
+        """创建新版 schema 的 collection
+
+        Args:
+            ef_construction: HNSW 建索引 efConstruction（主动重建时取当前配置值）。
+            m: HNSW 建索引 M（主动重建时取当前配置值）。
+        """
         self.milvus_client._connect()
         alias = self.milvus_client._alias
 
@@ -269,8 +297,12 @@ class SchemaMigrator:
         schema = CollectionSchema(fields=_NEW_FIELDS, description=f"迁移中间 collection")
         collection = Collection(name=name, schema=schema, using=alias)
 
-        # 创建索引
-        collection.create_index(field_name="dense_vector", index_params=_DENSE_INDEX_PARAMS)
+        # 创建索引（dense 索引按当前配置的 efConstruction / M 生效）
+        dense_index_params = _build_dense_index_params(
+            ef_construction if ef_construction is not None else _DEFAULT_EF_CONSTRUCTION,
+            m if m is not None else _DEFAULT_M,
+        )
+        collection.create_index(field_name="dense_vector", index_params=dense_index_params)
         collection.create_index(field_name="sparse_vector", index_params=_SPARSE_INDEX_PARAMS)
         collection.create_index(field_name="file_type", index_name="idx_file_type")
         collection.create_index(field_name="element_type", index_name="idx_element_type")

@@ -10,8 +10,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.logging_config import setup_logging
+
+# 在所有业务模块 import 之前配置日志
+setup_logging(service_name="backend")
+
 from app.api.agent_config import router as agent_config_router
 from app.api.api_key import router as api_key_router
+from app.api.auth_routes import router as auth_router
+from app.api.admin_routes import router as admin_router
+from app.api.invitation_routes import router as invitation_router
 from app.mcp_server import router as mcp_router
 from app.api.chat import router as chat_router
 from app.api.document import router as document_router
@@ -20,9 +28,9 @@ from app.api.folder import router as folder_router
 from app.api.knowledge_base import router as kb_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
-from app.api.middleware import ApiKeyAuthMiddleware
 from app.api.retrieval import router as retrieval_router
 from app.api.session import router as session_router
+from app.api.session_upload import router as session_upload_router
 from app.api.system import router as system_router
 from app.config import get_settings
 from app.pipeline.queue import TaskQueue
@@ -36,6 +44,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化数据库，加载模型配置"""
+    # 最早设置线程池上限（在任何 asyncio.to_thread 调用之前）
+    from app.startup import configure_thread_pool
+    configure_thread_pool()
+
     await init_db()
 
     # 自动迁移：添加可能缺失的新列
@@ -50,7 +62,70 @@ async def lifespan(app: FastAPI):
     # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
     await _init_task_queue(app)
 
+    # 启动 API Key 用量追踪器（内存合并 + 周期批量落库，使鉴权关键路径零写库）
+    from app.auth.apikey_usage import init_usage_tracker, shutdown_usage_tracker
+    init_usage_tracker(async_session)
+
+    # 启动跨进程失效广播（InvalidationBus）
+    from app.startup import start_invalidation_bus
+    from app.storage.milvus import get_milvus_client, MilvusClient
+    from app.retrieval.cache import get_retrieval_cache
+
+    async def _handle_kb_data(kb_id: str):
+        """收到 kb_data 失效信号：清除对应知识库的 Milvus 加载缓存 + 检索结果缓存"""
+        # 失效 Milvus 加载缓存（使下次搜索强制重新 load）
+        milvus = get_milvus_client()
+        collection_name = MilvusClient._collection_name(kb_id)
+        milvus._loaded_at.pop(collection_name, None)
+        # 失效检索结果缓存
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
+        logger.info("InvalidationBus: kb_data 失效完成 kb_id=%s", kb_id)
+
+    async def _handle_tenant_config(tenant_id: str):
+        """收到 tenant_config 失效信号（M1 + M7）：
+        1. 失效该租户的检索配置缓存（M1 多进程热生效）
+        2. 失效该租户名下所有 KB 的检索结果缓存（M7 配置变更失效结果缓存）
+        """
+        from app.retrieval.config import get_retrieval_config_store
+        store = get_retrieval_config_store()
+        store.invalidate(tenant_id)
+
+        # M7: 额外失效该租户名下 KB 的检索结果缓存
+        cache = await get_retrieval_cache()
+        kb_ids: list[str] = []
+        if cache:
+            kb_ids = await _get_tenant_kb_ids(tenant_id)
+            for kb_id in kb_ids:
+                await cache.invalidate_kb(kb_id)
+        logger.info(
+            "InvalidationBus: tenant_config 失效完成 tenant_id=%s, 失效 %d 个 KB 缓存",
+            tenant_id, len(kb_ids),
+        )
+
+    async def _get_tenant_kb_ids(tenant_id: str) -> list[str]:
+        """查询数据库获取该租户名下的所有 kb_id（轻量 select 仅取 id 列）"""
+        try:
+            from app.schema.db import KnowledgeBase
+            async with async_session() as session:
+                result = await session.execute(
+                    select(KnowledgeBase.id).where(KnowledgeBase.tenant_id == tenant_id)
+                )
+                return [row[0] for row in result.all()]
+        except Exception as e:
+            logger.warning("查询租户 %s KB 列表失败（跳过结果缓存失效）: %s", tenant_id, e)
+            return []
+
+    await start_invalidation_bus({
+        "kb_data": _handle_kb_data,
+        "tenant_config": _handle_tenant_config,
+    })
+
     yield
+
+    # 停止用量追踪器并落库剩余增量（优雅关闭，不丢最后一个区间）
+    await shutdown_usage_tracker()
 
     # 关闭 TaskQueue 连接
     await _close_task_queue(app)
@@ -188,8 +263,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Key 认证中间件（仅拦截 /v1/ 路径）
-app.add_middleware(ApiKeyAuthMiddleware)
+# 注意：原全局 ApiKeyAuthMiddleware 已退役（tenant-auth）。
+# 鉴权改由各路由 Depends(authorization_guard(...)) 统一施加（见任务 9.3）。
 
 # 注册路由
 app.include_router(chat_router, tags=["Chat"])
@@ -204,7 +279,17 @@ app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
+app.include_router(session_upload_router)
 app.include_router(mcp_router)
+# tenant-auth：认证与管理路由
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(invitation_router)
+
+# 统一异常处理（AppError -> {"detail": ...}，跨租户 404/权限 403 等语义一致）
+from app.api.errors import register_exception_handlers  # noqa: E402
+
+register_exception_handlers(app)
 
 
 @app.get("/")

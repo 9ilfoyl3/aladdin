@@ -26,10 +26,16 @@ logger = logging.getLogger(__name__)
 def health_url(base_url: str) -> str:
     """由服务地址推导 /health 端点
 
-    去掉末尾的 /v1（若有）再拼 /health：
-    http://server:8080/v1 → http://server:8080/health
+    去掉末尾的 /v1 路径段（若有）再拼 /health：
+    - http://server:8080/v1 → http://server:8080/health
+    - http://server:7997     → http://server:7997/health（infinity 根路径，无 /v1）
+
+    仅当 /v1 是「末尾的完整路径段」时才剥离，避免误伤 host 或 /v1beta 这类子串。
     """
-    return base_url.rstrip("/").rsplit("/v1", 1)[0] + "/health"
+    trimmed = base_url.rstrip("/")
+    if trimmed.endswith("/v1"):
+        trimmed = trimmed[: -len("/v1")]
+    return trimmed + "/health"
 
 
 async def check_health(base_url: str, timeout: float = 5.0) -> bool | None:

@@ -40,6 +40,15 @@ class ChatResponse:
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     finish_reason: str = "stop"  # "stop" | "tool_calls"
     usage: TokenUsage | None = None
+    # 答案正文是否已在流式阶段逐 token 作为 answer 发射（如 vLLM 增量解析 final_answer）。
+    # 引擎据此决定终止时是否需要补发完整答案：
+    #   True  → 仅发 done 标记（避免重复）
+    #   False → 若答案来自 final_answer 工具但未流式（如 Ollama 工具调用非增量返回），补发正文
+    answer_streamed: bool = False
+    # 模型把 final_answer 调用「写成纯文本 JSON」时（千问等弱 function-calling 模型），
+    # 流式阶段路由器从普通 content 中提取出的答案文本。非空表示这是内联 final_answer，
+    # 引擎应将其作为最终答案（而非把原始 JSON 当答案或思考）。
+    inline_answer: str = ""
 
 
 @dataclass

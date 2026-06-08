@@ -1,15 +1,23 @@
 import { useRef, useEffect } from 'react'
-import { Send, Database, Cpu, Library, ChevronDown, Bot } from 'lucide-react'
+import { Send, Cpu, Bot, Paperclip } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu'
-import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import ContextUsageRing from '@/components/chat/ContextUsageRing'
-import type { AgentPresetItem } from '@/lib/api'
+import KbSelector from '@/components/chat/KbSelector'
+import KbSelectionList from '@/components/chat/KbSelectionList'
+import SessionFileList, { type PendingSessionFile } from '@/components/chat/SessionFileList'
+import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
+
+/** 会话上传支持的文件类型（与后端 _ALLOWED_EXTENSIONS 一致）。 */
+const UPLOAD_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png'
+const UPLOAD_ACCEPT_LABEL = 'pdf、docx、xlsx、pptx、csv、txt、md、jpg、jpeg、png'
 
 interface KnowledgeBaseItem {
   id: string
   name: string
+  owner_user_id?: string | null
+  visibility?: string | null
 }
 
 interface LLMConfigItem {
@@ -24,46 +32,68 @@ interface LLMConfigItem {
 interface ChatInputProps {
   input: string
   isStreaming: boolean
-  selectedKb: string
+  selectedKbIds: string[]
   selectedModel: string
   selectedModelName: string
   selectedPreset: string
-  auxiliaryKbIds: string[]
   contextUsage: { current: number; max: number }
   knowledgeBases: KnowledgeBaseItem[]
   llmConfigs: LLMConfigItem[]
   agentPresets: AgentPresetItem[]
   onInputChange: (value: string) => void
   onSend: (query?: string) => void
-  onKbChange: (value: string) => void
+  onToggleKb: (kbId: string) => void
   onModelChange: (value: string) => void
   onPresetChange: (value: string) => void
-  onToggleAuxiliaryKb: (kbId: string) => void
   /** 居中静态布局（用于新对话空态），默认 false 时固定在底部 */
   centered?: boolean
+  // ====== 会话文件上传（session-file-upload Task 16）======
+  /** 已建索引完成的服务端文件列表 */
+  sessionFiles?: SessionFileResponse[]
+  /** 同步上传中的本地占位（POST 在飞 / 失败） */
+  pendingSessionFiles?: PendingSessionFile[]
+  /** 是否启用上传按钮：会话存在 + 未在流式响应中（关闭 KB 选择不影响） */
+  canUploadSessionFile?: boolean
+  /** 选择文件后触发同步上传 */
+  onUploadSessionFiles?: (files: FileList) => void
+  /** 移除单个已建索引文件 */
+  onRemoveSessionFile?: (fileId: string) => void
+  /** 取消一个上传中的占位（中止在飞的 POST） */
+  onCancelPendingSessionFile?: (localId: string) => void
+  /** 关闭一个失败占位（仅本地清理） */
+  onDismissPendingSessionFile?: (localId: string) => void
+  /** 文件名 → 图片预览 URL（本会话内上传的图片缩略图/放大预览） */
+  sessionImagePreviewUrls?: Record<string, string>
 }
 
 function ChatInput({
   input,
   isStreaming,
-  selectedKb,
+  selectedKbIds,
   selectedModel,
   selectedModelName,
   selectedPreset,
-  auxiliaryKbIds,
   contextUsage,
   knowledgeBases,
   llmConfigs,
   agentPresets,
   onInputChange,
   onSend,
-  onKbChange,
+  onToggleKb,
   onModelChange,
   onPresetChange,
-  onToggleAuxiliaryKb,
   centered = false,
+  sessionFiles = [],
+  pendingSessionFiles = [],
+  canUploadSessionFile = false,
+  onUploadSessionFiles,
+  onRemoveSessionFile,
+  onCancelPendingSessionFile,
+  onDismissPendingSessionFile,
+  sessionImagePreviewUrls = {},
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -79,11 +109,83 @@ function ChatInput({
     }
   }
 
+  function handlePickFile() {
+    fileInputRef.current?.click()
+  }
+
+  function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (files && files.length > 0 && onUploadSessionFiles) {
+      onUploadSessionFiles(files)
+    }
+    // 重置以便相同文件名可再次选中触发 change
+    if (e.target) e.target.value = ''
+  }
+
+  // 上传按钮（纯图标 + Tooltip 说明） + 隐藏 input（centered/底部两套布局共用）
+  const uploadButton = (
+    <>
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={handlePickFile}
+              disabled={!canUploadSessionFile || isStreaming}
+              aria-label="上传会话文件"
+              className="h-7 w-7 flex items-center justify-center border-none bg-muted/50 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-muted-foreground cursor-pointer transition-colors shrink-0"
+            >
+              <Paperclip className="h-3.5 w-3.5 shrink-0" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-xs">
+            {canUploadSessionFile ? (
+              <div className="space-y-0.5 text-xs leading-relaxed">
+                <div>上传文件到本会话（无需选择知识库）</div>
+                <div className="text-muted-foreground">支持类型：{UPLOAD_ACCEPT_LABEL}</div>
+              </div>
+            ) : (
+              <div className="text-xs">请先开始一个会话再上传文件</div>
+            )}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept={UPLOAD_ACCEPT}
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
+    </>
+  )
+
+  // 已选知识库 + 已上传文件列表（centered/底部两套布局共用）
+  const fileListSlot = (
+    <>
+      <KbSelectionList
+        knowledgeBases={knowledgeBases}
+        selectedKbIds={selectedKbIds}
+        onRemove={onToggleKb}
+      />
+      <SessionFileList
+        files={sessionFiles}
+        pending={pendingSessionFiles}
+        onRemove={(id) => onRemoveSessionFile?.(id)}
+        onCancelPending={(id) => onCancelPendingSessionFile?.(id)}
+        onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
+        imagePreviewUrls={sessionImagePreviewUrls}
+      />
+    </>
+  )
+
   // 居中静态布局（新对话空态）
   if (centered) {
     return (
       <div className="w-full">
         <div className="rounded-3xl border border-border bg-card shadow-lg transition-shadow focus-within:shadow-xl focus-within:border-primary/30">
+          {fileListSlot}
           <textarea
             ref={textareaRef}
             value={input}
@@ -98,50 +200,12 @@ function ChatInput({
           <div className="flex items-center justify-between px-3.5 pb-3.5 gap-2 flex-wrap">
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
-              <Select value={selectedKb} onValueChange={onKbChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Database className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="全部知识库" />
-                </SelectTrigger>
-                <SelectContent>
-                  {knowledgeBases.map((kb) => (
-                    <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Library className="h-3 w-3 shrink-0" />
-                    <span>关联知识库</span>
-                    {auxiliaryKbIds.length > 0 && (
-                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
-                        {auxiliaryKbIds.length}
-                      </Badge>
-                    )}
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases
-                      .filter((kb) => kb.id !== selectedKb)
-                      .map((kb) => (
-                        <DropdownMenuCheckboxItem
-                          key={kb.id}
-                          checked={auxiliaryKbIds.includes(kb.id)}
-                          onCheckedChange={() => onToggleAuxiliaryKb(kb.id)}
-                          onSelect={(e) => e.preventDefault()}
-                        >
-                          {kb.name}
-                        </DropdownMenuCheckboxItem>
-                      ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              {uploadButton}
+              <KbSelector
+                knowledgeBases={knowledgeBases}
+                selectedKbIds={selectedKbIds}
+                onToggle={onToggleKb}
+              />
 
               <Select value={selectedPreset} onValueChange={onPresetChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
@@ -199,6 +263,7 @@ function ChatInput({
     <div className="absolute bottom-0 left-0 right-0 p-4 bg-linear-to-t from-background via-background to-transparent pt-10 pointer-events-none">
       <div className="max-w-3xl mx-auto pointer-events-auto">
         <div className="rounded-2xl border border-border bg-card shadow-lg">
+          {fileListSlot}
           <textarea
             ref={textareaRef}
             value={input}
@@ -213,50 +278,12 @@ function ChatInput({
           <div className="flex items-center justify-between px-3 pb-3 gap-2 flex-wrap">
             {/* 左侧工具栏 */}
             <div className="flex items-center gap-2 flex-wrap">
-              <Select value={selectedKb} onValueChange={onKbChange}>
-                <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">
-                  <Database className="h-3 w-3 shrink-0" />
-                  <SelectValue placeholder="全部知识库" />
-                </SelectTrigger>
-                <SelectContent>
-                  {knowledgeBases.map((kb) => (
-                    <SelectItem key={kb.id} value={kb.id}>{kb.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
-                    <Library className="h-3 w-3 shrink-0" />
-                    <span>关联知识库</span>
-                    {auxiliaryKbIds.length > 0 && (
-                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 min-w-4 flex items-center justify-center">
-                        {auxiliaryKbIds.length}
-                      </Badge>
-                    )}
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start">
-                  {knowledgeBases.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
-                  ) : (
-                    knowledgeBases
-                      .filter((kb) => kb.id !== selectedKb)
-                      .map((kb) => (
-                        <DropdownMenuCheckboxItem
-                          key={kb.id}
-                          checked={auxiliaryKbIds.includes(kb.id)}
-                          onCheckedChange={() => onToggleAuxiliaryKb(kb.id)}
-                          onSelect={(e) => e.preventDefault()}
-                        >
-                          {kb.name}
-                        </DropdownMenuCheckboxItem>
-                      ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              {uploadButton}
+              <KbSelector
+                knowledgeBases={knowledgeBases}
+                selectedKbIds={selectedKbIds}
+                onToggle={onToggleKb}
+              />
 
               <Select value={selectedPreset} onValueChange={onPresetChange}>
                 <SelectTrigger className="h-7 w-auto border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 gap-1.5 text-xs text-muted-foreground shadow-none focus:ring-0">

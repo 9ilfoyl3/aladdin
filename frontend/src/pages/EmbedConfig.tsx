@@ -6,6 +6,7 @@ import type { EmbedConfigItem } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -411,8 +412,7 @@ function EmbedConfig() {
 
             <div className="space-y-2">
               <Label>API Key（可选）</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 placeholder={editingItem?.api_key_set ? '已设置，留空不修改' : '无需密钥可留空'}

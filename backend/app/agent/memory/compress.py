@@ -1,8 +1,7 @@
 """分组截断压缩 - 从最旧消息组开始移除以控制上下文 token 数
 
-照搬 WeKnora `internal/agent/token/compress.go` 的实现，作为三层递进式上下文
-管理的最后一层兜底策略：当上下文 token 数超过 80% 阈值时，从最旧的消息组开始
-移除，直到 token 数降到阈值以下。
+作为三层递进式上下文管理的最后一层兜底策略：当上下文 token 数超过 80% 阈值时，
+从最旧的消息组开始移除，直到 token 数降到阈值以下。
 
 压缩时始终保留：
 1. system prompt（第一条消息）
@@ -10,8 +9,7 @@
 3. tool_call / tool_result 消息组（assistant 含 tool_calls + 后续 tool 消息
    视为一组，压缩时不拆分）
 
-token 计数依赖传入的 TokenEstimator 实例（estimate_message），与 WeKnora 中
-通过 estimator 计算分组 token 的方式保持一致。
+token 计数依赖传入的 TokenEstimator 实例（estimate_message）。
 """
 
 from __future__ import annotations
@@ -20,8 +18,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 触发压缩的上下文窗口占用比例：超过 max_tokens * 0.8 时从最旧消息组开始截断，
-# 照搬 WeKnora DefaultContextThresholdRatio。
+# 触发压缩的上下文窗口占用比例：超过 max_tokens * 0.8 时从最旧消息组开始截断。
 DEFAULT_CONTEXT_THRESHOLD_RATIO = 0.8
 
 
@@ -37,7 +34,7 @@ def compress_context(
     时，从最旧的消息组开始移除，累计释放的 token 直到 freed >= tokens_to_free，
     然后重组为 [system_msg] + 剩余组 + tail。
 
-    压缩规则（照搬 WeKnora CompressContext）：
+    压缩规则：
     - 始终保留 system prompt（messages[0]）。
     - 始终保留 tail：从最后一条 user 消息到列表末尾（当前轮 user 查询及其后续
       所有 assistant/tool 消息）。
@@ -122,7 +119,7 @@ def compress_context(
 def _group_tool_messages(messages: list[dict]) -> list[list[dict]]:
     """将中间历史消息按逻辑单元分组
 
-    分组规则（照搬 WeKnora groupToolMessages）：
+    分组规则：
     - assistant 消息（含 tool_calls）与其后续连续的 tool 消息视为一组，
       保证 tool_call / tool_result 配对在压缩时不被拆分。
     - 其余独立消息（user、不含 tool_calls 的 assistant 等）各自成组。

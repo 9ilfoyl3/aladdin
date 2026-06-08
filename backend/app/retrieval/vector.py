@@ -32,7 +32,13 @@ class VectorRetriever(BaseRetriever):
         query_vector = vectors[0]
 
         # 2. 在 Milvus 中执行稠密向量搜索
-        hits = await self.milvus.search_dense(kb_id, query_vector, top_k, expr=expr)
+        # ef 从 kwargs 取出（避免透传给不认识它的分支），None 时 milvus 侧回落默认 128
+        ef = kwargs.pop("ef", None)
+        # load_cache_ttl 同样从 kwargs 取出透传给 milvus（与 ef 处理一致），默认 0 = 每次 load
+        load_cache_ttl = kwargs.pop("load_cache_ttl", 0)
+        hits = await self.milvus.search_dense(
+            kb_id, query_vector, top_k, expr=expr, ef=ef, load_cache_ttl=load_cache_ttl
+        )
 
         # 3. 转换为 RetrievalResult 并按分数降序排列
         results = [

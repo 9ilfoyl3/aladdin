@@ -3,18 +3,41 @@
 通过 HybridRetriever（Dense + Sparse + BM25 + RRF + Rerank）执行语义检索，
 支持多 query 并发检索、chunk_id 去重、跨调用 seen_chunks 去重，
 输出 XML 格式供 LLM 解析。
+
+检索源由 ``SearchTarget`` 列表描述（agent-session-source-unification）：每个源 = kb_id +
+可选 Milvus 标量过滤 expr。正式知识库 expr=None；会话文件源 kb_id=SESSION_FILES_KB_ID
+且 expr='session_id == "{sid}"'（会话级隔离）。这样会话文件与正式知识库能作为平等的
+检索源由 agent 多轮检索，不再靠"换检索路径"接入。
 """
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from xml.sax.saxutils import escape as xml_escape
 
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 from app.retrieval.base import RetrievalResult
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.log_safety import sanitize_for_log
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SearchTarget:
+    """一个 agent 检索源：kb_id + 可选 Milvus 标量过滤 expr。
+
+    - 正式知识库：``expr=None``（无 session 概念）。
+    - 会话文件源：``kb_id=SESSION_FILES_KB_ID``、``expr='session_id == "{sid}"'``
+      （会话级隔离，跨会话不泄露）。
+
+    expr 透传给 ``HybridRetriever.search_with_degraded(expr=...)`` 做 Milvus pre-filter。
+    """
+
+    kb_id: str
+    expr: str | None = None
+
 
 
 class KnowledgeSearchTool(BaseTool):
@@ -28,15 +51,45 @@ class KnowledgeSearchTool(BaseTool):
     def __init__(
         self,
         retriever: HybridRetriever,
-        kb_id: str,
-        state: AgentState,
+        kb_id: str | None = None,
+        state: AgentState | None = None,
         knowledge_base_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+        search_targets: list[SearchTarget] | None = None,
     ):
         self._retriever = retriever
-        self._kb_id = kb_id
         self._state = state
-        # 多知识库 ID 列表（可选，用于跨库检索）
-        self._knowledge_base_ids = knowledge_base_ids
+        # 显式租户 ID（H5）：透传给底层 hybrid.search，避免 agent 模式在流式响应中
+        # contextvar 已 reset 时丢失租户检索配置；None 时底层回退 contextvar。
+        self._tenant_id = tenant_id
+
+        # 检索源装配（agent-session-source-unification）：
+        # 优先用显式 search_targets（新装配层传入，可含会话源 + 多库）；
+        # 否则由旧入参 kb_id / knowledge_base_ids 派生（向后兼容既有调用点与测试）。
+        if search_targets:
+            self._search_targets: list[SearchTarget] = list(search_targets)
+        else:
+            kb_ids = knowledge_base_ids or ([kb_id] if kb_id else [])
+            self._search_targets = [SearchTarget(kb_id=k, expr=None) for k in kb_ids]
+
+        # 已授权的正式 KB 源集合（expr=None 的源）：用于约束 LLM 经 knowledge_base_ids
+        # 入参只能在该集合内取子集，不能引入新 kb，也不能指定/伪造会话源（Property 5）。
+        self._authorized_kb_ids: set[str] = {
+            t.kb_id for t in self._search_targets if t.expr is None
+        }
+
+    @classmethod
+    def from_kb_ids(
+        cls,
+        retriever: HybridRetriever,
+        kb_ids: list[str],
+        state: AgentState,
+        tenant_id: str | None = None,
+    ) -> "KnowledgeSearchTool":
+        """便捷工厂：从知识库 id 列表构造（全部为正式 KB 源，expr=None）。"""
+        targets = [SearchTarget(kb_id=k, expr=None) for k in kb_ids]
+        return cls(retriever=retriever, state=state, tenant_id=tenant_id, search_targets=targets)
+
 
     @property
     def name(self) -> str:
@@ -46,7 +99,8 @@ class KnowledgeSearchTool(BaseTool):
     def description(self) -> str:
         return (
             "Semantic search tool for retrieving knowledge by meaning, intent, and conceptual relevance. "
-            "Uses embeddings to find semantically similar content across knowledge base chunks. "
+            "Uses embeddings to find semantically similar content across the authorized knowledge bases "
+            "and, if present, the files uploaded in the current conversation. "
             "Designed for conceptual explanations, topic overviews, reasoning-based information needs, "
             "and intent-driven retrieval. Searches by MEANING rather than exact text. "
             "Each query should be a short, well-formed semantic question or conceptual statement. "
@@ -72,7 +126,11 @@ class KnowledgeSearchTool(BaseTool):
                 },
                 "knowledge_base_ids": {
                     "type": "array",
-                    "description": "Optional list of knowledge base IDs to search across. If not provided, searches the default knowledge base.",
+                    "description": (
+                        "Optional subset of the authorized knowledge base IDs to search across. "
+                        "If omitted, searches all authorized sources (including this conversation's "
+                        "uploaded files when present). IDs outside the authorized set are ignored."
+                    ),
                     "items": {"type": "string"},
                 },
             },
@@ -82,8 +140,10 @@ class KnowledgeSearchTool(BaseTool):
     async def execute(self, args: dict) -> ToolResult:
         """执行语义检索
 
-        流程：多 query 并发检索 → 合并 → chunk_id 去重 → seen_chunks 跨调用去重 → XML 格式化
-        支持多知识库并发检索：如果指定了 knowledge_base_ids，对每个 kb_id 并行检索后合并。
+        流程：多源 × 多 query 并发检索 → 合并 → chunk_id 去重 → seen_chunks 跨调用去重 → XML 格式化
+        每个源（SearchTarget）携带其专属 expr（会话源带 session_id 隔离，KB 源不带）。
+        若 LLM 经 ``knowledge_base_ids`` 指定子集，仅在已授权正式 KB 源内取交集
+        （不引入新 kb、不影响会话源是否参与——后者由装配层决定，Property 5）。
         """
         queries: list[str] = args.get("queries", [])
         top_k: int = args.get("top_k", 10)
@@ -92,46 +152,80 @@ class KnowledgeSearchTool(BaseTool):
         if not queries:
             return ToolResult(success=False, error="queries parameter is required")
 
-        # 确定要检索的知识库列表
+        # 确定本次检索的源列表：
+        # - LLM 指定了 knowledge_base_ids → 在已授权正式 KB 源内取交集 + 始终保留会话源
+        #   （会话源是否存在由装配层 search_targets 决定，LLM 不能指定/移除）。
+        # - 未指定 → 用全部已配置 search_targets。
         if kb_ids_param:
-            kb_ids = kb_ids_param
-        elif self._knowledge_base_ids:
-            kb_ids = self._knowledge_base_ids
+            requested = set(kb_ids_param) & self._authorized_kb_ids
+            if not requested and self._authorized_kb_ids:
+                # LLM 指定了 KB 但全部不在授权范围（幻觉/伪造）→ 忽略其 KB 选择，
+                # 回退到全部已授权 KB 源 + 会话源，避免被误窄化到仅会话源（Property 5）。
+                targets = list(self._search_targets)
+            else:
+                targets = [
+                    t for t in self._search_targets
+                    if (t.expr is None and t.kb_id in requested) or t.expr is not None
+                ]
         else:
-            kb_ids = [self._kb_id]
+            targets = list(self._search_targets)
+
+        if not targets:
+            return ToolResult(success=False, error="no authorized search source")
 
         logger.info(
-            "[KnowledgeSearch] Executing with %d queries, top_k=%d, kb_ids=%s",
+            "[KnowledgeSearch] Executing with %d queries, top_k=%d, targets=%s (session_source=%s)",
             len(queries),
             top_k,
-            kb_ids,
+            [t.kb_id for t in targets],
+            any(t.expr is not None for t in targets),
         )
 
-        # 对每个 kb_id × query 组合并发检索
+        # 对每个 target × query 组合并发检索，每个源透传其 expr（会话源带 session_id 隔离）。
+        # H3：用 search_with_degraded 取本次各路是否路级降级（经返回结构承载，并发安全）。
+        flat_targets = [t for t in targets for _ in queries]
         try:
             search_tasks = [
-                self._retriever.search(query=q, kb_id=kb, top_k=top_k)
-                for kb in kb_ids
+                self._retriever.search_with_degraded(
+                    query=q, kb_id=t.kb_id, top_k=top_k, expr=t.expr, tenant_id=self._tenant_id
+                )
+                for t in targets
                 for q in queries
             ]
-            all_results_nested: list[list[RetrievalResult]] = await asyncio.gather(
+            all_results_nested: list = await asyncio.gather(
                 *search_tasks, return_exceptions=True
             )
         except Exception as e:
-            logger.error("[KnowledgeSearch] Search failed: %s", e)
+            logger.error("[KnowledgeSearch] Search failed: %s", sanitize_for_log(e))
+            if self._state is not None:
+                self._state.degraded = True
             return ToolResult(success=False, error=f"Search failed: {e}")
 
         # 合并所有结果，过滤异常
+        # 任一子检索抛异常（某源/query 失败）或返回 degraded=True（三路路级降级）→ 标记降级。
         merged: list[RetrievalResult] = []
-        for i, result in enumerate(all_results_nested):
-            if isinstance(result, Exception):
+        for i, item in enumerate(all_results_nested):
+            failed_kb = flat_targets[i].kb_id if i < len(flat_targets) else None
+            if isinstance(item, Exception):
                 logger.warning(
-                    "[KnowledgeSearch] Query '%s' failed: %s", queries[i], result
+                    "[KnowledgeSearch] Source '%s' query '%s' failed: %s",
+                    failed_kb or "?",
+                    sanitize_for_log(queries[i % len(queries)] if queries else ""),
+                    sanitize_for_log(item),
                 )
+                if self._state is not None:
+                    self._state.degraded = True
+                    if failed_kb:
+                        self._state.failed_source_ids.add(failed_kb)
                 continue
+            result, route_degraded = item
+            if route_degraded and self._state is not None:
+                self._state.degraded = True
+                if failed_kb:
+                    self._state.failed_source_ids.add(failed_kb)
             merged.extend(result)
 
-        logger.info("[KnowledgeSearch] Merged %d raw results from %d queries", len(merged), len(queries))
+        logger.info("[KnowledgeSearch] Merged %d raw results from %d queries × %d sources", len(merged), len(queries), len(targets))
 
         # chunk_id 去重：保留最高分
         deduped = self._deduplicate_by_chunk_id(merged)
@@ -161,10 +255,11 @@ class KnowledgeSearchTool(BaseTool):
         # XML 格式化输出
         output = self._format_xml_output(results_with_status)
 
-        # 收集引用到 AgentState
-        for result, _seen in results_with_status:
-            if not _seen:
-                self._state.knowledge_refs.append(result)
+        # 收集引用到 AgentState（state 可能为 None：仅在无状态调用/测试场景）
+        if self._state is not None:
+            for result, _seen in results_with_status:
+                if not _seen:
+                    self._state.knowledge_refs.append(result)
 
         return ToolResult(
             success=True,
@@ -196,6 +291,10 @@ class KnowledgeSearchTool(BaseTool):
         for r in results:
             # chunk_id 为空时跳过去重逻辑
             if not r.chunk_id:
+                marked.append((r, False))
+                continue
+            # state 为 None（无状态调用/测试）时不做跨调用去重，一律视为未见过。
+            if self._state is None:
                 marked.append((r, False))
                 continue
             already_seen = r.chunk_id in self._state.seen_chunk_ids
