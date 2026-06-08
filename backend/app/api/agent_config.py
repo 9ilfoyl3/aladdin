@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import require_member, require_tenant_admin
+from app.api.deps import require_member
 from app.auth.identity import IdentityContext
 from app.schema.db import AgentPreset
 from app.storage.database import async_session
@@ -236,7 +236,7 @@ def _to_response(
 @router.post("/rewrite-prompt")
 async def rewrite_prompt(
     data: PromptRewriteRequest,
-    _identity: IdentityContext = Depends(require_tenant_admin()),
+    _identity: IdentityContext = Depends(require_member()),
 ):
     """用默认模型把用户的自然语言描述润色成一段可直接使用的「自定义指令」
 
