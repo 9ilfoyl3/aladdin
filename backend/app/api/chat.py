@@ -1031,10 +1031,15 @@ async def _run_agent_nonstream(
     )
 
     steps_collected: list[dict] = []
+    # 步骤面板耗时截止于首个 final_answer 事件（答案开始产出），与流式路径语义一致。
+    final_answer_at: float | None = None
 
     async def _collect(event: AgentEvent):
+        nonlocal final_answer_at
         sse = _agent_event_to_sse(event)
         if sse:
+            if final_answer_at is None and sse.get("type") == "final_answer":
+                final_answer_at = time.time()
             steps_collected.append(sse)
 
     event_bus.on(None, _collect)
@@ -1054,10 +1059,11 @@ async def _run_agent_nonstream(
         degraded = True
 
     total_steps = len(result_state.steps) if result_state else 0
+    duration_end = final_answer_at if final_answer_at is not None else time.time()
     steps_collected.append({
         "type": "complete",
         "total_steps": total_steps,
-        "total_duration_ms": int((time.time() - agent_start_time) * 1000),
+        "total_duration_ms": int((duration_end - agent_start_time) * 1000),
     })
     return answer, state.knowledge_refs, degraded, steps_collected, list(state.failed_source_ids)
 
@@ -1161,12 +1167,18 @@ async def _stream_response(
         # 事件与会话历史丢失」。
         result_state: AgentState | None = None
         agent_error: Exception | None = None
+        # 步骤面板耗时的截止时刻：首个 final_answer 事件触发时（答案开始产出）。
+        # 步骤面板统计的是「执行步骤（思考 + 工具调用）」的耗时，不含答案正文的流式输出，
+        # 故在此截止，而非等整个引擎跑完（含答案 token 全部流完）。
+        final_answer_at: float | None = None
         try:
             while not agent_task.done():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                     sse_data = _agent_event_to_sse(event)
                     if sse_data:
+                        if final_answer_at is None and sse_data.get("type") == "final_answer":
+                            final_answer_at = time.time()
                         agent_steps_collected.append(sse_data)
                         yield json.dumps(sse_data, ensure_ascii=False)
                 except asyncio.TimeoutError:
@@ -1184,6 +1196,8 @@ async def _stream_response(
                 event = event_queue.get_nowait()
                 sse_data = _agent_event_to_sse(event)
                 if sse_data:
+                    if final_answer_at is None and sse_data.get("type") == "final_answer":
+                        final_answer_at = time.time()
                     agent_steps_collected.append(sse_data)
                     yield json.dumps(sse_data, ensure_ascii=False)
 
@@ -1212,7 +1226,10 @@ async def _stream_response(
         full_response = full_response or ""
 
         # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
-        total_duration_ms = int((time.time() - agent_start_time) * 1000)
+        # 耗时截止于首个 final_answer 事件（答案开始产出）；若全程无 final_answer
+        # （异常兜底等），退回到当前时刻，保证始终有合理值。
+        duration_end = final_answer_at if final_answer_at is not None else time.time()
+        total_duration_ms = int((duration_end - agent_start_time) * 1000)
         complete_event = {
             "type": "complete",
             "total_steps": len(result_state.steps) if result_state else 0,

@@ -241,6 +241,7 @@ function AgentStreamContent({
           isStreaming={isStreaming}
           isLast={isLast}
           totalDurationMs={totalDurationMs}
+          answerStarted={answerSegments.length > 0}
         />
       )}
 
@@ -299,10 +300,12 @@ function useLiveDuration(running: boolean, finalMs?: number): number | undefined
     return () => clearInterval(timer)
   }, [running])
 
-  // 结束后优先展示后端返回的精确耗时；running 期间展示本地累加值
+  // 结束后优先展示后端返回的精确耗时；running 期间展示本地累加值。
+  // 停止但后端值尚未到达时（答案已开始流式但 complete 事件未到），冻结在最后的
+  // 本地累加值，避免耗时短暂消失再出现的闪烁。
   if (!running && finalMs !== undefined) return finalMs
   if (running) return elapsed
-  return finalMs
+  return elapsed > 0 ? elapsed : finalMs
 }
 
 // 步骤统计面板：顶部汇总（步骤数 + 整体耗时），可折叠展开各步骤
@@ -311,15 +314,19 @@ function StepSummaryPanel({
   isStreaming,
   isLast,
   totalDurationMs,
+  answerStarted,
 }: {
   steps: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
   totalDurationMs?: number
+  answerStarted?: boolean
 }) {
   const [open, setOpen] = useState(true)
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
-  const running = isStreaming && isLast
+  // 步骤面板状态：答案一旦开始产出即视为「执行步骤」结束（与后端耗时截止时刻一致），
+  // 此时停止本地实时计时，避免把答案流式输出的时间也计入步骤耗时。
+  const running = isStreaming && isLast && !answerStarted
   // 实时耗时：执行中持续累加，结束后切换为后端精确值
   const displayDuration = useLiveDuration(running, totalDurationMs)
 
