@@ -30,6 +30,7 @@ from app.agent.tools.final_answer import FinalAnswerTool
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.prompts.progressive_rag import render_system_prompt
@@ -905,6 +906,7 @@ def _build_agent_runtime(
     tenant_id: str | None,
     session_id: str | None,
     include_session_source: bool = False,
+    attachments: list[dict] | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -925,6 +927,9 @@ def _build_agent_runtime(
         kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
         include_session_source: 是否把会话文件源加入 knowledge_search 检索（由装配层据
             session_has_files 决定，不暴露给 LLM；Property 5）。
+        attachments: 本条消息绑定的附件快照列表（来自 request.attachments，每项含
+            file_id / filename）。非空时注册 read_attachment 工具，让 Agent 能确定性地
+            整篇直读本次附件，而非靠 knowledge_search 语义检索去和知识库文档竞争召回。
 
     Returns:
         (engine, state, event_bus)。其中 ``state`` 是传给工具的 AgentState，
@@ -968,6 +973,12 @@ def _build_agent_runtime(
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool())
+    # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
+    # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
+    # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
+    anchored_attachments = [a for a in (attachments or []) if a.get("file_id")]
+    if _tool_enabled("read_attachment") and anchored_attachments and session_id:
+        tool_registry.register(ReadAttachmentTool(session_id, anchored_attachments))
     tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
 
     # 可选工具：web_search（需配置 searxng_url 且预设允许）
@@ -983,6 +994,11 @@ def _build_agent_runtime(
     kb_names = list(kb_ids)
     if include_session_source and session_id:
         kb_names.append("本会话上传的文件")
+    # 本条消息附件：以具体文件名提示，并明确"用 read_attachment 直读"，让 Agent 不要
+    # 把附件解析误派给 knowledge_search（后者会与知识库文档竞争召回，可能答非所问）。
+    if anchored_attachments:
+        att_names = "、".join(a.get("filename", "") for a in anchored_attachments)
+        kb_names.append(f"本条消息附件（用 read_attachment 直接读取）：{att_names}")
     custom_instructions = (preset_cfg.get("custom_instructions") or "").strip()
     system_prompt = render_system_prompt(
         AgentConfig(custom_instructions=custom_instructions),
@@ -1014,6 +1030,7 @@ async def _run_agent_nonstream(
     session_id: str | None,
     history: list[dict] | None,
     include_session_source: bool = False,
+    attachments: list[dict] | None = None,
 ) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
@@ -1023,6 +1040,8 @@ async def _run_agent_nonstream(
     Args:
         kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
         include_session_source: 是否把会话文件源加入 agent 检索（由路由层据 session_has_files 决定）。
+        attachments: 本条消息绑定的附件快照列表（来自 request.attachments），透传给
+            _build_agent_runtime 注册 read_attachment 工具，供 Agent 确定性整篇直读本次附件。
 
     Returns:
         (final_answer, knowledge_refs, degraded, agent_steps, failed_source_ids)
@@ -1030,6 +1049,7 @@ async def _run_agent_nonstream(
     engine, state, event_bus = _build_agent_runtime(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
         include_session_source=include_session_source,
+        attachments=attachments,
     )
 
     steps_collected: list[dict] = []
@@ -1147,6 +1167,7 @@ async def _stream_response(
         engine, state, event_bus = _build_agent_runtime(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
             tenant_id, session_id, include_session_source=session_has_files,
+            attachments=attachments,
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1531,6 +1552,7 @@ async def chat_completions(
             user_query, list(requested_kb_ids), llm, preset_cfg,
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
             include_session_source=session_has_files,
+            attachments=nonstream_attachments,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)

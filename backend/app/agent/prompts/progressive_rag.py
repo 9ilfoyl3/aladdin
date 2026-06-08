@@ -142,6 +142,23 @@ the user's wording (and any topic words they mention) to pull the uploaded file'
 then answer from it. If the user's wording is too generic to form keywords, search with \
 broad queries to surface the uploaded file's content and summarize what was found.
 
+**Attachment bound to the CURRENT message (highest priority):** When the bound sources \
+list a "本条消息附件" entry and the `read_attachment` tool is available, the user has \
+attached one or more specific files to THIS message. These attachments are pinned and \
+directly readable — you do NOT need to search for them. Therefore:
+   - When the user asks to parse, summarize, explain, or otherwise work with "附件 / 这个 \
+文件 / 这个文档 / 这张图 / 这张截图" in the current message, your FIRST action MUST be to \
+call `read_attachment` to read the attached file's full content. Do NOT use \
+knowledge_search or grep_chunks to look for the attachment — those search the whole \
+knowledge base and may return a DIFFERENT document that merely looks similar. \
+`read_attachment` is a deterministic, direct read of exactly the pinned file.
+   - If multiple files are attached, pass the `filename` argument to pick one; otherwise \
+the first attachment is read. For large attachments, follow the pagination hint in the \
+tool output to read subsequent pages until you have enough content.
+   - Base your answer strictly on what `read_attachment` returns. Only fall back to \
+knowledge_search if the user's question clearly goes beyond the attachment itself (e.g. \
+comparing the attachment against knowledge base material).
+
 #### Context Resolution (do this BEFORE forming any search query)
 The current question often depends on earlier turns. Before building any grep_chunks / \
 knowledge_search query:
