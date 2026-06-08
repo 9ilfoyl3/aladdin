@@ -13,7 +13,8 @@ import { Label } from '@/components/ui/label'
 import { Card } from '@/components/ui/card'
 
 // 免登录邀请接受页：/invite/:token
-// 校验邀请有效性后，被邀请人填用户名/密码（建租户邀请还需填租户名）完成建号。
+// 校验邀请有效性后，被邀请人填用户名/密码（创建空间邀请还需填空间名）完成建号。
+// 文案规则：被邀请人非超管视角，统一用"空间"而非"租户"。
 export default function InviteAccept() {
   const { token = '' } = useParams()
   const navigate = useNavigate()
@@ -86,10 +87,10 @@ export default function InviteAccept() {
             <UserPlus className="h-6 w-6 text-primary" />
           </div>
           <h1 className="text-lg font-semibold">
-            {isCreateTenant ? '创建租户与管理员账号' : '创建账号'}
+            {isCreateTenant ? '创建空间与管理员账号' : '创建账号'}
           </h1>
           {!isCreateTenant && info.tenant_name && (
-            <p className="text-sm text-muted-foreground">加入租户：{info.tenant_name}</p>
+            <p className="text-sm text-muted-foreground">加入空间：{info.tenant_name}</p>
           )}
         </div>
         <form onSubmit={onSubmit} className="space-y-4">
@@ -99,7 +100,7 @@ export default function InviteAccept() {
           </div>
           {isCreateTenant && (
             <div className="space-y-1.5">
-              <Label htmlFor="tenant">租户名称</Label>
+              <Label htmlFor="tenant">空间名称</Label>
               <Input id="tenant" value={tenantName} onChange={(e) => setTenantName(e.target.value)} placeholder="如：法院X" />
             </div>
           )}

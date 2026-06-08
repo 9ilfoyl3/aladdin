@@ -15,12 +15,16 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
 import { toast } from 'sonner'
 
-const SCOPE_LABEL: Record<string, string> = {
-  create_tenant: '建租户+管理员',
-  create_user: '建本租户用户',
+// 用途标签按身份区分用词：超管视角才有"租户"概念；租户管理员视角统一叫"空间"。
+// - create_tenant：仅超管可见（建一个新租户 + 其管理员）。
+// - create_user：超管看到的是"为某租户建用户"，租管看到的是"邀请用户加入空间"。
+function scopeLabel(scope: string, isSuperAdmin: boolean): string {
+  if (scope === 'create_tenant') return '创建租户 + 管理员'
+  if (scope === 'create_user') return isSuperAdmin ? '邀请用户加入租户' : '邀请用户加入空间'
+  return scope
 }
 
-// 邀请链接管理页面。超管可发"建租户"邀请；租管(user:manage)可发"建本租户用户"邀请。
+// 邀请链接管理页面。超管可发"建租户"邀请；租管(user:manage)可发"邀请用户加入空间"邀请。
 function Invitations() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
@@ -126,7 +130,11 @@ function Invitations() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">邀请链接</h2>
-          <p className="text-muted-foreground text-sm mt-1">生成带有效期的注册邀请链接。链接可在列表随时复制、重复使用，直到过期 / 用满 / 吊销。</p>
+          <p className="text-muted-foreground text-sm mt-1">
+            {isSuperAdmin
+              ? '生成带有效期的注册邀请链接，用于邀请用户注册加入指定租户。链接可在列表随时复制、重复使用，直到过期 / 用满 / 吊销。'
+              : '生成带有效期的注册邀请链接，用于邀请用户注册加入你的空间。链接可在列表随时复制、重复使用，直到过期 / 用满 / 吊销。'}
+          </p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -156,7 +164,7 @@ function Invitations() {
             <TableBody>
               {invitations.map((inv) => (
                 <TableRow key={inv.id}>
-                  <TableCell>{SCOPE_LABEL[inv.scope] || inv.scope}</TableCell>
+                  <TableCell>{scopeLabel(inv.scope, isSuperAdmin)}</TableCell>
                   <TableCell className="text-muted-foreground">
                     {inv.used_count} / {inv.max_uses ?? '∞'}
                   </TableCell>
@@ -218,6 +226,11 @@ function Invitations() {
             <div>
               <DialogHeader>
                 <DialogTitle>生成邀请链接</DialogTitle>
+                <DialogDescription>
+                  {isSuperAdmin
+                    ? '生成一条注册邀请链接，被邀请人通过它注册并加入对应租户。'
+                    : '生成一条注册邀请链接，被邀请人通过它注册并加入你的空间。'}
+                </DialogDescription>
               </DialogHeader>
               <form onSubmit={(e) => { e.preventDefault(); createMutation.mutate() }} className="space-y-4 mt-4">
                 {isSuperAdmin && (
@@ -226,8 +239,8 @@ function Invitations() {
                     <Select value={scope} onValueChange={setScope}>
                       <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="create_tenant">建租户 + 管理员（超管）</SelectItem>
-                        <SelectItem value="create_user">建本租户用户</SelectItem>
+                        <SelectItem value="create_tenant">创建租户 + 管理员</SelectItem>
+                        <SelectItem value="create_user">邀请用户加入租户</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

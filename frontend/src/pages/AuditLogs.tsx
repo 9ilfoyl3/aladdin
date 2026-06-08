@@ -46,7 +46,7 @@ function AuditLogs() {
     <div>
       <div className="mb-6">
         <h2 className="text-2xl font-bold">审计日志</h2>
-        <p className="text-muted-foreground text-sm mt-1">记录管理操作的元数据（不含业务内容正文）。超管查看全局，租户管理员查看本租户。</p>
+        <p className="text-muted-foreground text-sm mt-1">记录管理操作的元数据（不含业务内容正文）。超管查看全局，空间管理员查看本空间。</p>
       </div>
 
       <div className="mb-4 relative max-w-xs">

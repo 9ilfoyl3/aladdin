@@ -145,7 +145,7 @@ function AgentConfig() {
       agentPresetApi.update(id, { is_shared }),
     onSuccess: (_d, vars) => {
       queryClient.invalidateQueries({ queryKey: ['agent-presets'] })
-      toast.success(vars.is_shared ? '已开放给本租户' : '已设为私有')
+      toast.success(vars.is_shared ? '已开放给本空间' : '已设为私有')
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : '操作失败'),
   })
@@ -307,7 +307,7 @@ function AgentConfig() {
                           ? 'border-primary/30 text-primary bg-primary/5 hover:bg-primary/10'
                           : 'border-border text-muted-foreground bg-background hover:bg-muted'
                       }`}
-                      title={preset.is_shared ? '点击关闭开放（设为私有）' : '点击开放给本租户全体成员使用'}
+                      title={preset.is_shared ? '点击关闭开放（设为私有）' : '点击开放给本空间全体成员使用'}
                     >
                       {preset.is_shared ? <Share2 className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
                       {preset.is_shared ? '已开放' : '开放'}
@@ -440,13 +440,13 @@ function AgentConfig() {
                 onCheckedChange={(checked) => setForm({ ...form, thinking_enabled: checked })}
               />
             </div>
-            {/* 开放给本租户：开启后本租户全体成员可见可用（仅创建者可改/删） */}
+            {/* 开放给本空间：开启后本空间全体成员可见可用（仅创建者可改/删） */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2.5">
               <div className="flex items-center gap-2">
                 <Share2 className="h-4 w-4 text-muted-foreground" />
                 <div>
-                  <Label htmlFor="is_shared" className="text-sm cursor-pointer">开放给本租户</Label>
-                  <p className="text-xs text-muted-foreground">开启后，本租户所有成员可在问答中选择使用该智能体（仅你本人可修改或删除）</p>
+                  <Label htmlFor="is_shared" className="text-sm cursor-pointer">开放给本空间</Label>
+                  <p className="text-xs text-muted-foreground">开启后，本空间所有成员可在问答中选择使用该智能体（仅你本人可修改或删除）</p>
                 </div>
               </div>
               <Switch

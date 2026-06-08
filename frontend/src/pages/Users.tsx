@@ -120,7 +120,7 @@ function Users() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold">用户管理</h2>
-          <p className="text-muted-foreground text-sm mt-1">在本租户内创建用户（普通成员）、启停、重置密码、转移知识库。新建用户首次登录需强制改密。</p>
+          <p className="text-muted-foreground text-sm mt-1">在本空间内创建用户（普通成员）、启停、重置密码、转移知识库。新建用户首次登录需强制改密。</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" />
@@ -242,7 +242,7 @@ function Users() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>创建用户</DialogTitle>
-            <DialogDescription>新用户将作为普通成员加入本租户。系统将生成一次性临时密码，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
+            <DialogDescription>新用户将作为普通成员加入本空间。系统将生成一次性临时密码，请创建后复制交给用户。头像与简介可选，用户后续也能自行修改。</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => { e.preventDefault(); const ue = validateUsername(username); if (ue) return toast.error(ue); createMutation.mutate() }} className="space-y-4 mt-2">
             <div>
@@ -303,14 +303,14 @@ function Users() {
           <DialogHeader>
             <DialogTitle>转移知识库 · {transferUser?.username}</DialogTitle>
             <DialogDescription>
-              把该用户名下的全部知识库归属转移给同租户内另一启用用户（仅改归属，不搬数据，即时生效）。用户须先停用，转移即资产交接的最后一步。
+              把该用户名下的全部知识库归属转移给同空间内另一启用用户（仅改归属，不搬数据，即时生效）。用户须先停用，转移即资产交接的最后一步。
             </DialogDescription>
           </DialogHeader>
           <div className="mt-2">
             <Label>接收用户</Label>
             <Select value={transferTarget} onValueChange={setTransferTarget}>
               <SelectTrigger className="mt-1">
-                <SelectValue placeholder="选择同租户内的接收用户" />
+                <SelectValue placeholder="选择同空间内的接收用户" />
               </SelectTrigger>
               <SelectContent>
                 {users

@@ -647,8 +647,8 @@ function KnowledgeBase() {
                   <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="private">私有（仅自己与被授权用户）</SelectItem>
-                    <SelectItem value="org_read">组织 · 只读（本租户成员可读）</SelectItem>
-                    <SelectItem value="org_write">组织 · 读写（本租户成员可读写）</SelectItem>
+                    <SelectItem value="org_read">组织 · 只读（空间成员可读）</SelectItem>
+                    <SelectItem value="org_write">组织 · 读写（空间成员可读写）</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground mt-1.5">创建后也可在卡片上随时调整可见性。</p>
@@ -672,7 +672,7 @@ function KnowledgeBase() {
           <DialogHeader>
             <DialogTitle>可见性 · {visibilityKb?.name}</DialogTitle>
             <DialogDescription>
-              私有库仅创建人与被授权用户可访问；组织公共库本租户成员可读，读写档允许成员上传/删除文档。
+              私有库仅创建人与被授权用户可访问；组织公共库空间成员可读，读写档允许成员上传/删除文档。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 mt-2">
@@ -700,7 +700,7 @@ function KnowledgeBase() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>共享知识库 · {shareKb?.name}</DialogTitle>
-            <DialogDescription>把该知识库点对点分享给同租户的一个或多个用户，并指定读 / 写权限。</DialogDescription>
+            <DialogDescription>把该知识库点对点分享给同空间的一个或多个用户，并指定读 / 写权限。</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 mt-2">
             <div>
