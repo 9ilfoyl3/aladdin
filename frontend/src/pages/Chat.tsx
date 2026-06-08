@@ -17,6 +17,9 @@ import { authHeaders, handleUnauthorized } from '@/lib/auth'
 interface KnowledgeBaseItem {
   id: string
   name: string
+  // 归属/可见性（用于聊天选择器按「个人 / 共享」分组；后端列表已透出）
+  owner_user_id?: string | null
+  visibility?: string | null
 }
 
 interface LLMConfigItem {

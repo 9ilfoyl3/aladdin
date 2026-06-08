@@ -16,6 +16,8 @@ const UPLOAD_ACCEPT_LABEL = 'pdf、docx、xlsx、pptx、csv、txt、md、jpg、j
 interface KnowledgeBaseItem {
   id: string
   name: string
+  owner_user_id?: string | null
+  visibility?: string | null
 }
 
 interface LLMConfigItem {
