@@ -272,7 +272,8 @@ function Chat() {
         // 标记该会话为本地发起发送，避免 setCurrentSessionId 触发的 loadMessages 覆盖本地消息
         pendingSendSessionRef.current = session.id
         setCurrentSessionId(session.id)
-        refreshSessions()
+        // 不在此刷新侧栏：此刻会话尚无消息（被空会话过滤隐藏）。
+        // 待首个流式分片到达（后端已入库用户消息+播种标题）时再刷新。
       } catch (e) {
         console.error('自动创建会话失败', e)
       }
@@ -338,11 +339,19 @@ function Chat() {
       // 检索降级标志（来自 meta 事件 metadata）：区分会话文件源 / 知识库源失败（Req 2.x）
       let sessionSourceFailed = false
       let kbSourceFailed = false
+      // 后端在生成回答前已入库用户消息并播种标题；首个流式分片到达时刷新侧栏，
+      // 让新会话（及其问题标题）立即出现，无需等 AI 答完。
+      let sidebarRefreshed = false
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+
+          if (!sidebarRefreshed) {
+            sidebarRefreshed = true
+            refreshSessions()
+          }
 
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')

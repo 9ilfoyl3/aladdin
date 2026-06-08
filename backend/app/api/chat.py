@@ -62,7 +62,7 @@ from app.session_upload.service import get_session_upload_service
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, SESSION_FILES_KB_ID, build_session_id_expr, get_milvus_client
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 logger = logging.getLogger(__name__)
 
@@ -342,23 +342,72 @@ async def _save_message(session_id: str, role: str, content: str, references: li
         await session.commit()
 
 
-async def _auto_title_session(session_id: str, user_query: str, assistant_answer: str = "") -> None:
-    """自动为新会话生成标题
+def _truncate_title(user_query: str) -> str:
+    """用问题文本截断生成占位标题（≤30 字符）。"""
+    return user_query[:30] + ("..." if len(user_query) > 30 else "")
 
-    首次消息时调用 LLM 生成 ≤15 字的简短标题，
-    失败时回退到截断用户消息前 30 字符。
+
+async def _persist_user_message_and_seed_title(
+    session_id: str,
+    user_query: str,
+    *,
+    kb_id: str | None = None,
+    kb_ids: list | None = None,
+    tenant_id: str | None = None,
+    attachments: list | None = None,
+) -> bool:
+    """发起对话即入库：保存用户消息，并在首轮用问题文本播种会话标题。
+
+    在生成回答之前调用，使新会话立即拥有消息记录（侧栏过滤空会话，落库后即可见）
+    与一个可读标题（问题截断）。AI 答完后再异步精炼标题。
+
+    Returns:
+        本会话是否为首轮对话（无任何历史消息）。供调用方决定 AI 答完后是否精炼标题。
     """
     async with async_session() as session:
-        result = await session.execute(
-            select(ChatSession).where(ChatSession.id == session_id)
+        count = await session.execute(
+            select(func.count(ChatMessageRecord.id)).where(
+                ChatMessageRecord.session_id == session_id
+            )
         )
-        chat_session = result.scalar_one_or_none()
-        if chat_session and chat_session.title == "新对话":
-            # 尝试用 LLM 生成标题
-            title = await _generate_title_with_llm(user_query, assistant_answer)
-            if not title:
-                # 回退到截断
-                title = user_query[:30] + ("..." if len(user_query) > 30 else "")
+        is_first_round = (count.scalar() or 0) == 0
+
+        session.add(
+            ChatMessageRecord(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="user",
+                content=user_query,
+                attachments=attachments,
+                kb_id=kb_id,
+                kb_ids=kb_ids,
+                tenant_id=tenant_id,
+            )
+        )
+
+        if is_first_round:
+            chat_session = await session.get(ChatSession, session_id)
+            if chat_session is not None and chat_session.title == "新对话":
+                chat_session.title = _truncate_title(user_query)
+
+        await session.commit()
+        return is_first_round
+
+
+async def _refine_session_title(
+    session_id: str, user_query: str, assistant_answer: str = ""
+) -> None:
+    """AI 答完后异步精炼会话标题（仅首轮调用）。
+
+    标题在发起对话时已用问题文本播种，此处用 LLM 生成更贴切的 ≤15 字标题覆盖。
+    LLM 失败则保留已播种的问题标题，不影响主流程。
+    """
+    title = await _generate_title_with_llm(user_query, assistant_answer)
+    if not title:
+        return
+    async with async_session() as session:
+        chat_session = await session.get(ChatSession, session_id)
+        if chat_session is not None:
             chat_session.title = title
             await session.commit()
 
@@ -1062,6 +1111,18 @@ async def _stream_response(
         mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=multi_kb_requested
     )
 
+    # 发起对话即入库：在检索/生成之前先保存用户消息并播种标题，使新会话立即出现在
+    # 侧栏（侧栏过滤无消息空会话）。AI 答完后再异步精炼标题（仅首轮）。
+    is_first_round = False
+    if session_id:
+        try:
+            is_first_round = await _persist_user_message_and_seed_title(
+                session_id, query, kb_id=kb_id, kb_ids=kb_ids,
+                tenant_id=tenant_id, attachments=attachments,
+            )
+        except Exception as e:
+            logger.warning("入库用户消息失败: %s", e)
+
     # Agent 模式：边检索边推送进度
     chunks: list[RetrievalResult] = []
     degraded = False
@@ -1173,15 +1234,15 @@ async def _stream_response(
         }
         yield json.dumps(meta_event, ensure_ascii=False)
 
-        # 保存消息到会话（不阻塞 SSE 关闭）
+        # 保存助手消息到会话（用户消息已在生成前入库；不阻塞 SSE 关闭）
         if session_id and full_response:
             try:
-                await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id, attachments=attachments)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
                 await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
-                # 标题生成放到后台，不阻塞 SSE 关闭
-                asyncio.create_task(_auto_title_session(session_id, query, full_response))
+                # 标题精炼放到后台，不阻塞 SSE 关闭（仅首轮精炼，已有问题标题兜底）
+                if is_first_round:
+                    asyncio.create_task(_refine_session_title(session_id, query, full_response))
             except Exception as e:
                 logger.warning("保存会话消息失败: %s", e)
 
@@ -1294,14 +1355,14 @@ async def _stream_response(
     }
     yield json.dumps(meta_event, ensure_ascii=False)
 
-    # 保存消息到会话（如果指定了 session_id）
+    # 保存助手消息到会话（用户消息已在生成前入库）
     if session_id and full_response:
         try:
-            await _save_message(session_id, "user", query, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id, attachments=attachments)
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
             await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
-            await _auto_title_session(session_id, query, full_response)
+            if is_first_round:
+                asyncio.create_task(_refine_session_title(session_id, query, full_response))
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
 
@@ -1427,6 +1488,22 @@ async def chat_completions(
         mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=bool(request.kb_ids)
     )
 
+    # 发起对话即入库：生成回答前先保存用户消息并播种标题（与流式入口一致）。
+    is_first_round = False
+    nonstream_msg_kb_ids = list(requested_kb_ids) if len(requested_kb_ids) > 1 else None
+    nonstream_attachments = (
+        [a.model_dump() for a in request.attachments] if request.attachments else None
+    )
+    if request.session_id:
+        try:
+            is_first_round = await _persist_user_message_and_seed_title(
+                request.session_id, user_query, kb_id=request.knowledge_base_id,
+                kb_ids=nonstream_msg_kb_ids, tenant_id=tenant_id,
+                attachments=nonstream_attachments,
+            )
+        except Exception as e:
+            logger.warning("入库用户消息失败: %s", e)
+
     # Agent 模式：跑 ReAct 引擎并直接采用其最终答案（与流式共用 _build_agent_runtime），
     # 不再丢弃 final_answer 后二次走普通 RAG 生成（既省一次 LLM 调用，也保留 Agent 推理结果）。
     # 始终走 AGENT（含会话源由 session_has_files 决定），不再因会话文件降级（Property 2）。
@@ -1460,15 +1537,11 @@ async def chat_completions(
         )
         if request.session_id and answer:
             try:
-                msg_kb_ids = list(requested_kb_ids) if len(requested_kb_ids) > 1 else None
-                attachments_data = (
-                    [a.model_dump() for a in request.attachments] if request.attachments else None
-                )
-                await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id, attachments=attachments_data)
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps if agent_steps else None
-                await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
-                await _auto_title_session(request.session_id, user_query, answer)
+                await _save_message(request.session_id, "assistant", answer, references=refs_data, agent_steps=steps_data, kb_id=request.knowledge_base_id, kb_ids=nonstream_msg_kb_ids, tenant_id=tenant_id)
+                if is_first_round:
+                    asyncio.create_task(_refine_session_title(request.session_id, user_query, answer))
             except Exception as e:
                 logger.warning("保存会话消息失败: %s", e)
         return response
@@ -1541,17 +1614,13 @@ async def chat_completions(
         },
     )
 
-    # 保存消息到会话（如果指定了 session_id）
+    # 保存助手消息到会话（用户消息已在生成前入库）
     if request.session_id and answer:
         try:
-            msg_kb_ids = request.kb_ids if use_multi_kb else None
-            attachments_data = (
-                [a.model_dump() for a in request.attachments] if request.attachments else None
-            )
-            await _save_message(request.session_id, "user", user_query, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id, attachments=attachments_data)
             refs_data = [ref.model_dump() for ref in references] if references else None
-            await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=msg_kb_ids, tenant_id=tenant_id)
-            await _auto_title_session(request.session_id, user_query, answer)
+            await _save_message(request.session_id, "assistant", answer, references=refs_data, kb_id=request.knowledge_base_id, kb_ids=nonstream_msg_kb_ids, tenant_id=tenant_id)
+            if is_first_round:
+                asyncio.create_task(_refine_session_title(request.session_id, user_query, answer))
         except Exception as e:
             logger.warning("保存会话消息失败: %s", e)
 
