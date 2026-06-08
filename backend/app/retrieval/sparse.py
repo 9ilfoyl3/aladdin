@@ -21,7 +21,7 @@ class SparseRetriever(BaseRetriever):
         self.milvus = milvus_client
 
     async def search(
-        self, query: str, kb_id: str, top_k: int = 10, **kwargs
+        self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None, **kwargs
     ) -> list[RetrievalResult]:
         """执行稀疏向量检索
 
@@ -32,7 +32,11 @@ class SparseRetriever(BaseRetriever):
         query_sparse = sparse_vectors[0]
 
         # 2. 在 Milvus 中执行稀疏向量搜索
-        hits = await self.milvus.search_sparse(kb_id, query_sparse, top_k)
+        # load_cache_ttl 从 kwargs 取出透传给 milvus（与 vector 侧 ef 处理一致），默认 0 = 每次 load
+        load_cache_ttl = kwargs.pop("load_cache_ttl", 0)
+        hits = await self.milvus.search_sparse(
+            kb_id, query_sparse, top_k, expr=expr, load_cache_ttl=load_cache_ttl
+        )
 
         # 3. 转换为 RetrievalResult 并按分数降序排列
         results = [
@@ -44,6 +48,7 @@ class SparseRetriever(BaseRetriever):
                 metadata={
                     "parent_id": hit.get("parent_id", ""),
                     "chunk_index": hit.get("chunk_index", 0),
+                    "element_type": hit.get("element_type", "text"),
                 },
             )
             for hit in hits

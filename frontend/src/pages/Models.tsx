@@ -1,14 +1,16 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Save, Route, RefreshCw, Brain, Search, LayoutGrid, List } from 'lucide-react'
-import { llmConfigApi, agentNodeConfigApi } from '@/lib/api'
-import type { AgentNodeConfigUpdate } from '@/lib/api'
+import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Search, LayoutGrid, List } from 'lucide-react'
+import { llmConfigApi } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 interface LLMConfigItem {
   id: string
@@ -19,6 +21,7 @@ interface LLMConfigItem {
   api_key_set: boolean
   is_default: boolean
   stream_enabled: boolean
+  thinking_enabled: boolean
   max_context_tokens: number | null
   chat_visible: boolean
   created_at: string
@@ -32,6 +35,7 @@ interface FormData {
   api_key: string
   is_default: boolean
   stream_enabled: boolean
+  thinking_enabled: boolean
   max_context_tokens: string
   chat_visible: boolean
 }
@@ -44,12 +48,14 @@ const emptyForm: FormData = {
   api_key: '',
   is_default: false,
   stream_enabled: true,
+  thinking_enabled: false,
   max_context_tokens: '',
   chat_visible: true,
 }
 
 function Models() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<LLMConfigItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -82,6 +88,7 @@ function Models() {
       api_key: data.api_key || undefined,
       is_default: data.is_default,
       stream_enabled: data.stream_enabled,
+      thinking_enabled: data.thinking_enabled,
       max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
       chat_visible: data.chat_visible,
     }),
@@ -110,18 +117,27 @@ function Models() {
     },
   })
 
-  const [testResult, setTestResult] = useState<{ id: string; success: boolean; message: string; reply?: string } | null>(null)
+  // 删除模型配置（统一确认交互）
+  async function handleDelete(config: LLMConfigItem) {
+    const ok = await confirm({
+      title: '删除模型配置',
+      description: <>确定要删除模型配置「{config.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(config.id)
+  }
+
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string; reply?: string }>>({})
   const [testingId, setTestingId] = useState<string | null>(null)
 
   const testMutation = useMutation({
     mutationFn: (id: string) => llmConfigApi.test(id),
-    onMutate: (id) => { setTestingId(id); setTestResult(null) },
+    onMutate: (id) => { setTestingId(id) },
     onSuccess: (data, id) => {
-      setTestResult({ id, ...data })
+      setTestResults(prev => ({ ...prev, [id]: data }))
       setTestingId(null)
     },
     onError: (_err, id) => {
-      setTestResult({ id, success: false, message: '请求失败' })
+      setTestResults(prev => ({ ...prev, [id]: { success: false, message: '请求失败' } }))
       setTestingId(null)
     },
   })
@@ -129,61 +145,18 @@ function Models() {
   const [dialogTestResult, setDialogTestResult] = useState<{ success: boolean; message: string; reply?: string } | null>(null)
   const [dialogTesting, setDialogTesting] = useState(false)
 
-  // Agent 节点配置相关状态
-  const { data: nodeConfig } = useQuery({
-    queryKey: ['agent-node-configs'],
-    queryFn: () => agentNodeConfigApi.get(),
-  })
-
-  const [nodeForm, setNodeForm] = useState<AgentNodeConfigUpdate>({})
-  const [nodeConfigSaved, setNodeConfigSaved] = useState(false)
-
-  // 同步节点配置到表单
-  useEffect(() => {
-    if (nodeConfig) {
-      setNodeForm({
-        router_model_id: nodeConfig.router_model_id,
-        rewriter_model_id: nodeConfig.rewriter_model_id,
-        reflector_model_id: nodeConfig.reflector_model_id,
-      })
-    }
-  }, [nodeConfig])
-
-  const nodeConfigMutation = useMutation({
-    mutationFn: (data: AgentNodeConfigUpdate) => agentNodeConfigApi.update(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['agent-node-configs'] })
-      setNodeConfigSaved(true)
-      setTimeout(() => setNodeConfigSaved(false), 2000)
-    },
-  })
-
-  function handleNodeConfigSave() {
-    // null 值转换为空字符串以清除绑定
-    const payload: AgentNodeConfigUpdate = {
-      router_model_id: nodeForm.router_model_id === null ? '' : nodeForm.router_model_id,
-      rewriter_model_id: nodeForm.rewriter_model_id === null ? '' : nodeForm.rewriter_model_id,
-      reflector_model_id: nodeForm.reflector_model_id === null ? '' : nodeForm.reflector_model_id,
-    }
-    nodeConfigMutation.mutate(payload)
-  }
-
   async function handleTestInDialog() {
     setDialogTesting(true)
     setDialogTestResult(null)
     try {
-      let result
-      // 编辑模式下，如果用户没有重新输入 API Key，使用已保存配置测试
-      if (editingItem && !form.api_key && editingItem.api_key_set) {
-        result = await llmConfigApi.test(editingItem.id)
-      } else {
-        result = await llmConfigApi.testConnection({
-          provider: form.provider,
-          base_url: form.base_url,
-          model: form.model,
-          api_key: form.api_key || undefined,
-        })
-      }
+      // 始终用表单当前值测试，API Key 为空时后端通过 config_id 从数据库补全
+      const result = await llmConfigApi.testConnection({
+        provider: form.provider,
+        base_url: form.base_url,
+        model: form.model,
+        api_key: form.api_key || undefined,
+        config_id: editingItem?.id || undefined,
+      })
       setDialogTestResult(result)
     } catch {
       setDialogTestResult({ success: false, message: '请求失败' })
@@ -209,6 +182,7 @@ function Models() {
       api_key: '',
       is_default: item.is_default,
       stream_enabled: item.stream_enabled,
+      thinking_enabled: item.thinking_enabled,
       max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
       chat_visible: item.chat_visible,
     })
@@ -238,129 +212,10 @@ function Models() {
           <p className="text-muted-foreground text-sm mt-1">配置多个 LLM 模型，在对话中灵活切换</p>
         </div>
         <div className="flex items-center gap-2">
-          {nodeConfigSaved && (
-            <span className="text-sm text-green-600 flex items-center gap-1 animate-in fade-in duration-200">
-              <CheckCircle className="h-4 w-4" />
-              已保存
-            </span>
-          )}
-          <Button
-            onClick={handleNodeConfigSave}
-            disabled={nodeConfigMutation.isPending}
-            variant="outline"
-            className="gap-2 cursor-pointer"
-          >
-            <Save className="h-4 w-4" />
-            {nodeConfigMutation.isPending ? '保存中...' : '保存配置'}
-          </Button>
           <Button onClick={openCreate} className="gap-2 cursor-pointer">
             <Plus className="h-4 w-4" />
             添加模型
           </Button>
-        </div>
-      </div>
-
-      {/* Agent 节点模型配置 - 紧凑内联 */}
-      <div className="mb-6 pb-6 border-b border-border">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                <Route className="h-4 w-4 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">查询路由</h3>
-                <p className="text-[11px] text-muted-foreground">判断意图，决定是否检索</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.router_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, router_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
-                <RefreshCw className="h-4 w-4 text-amber-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">查询改写</h3>
-                <p className="text-[11px] text-muted-foreground">优化查询，提升召回质量</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.rewriter_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, rewriter_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-4 transition-all duration-200 hover:shadow-md hover:border-primary/20">
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                <Brain className="h-4 w-4 text-violet-600" />
-              </div>
-              <div>
-                <h3 className="font-medium text-sm leading-tight">结果反思</h3>
-                <p className="text-[11px] text-muted-foreground">评估结果，决定是否重检索</p>
-              </div>
-            </div>
-            <Select
-              value={nodeForm.reflector_model_id || '__none__'}
-              onValueChange={(val) => setNodeForm({ ...nodeForm, reflector_model_id: val === '__none__' ? null : val })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">使用对话模型</span>
-                </SelectItem>
-                {configs.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-2">
-                      {m.name}
-                      {!m.chat_visible && <Badge variant="secondary" className="text-[10px] px-1 py-0">内部</Badge>}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         </div>
       </div>
 
@@ -405,12 +260,7 @@ function Models() {
 
       {/* 模型列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={6} />
       ) : configs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -427,7 +277,7 @@ function Models() {
           <p className="text-muted-foreground text-sm">没有匹配的模型</p>
         </div>
       ) : viewMode === 'grid' ? (
-        <div>
+        <div className="animate-in fade-in-0 duration-500">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredConfigs.map((config) => (
               <div
@@ -469,18 +319,18 @@ function Models() {
                     <Pencil className="h-3.5 w-3.5" />
                     编辑
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                  <Button variant="ghost" size="sm" className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer" onClick={() => handleDelete(config)}>
                     <Trash2 className="h-3.5 w-3.5" />
                     删除
                   </Button>
                 </div>
-                {testResult && testResult.id === config.id && (
-                  <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                {testResults[config.id] && (
+                  <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResults[config.id]?.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
                     <div className="flex items-center gap-1.5">
-                      {testResult.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                      <span>{testResult.message}</span>
+                      {testResults[config.id]?.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                      <span>{testResults[config.id]?.message}</span>
                     </div>
-                    {testResult.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResult.reply}</p>}
+                    {testResults[config.id]?.reply && <p className="mt-1 text-muted-foreground line-clamp-2">回复: {testResults[config.id]?.reply}</p>}
                   </div>
                 )}
               </div>
@@ -489,7 +339,7 @@ function Models() {
         </div>
       ) : (
         /* 列表视图 */
-        <div className="border border-border rounded-xl">
+        <div className="border border-border rounded-xl animate-in fade-in-0 duration-500">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
               <tr>
@@ -526,7 +376,7 @@ function Models() {
                       <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={() => openEdit(config)}>
                         <Pencil className="h-3 w-3" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={() => deleteMutation.mutate(config.id)}>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={() => handleDelete(config)}>
                         <Trash2 className="h-3 w-3" />
                       </Button>
                     </div>
@@ -592,8 +442,7 @@ function Models() {
             </div>
             <div>
               <Label>API Key</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
@@ -631,17 +480,28 @@ function Models() {
               <Label htmlFor="stream_enabled" className="text-sm font-normal cursor-pointer">启用流式输出</Label>
               <span className="text-xs text-muted-foreground">（部分模型不支持流式，关闭后使用非流式生成）</span>
             </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="thinking_enabled"
+                checked={form.thinking_enabled}
+                onChange={(e) => setForm({ ...form, thinking_enabled: e.target.checked })}
+                className="rounded border-border"
+              />
+              <Label htmlFor="thinking_enabled" className="text-sm font-normal cursor-pointer">启用深度思考</Label>
+              <span className="text-xs text-muted-foreground">（开启后模型会进行推理思考，适用于支持 thinking 的模型）</span>
+            </div>
             <div>
               <Label>最大上下文长度（token）</Label>
               <Input
                 type="number"
                 value={form.max_context_tokens}
                 onChange={(e) => setForm({ ...form, max_context_tokens: e.target.value })}
-                placeholder="不填则不限制，建议设为模型上下文窗口的 60%"
+                placeholder="留空默认 200000（200K）"
                 className="mt-1.5"
               />
               <p className="text-xs text-muted-foreground mt-1.5">
-                限制发送给模型的检索上下文长度，超出部分按相关性从低到高裁剪
+                填模型的完整上下文窗口（如 128000、1000000）。用于检索上下文裁剪和 Agent 上下文管理；留空默认 200K，百万上下文模型请手动填写
               </p>
             </div>
             {dialogTestResult && (
@@ -671,3 +531,5 @@ function Models() {
 }
 
 export default Models
+
+

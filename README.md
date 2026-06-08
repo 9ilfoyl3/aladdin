@@ -1,611 +1,361 @@
-# Agentic RAG 知识库系统
+<div align="center">
 
-基于 Agent 编排的 RAG（检索增强生成）知识库问答系统。通过路由判定、查询改写、迭代检索与反思机制，实现比传统 RAG 更精准的知识检索与回答生成。
+# 🤖 Artoo — 让知识库自己去检索：ReAct Agent 驱动的 Agentic RAG 框架
 
-## 快速开始
+**开源 · LLM 驱动 · 可私有化部署的智能知识库系统**
 
-### 前置要求
+Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语义检索、深度阅读、网页搜索与 MCP 工具，构建"先检索证据、再作答"的可追溯问答体验。
 
-| 依赖 | 版本要求 | 说明 |
-|------|----------|------|
-| Python | 3.12+ | 推荐 3.12 或 3.14 |
-| Node.js | 18+ | 前端构建，推荐 LTS 版本 |
-| Docker | 20.10+ | 用于运行 Milvus 向量数据库 |
-| Git | 最新 | 代码管理 |
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
+[![Milvus](https://img.shields.io/badge/Milvus-2.4+-00a1ea.svg)](https://milvus.io/)
 
-### 1. 克隆项目
+| **简体中文** | [English](./README_EN.md) |
 
-```bash
-git clone <repo-url>
-cd aladdin
-```
+</div>
 
-### 2. 环境配置（按平台）
+<p align="center">
+  <a href="#-项目介绍">项目介绍</a> •
+  <a href="#%EF%B8%8F-架构设计">架构设计</a> •
+  <a href="#-功能概览">功能概览</a> •
+  <a href="#-快速开始">快速开始</a> •
+  <a href="#-文档">文档</a> •
+  <a href="#-开发指南">开发指南</a>
+</p>
 
-#### macOS（Intel / Apple Silicon）
+---
 
-```bash
-# 安装 Python（如未安装）
-brew install python@3.12
+## 📌 项目介绍
 
-# 安装 Node.js（如未安装）
-brew install node
+**Artoo** 是一款开源的、基于大语言模型（LLM）的 Agentic RAG 知识库框架，专为企业级文档理解与可追溯问答场景打造。
 
-# 安装 Docker Desktop
-# 下载：https://www.docker.com/products/docker-desktop/
-# 安装后启动 Docker Desktop
+框架围绕三大核心能力构建：**ReAct Agent 智能推理**让大模型在 Think → Act → Observe 循环中自主决定检索策略与停止时机；**三路混合检索**通过稠密语义、稀疏向量与 BM25 全文检索并行召回，经 RRF 融合、Rerank 精排、MMR 去冗余与父块扩展输出高质量上下文；**结构感知文档处理**按文档逻辑结构切分、父子块映射，并对图文混排文档做并发 OCR。配合可视化的多模型管理、Embedding / Rerank / OCR 服务热切换、MCP 工具集成、Agent 技能（Skills）与三层递进式上下文管理，Artoo 把分散文档沉淀为可查询、可推理、可溯源的知识资产。
 
-# 创建虚拟环境并安装后端依赖
-python3.12 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r backend/requirements.txt
+所有 AI 推理（LLM / Embedding / Rerank / OCR）均通过 HTTP 调用外部服务，后端轻量、易于私有化离线部署，数据完全自主可控。Agent 推理过程通过 EventBus 实时流式推送到前端，思考、工具调用、引用来源、上下文 Token 占用全程可视。
 
-# 安装前端依赖
-cd frontend && npm install && cd ..
-```
+## ✨ 核心亮点
 
-环境变量关键配置：
-```bash
-EMBED_PROVIDER=sentence-transformers   # 或 flag-embedding（需额外安装 FlagEmbedding）
-EMBED_DEVICE=cpu                       # macOS 不支持 CUDA
-RERANK_PROVIDER=sentence-transformers  # 或 flag-embedding
-RERANK_DEVICE=cpu
-```
+- **真正的 ReAct Agent** —— 大模型通过 function calling 自主调用工具、分析结果、决定继续检索还是提交答案，而非固定流水线编排。
+- **Evidence-First 检索纪律** —— 内置 Progressive RAG 系统提示词（Assess-Reconnaissance-Plan-Execute 工作流），强制"先检索、深读 chunk、再作答"，杜绝凭记忆臆造。
+- **三路混合检索** —— Dense + Sparse + BM25 并行召回，RRF 融合 + Rerank 精排 + 复合评分 + MMR 去冗余 + 父块扩展。
+- **三层递进式上下文管理** —— BPE Token 估算 + API Usage 增量追踪 + LLM 摘要合并 + 分组截断兜底，长对话不超窗。
+- **可扩展工具生态** —— 内置知识检索、关键词匹配、深度阅读、网页搜索、思考、技能加载等工具，并支持接入远程 MCP Server。
+- **全程可视化** —— Agent 思考、工具调用、引用溯源、Token 占用通过 SSE 实时推送，前端逐 token 渲染。
 
-#### Windows
-
-推荐两种方式：
-
-**方式 A：WSL2（推荐，体验与 Linux 一致）**
-
-```powershell
-# 1. 安装 WSL2
-wsl --install
-
-# 2. 在 WSL2 中按 Linux 步骤操作（见下方）
-```
-
-**方式 B：原生 Windows**
-
-```powershell
-# 安装 Python 3.12+（从 https://www.python.org/downloads/ 下载）
-# 安装时勾选 "Add Python to PATH"
-
-# 安装 Node.js（从 https://nodejs.org/ 下载 LTS 版本）
-
-# 安装 Docker Desktop for Windows
-# 下载：https://www.docker.com/products/docker-desktop/
-
-# 创建虚拟环境
-python -m venv .venv
-.venv\Scripts\pip install --upgrade pip
-.venv\Scripts\pip install -r backend\requirements.txt
-
-# 安装前端依赖
-cd frontend
-npm install
-cd ..
-```
-
-环境变量关键配置：
-```bash
-EMBED_PROVIDER=sentence-transformers   # Windows 必须用此选项，flag-embedding 兼容性差
-EMBED_DEVICE=cpu                       # 无 NVIDIA GPU 时用 cpu
-RERANK_PROVIDER=sentence-transformers  # Windows 必须用此选项
-RERANK_DEVICE=cpu
-```
-
-> ⚠️ Windows 上 `FlagEmbedding` 库安装困难（peft、accelerate 等依赖编译问题），Embedding 和 Rerank 均请使用 `sentence-transformers` provider。
-
-#### Linux（有 NVIDIA GPU）
-
-```bash
-# 安装 Python
-sudo apt install python3.12 python3.12-venv
-
-# 安装 Node.js（通过 NodeSource）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# 安装 Docker
-# 参考：https://docs.docker.com/engine/install/ubuntu/
-
-# 创建虚拟环境并安装依赖
-python3.12 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r backend/requirements.txt
-
-# 安装前端依赖
-cd frontend && npm install && cd ..
-```
-
-环境变量关键配置：
-```bash
-EMBED_PROVIDER=sentence-transformers   # 或 flag-embedding（GPU 环境推荐，支持稀疏向量）
-EMBED_DEVICE=cuda                      # 有 GPU 时用 cuda
-RERANK_PROVIDER=sentence-transformers  # 或 flag-embedding
-RERANK_DEVICE=cuda
-```
-
-### 3. 下载模型（本地模式必须，远程模式跳过）
-
-如果使用 `EMBED_PROVIDER=remote` 和 `RERANK_PROVIDER=remote`，无需下载模型，跳过此步。
-
-本地模式下，项目运行在 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），不会自动联网下载模型。启动前必须将模型下载到本地缓存目录。
-
-```bash
-# 方式一：使用 Makefile 命令（推荐）
-make download-models
-
-# 方式二：国内网络使用镜像源
-make download-models-cn
-
-# 方式三：手动指定本地路径（已有模型文件时）
-# 在 .env 中直接指向本地目录：
-# EMBED_MODEL=/path/to/local/bge-m3
-# RERANK_MODEL=/path/to/local/bge-reranker-v2-m3
-```
-
-模型默认下载到 `~/.cache/huggingface/hub/` 目录，代码通过模型名称自动定位，无需额外配置路径。
-
-> ⚠️ bge-m3 约 2.2GB，bge-reranker-v2-m3 约 2.2GB，请确保磁盘空间充足。
-
-### 4. 配置环境变量
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-编辑 `backend/.env`，必须配置的项：
-
-```bash
-# LLM 配置（必填，选一种）
-# 方式一：本地 Ollama
-LLM_PROVIDER=ollama
-LLM_BASE_URL=http://localhost:11434
-LLM_MODEL=qwen2.5:7b
-
-# 方式二：远端 API（OpenAI 兼容格式）
-LLM_PROVIDER=vllm
-LLM_BASE_URL=https://your-api-endpoint
-LLM_MODEL=your-model-name
-LLM_API_KEY=your-api-key
-
-# Embedding Provider（三选一）
-EMBED_PROVIDER=sentence-transformers   # 本地模型，跨平台兼容
-# EMBED_PROVIDER=flag-embedding        # 本地模型，支持稀疏向量
-# EMBED_PROVIDER=remote                # 远程服务，无需本地模型
-
-# 远程 Embedding 示例：
-# EMBED_PROVIDER=remote
-# EMBED_BASE_URL=http://10.30.1.4:8902/v1
-# EMBED_MODEL=Qwen3-Embedding-0.6B
-# EMBED_API_KEY=your-token
-
-# Rerank Provider（三选一）
-RERANK_PROVIDER=sentence-transformers  # 本地模型，跨平台兼容
-# RERANK_PROVIDER=flag-embedding       # 本地模型
-# RERANK_PROVIDER=remote               # 远程服务
-
-# 远程 Rerank 示例（自定义接口填完整端点）：
-# RERANK_PROVIDER=remote
-# RERANK_BASE_URL=http://10.30.1.3:8001/ranking_score
-# RERANK_MODEL=
-# RERANK_API_KEY=
-```
-
-### 5. 启动基础设施
-
-```bash
-# 启动 Milvus 向量数据库（etcd + minio + milvus）
-make infra
-
-# 验证 Milvus 是否就绪
-curl http://localhost:9091/healthz
-```
-
-### 6. 启动服务
-
-```bash
-# 同时启动前后端
-make dev
-```
-
-或分别启动：
-
-```bash
-# 终端 1：后端
-make dev-backend
-
-# 终端 2：前端
-make dev-frontend
-```
-
-启动成功后访问：
-- 前端界面：http://localhost:5173
-- 后端 API：http://localhost:8000
-- API 文档：http://localhost:8000/docs
-
-### Embedding / Rerank Provider 选择指南
-
-| 配置项 | `sentence-transformers` | `flag-embedding` | `remote` |
-|--------|------------------------|------------------|----------|
-| 跨平台 | ✅ Mac / Windows / Linux | ⚠️ Mac / Linux 可用，Windows 困难 | ✅ 任意平台 |
-| 需要本地模型 | ✅ 需要下载 | ✅ 需要下载 | ❌ 不需要 |
-| Embedding 稠密向量 | ✅ 支持 | ✅ 支持 | ✅ 支持 |
-| Embedding 稀疏向量 | ❌ 占位值 | ✅ 原生 lexical weights | ❌ 占位值 |
-| Rerank 精排 | ✅ CrossEncoder | ✅ FlagReranker | ✅ 调用远程服务 |
-| 安装难度 | 低 | 中 | 无（HTTP 调用） |
-| 推荐场景 | 本地开发、Windows | 生产部署、追求最佳效果 | 有独立 Embedding/Rerank 服务 |
-
-环境变量决定首次启动时的默认配置。启动后可在前端 **Embedding** 页面动态添加多个配置（本地/远程），一键切换启用，无需重启。
-
-#### 远程服务地址填写规则
-
-- **OpenAI 兼容接口**（TEI、Infinity、vLLM 等）：填到 `/v1`，系统自动拼接 `/embeddings` 或 `/rerank`
-- **自定义接口**：填完整端点路径，如 `http://server:8001/ranking_score`
-
-### 常用命令
-
-```bash
-make install          # 安装所有依赖（后端 + 前端）
-make download-models  # 下载模型到本地（必须，离线模式）
-make download-models-cn  # 通过国内镜像下载模型
-make dev              # 启动前后端开发服务
-make dev-backend      # 仅启动后端
-make dev-frontend     # 仅启动前端
-make infra            # 启动 Milvus
-make infra-down       # 停止 Milvus
-make test             # 运行后端测试
-make clean            # 清理缓存
-```
-
-### 常见问题
-
-**Q: 启动后端报 `OSError: We couldn't connect to 'https://huggingface.co'` 或模型加载失败**
-
-A: 项目强制离线模式运行，模型必须提前下载。执行 `make download-models`（国内用 `make download-models-cn`）下载模型到本地缓存。
-
-**Q: 启动后端报 `ModuleNotFoundError: No module named 'FlagEmbedding'`**
-
-A: 你的 `EMBED_PROVIDER` 设置为 `flag-embedding` 但未安装 FlagEmbedding 库。解决方式二选一：
-- 改为 `EMBED_PROVIDER=sentence-transformers`（推荐）
-- 安装 FlagEmbedding：`.venv/bin/pip install FlagEmbedding`
-
-**Q: Windows 上安装 FlagEmbedding 失败**
-
-A: 这是已知问题，FlagEmbedding 的依赖（peft、accelerate）在 Windows 上编译困难。请将 Embedding 和 Rerank 都设为 `sentence-transformers`：
-```bash
-EMBED_PROVIDER=sentence-transformers
-RERANK_PROVIDER=sentence-transformers
-```
-功能完全正常，仅稀疏检索部分不生效。无需 WSL2。
-
-**Q: 模型下载超时或失败**
-
-A: 国内网络访问 HuggingFace 不稳定，使用镜像：
-```bash
-make download-models-cn
-```
-或手动下载后在 `.env` 中指定本地路径。
-
-**Q: Milvus 启动失败**
-
-A: 确认 Docker 已启动，且端口 19530 未被占用：
-```bash
-docker ps                          # 查看容器状态
-docker compose logs milvus         # 查看 Milvus 日志
-lsof -i :19530                     # 检查端口占用（macOS/Linux）
-```
-
-**Q: `sentence-transformers` 模式下混合检索效果是否受影响？**
-
-A: 稠密检索正常工作，稀疏检索部分返回占位值不贡献实际召回。对于大多数场景，稠密检索 + Rerank 已经能提供很好的效果。如需完整的混合检索能力，切换到 `flag-embedding` 即可。
-
-## 整体架构
+## 🏗️ 架构设计
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        接入层                                │
-│   Chat API (OpenAI 兼容)  │  Admin API (RESTful)            │
+│                          接入层                              │
+│   Chat API (OpenAI 兼容 · SSE)  │  Admin API (RESTful)       │
+│   MCP Server (对外暴露知识库能力)                            │
 ├─────────────────────────────────────────────────────────────┤
-│                     Agent 编排层                             │
-│   QueryRouter → QueryRewriter → Executor → Reflector        │
+│                     ReAct Agent 引擎                         │
+│   Think(流式LLM) → Analyze(终止判定) → Act(工具) → Observe   │
+│   EventBus 事件总线  │  三层递进式上下文管理  │  Skills 技能  │
 ├─────────────────────────────────────────────────────────────┤
-│                      检索工具层                              │
-│   VectorRetriever │ SparseRetriever │ HybridRetriever       │
-│                      Reranker                               │
+│                         工具层                               │
+│  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
+│  thinking │ web_search │ final_answer │ MCP Tools            │
 ├─────────────────────────────────────────────────────────────┤
-│                    索引/存储层                               │
-│   Milvus (稠密+稀疏向量)  │  SQLite (元数据)                 │
+│                        检索工具层                            │
+│   Dense + Sparse + BM25 → RRF 融合 → Rerank → MMR → 父块扩展 │
 ├─────────────────────────────────────────────────────────────┤
-│                    数据处理层                                │
-│   Loader → Chunker → Enricher → Embedder → Indexer         │
+│                      索引 / 存储层                           │
+│   Milvus (稠密 + 稀疏向量)  │  PostgreSQL (元数据 + 配置)     │
 ├─────────────────────────────────────────────────────────────┤
-│                    模型抽象层                                │
-│   LLMProvider  │  EmbedProvider  │  RerankProvider          │
+│                       数据处理层                             │
+│   Loader → OCR → Chunker → Embedder → Indexer                │
+│   Worker (Redis Stream 消费者，异步处理)                     │
+├─────────────────────────────────────────────────────────────┤
+│                    模型服务层（外部 HTTP）                    │
+│   LLM API  │  Embedding API  │  Rerank API  │  OCR API       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 核心流程
+从文档解析、向量化、检索到大模型推理，全流程模块化解耦，组件可灵活替换与扩展。支持本地 / 私有云部署，数据完全自主可控，零门槛 Web UI 快速上手。
 
-### 文档处理管道
+## 🧩 功能概览
 
+**智能对话**
+
+| 能力 | 详情 |
+|------|------|
+| ReAct 推理 | 大模型在 Think → Act → Observe 循环中自主决策，调用工具、分析结果、决定停止时机 |
+| 工具调用 | 内置知识检索、关键词匹配、深度阅读、网页搜索、思考、技能加载，支持远程 MCP 工具 |
+| Evidence-First | Progressive RAG 提示词强制"先检索、深读 chunk、再作答"，引用溯源、拒绝臆造 |
+| Agent 预设 | 内置「快速问答」（hybrid 单轮）与「智能推理」（agent 多步），系统提示词可在线 AI 改写 |
+| 上下文管理 | 三层递进式压缩（Token 估算 + Usage 追踪 + LLM 摘要 + 分组截断），长对话不超窗 |
+| 流式可视化 | 思考、工具调用、引用、Token 占用通过 SSE 实时推送，逐 token 渲染 |
+
+**知识管理**
+
+| 能力 | 详情 |
+|------|------|
+| 文档格式 | PDF / Word / Excel / PPT / TXT / Markdown / 图片 |
+| 图文混排 | 自动提取嵌入图片并并发 OCR，按页位置插入识别文本，内容 hash 去重 |
+| 结构感知切片 | 按文档逻辑结构切分，表格整块保护，父块（上下文）/ 子块（精检）映射 |
+| 三路混合检索 | Dense 语义 + Sparse 稀疏 + BM25 全文，RRF 融合 + Rerank + MMR + 父块扩展 |
+| 异步 Pipeline | Redis Stream 任务队列 + 独立 Worker，API 与处理解耦，断点续处理 |
+| 检索测试 | 独立检索测试页（纯检索，不经过大模型），可视化三路召回 / RRF / Rerank / MMR 链路与多维分数，专为调参设计 |
+
+**集成与扩展**
+
+| 能力 | 详情 |
+|------|------|
+| LLM | 任意 OpenAI 兼容 API（vLLM / DeepSeek / Qwen / …）/ Ollama |
+| Embedding / Rerank | 任意 OpenAI 兼容远程服务（TEI / Infinity / vLLM），前端可视化热切换 |
+| OCR 服务 | TextIn / 通用外部 API（远程），多 Provider + 默认 + Fallback 自动切换 |
+| 向量数据库 | Milvus 2.4+（稠密 + 稀疏向量） |
+| MCP | 对外暴露知识库能力（MCP Server），对内接入远程 MCP 工具（服务发现 + 自动注册） |
+| 技能 Skills | Progressive Disclosure 渐进式加载，按需读取 SKILL.md 完整指令 |
+
+**平台能力**
+
+| 能力 | 详情 |
+|------|------|
+| 部署 | 本地 / Docker / 内网离线部署（ARM64 + AMD64 镜像打包） |
+| 界面 | Web UI / RESTful API / OpenAI 兼容 API / MCP Server |
+| 多模型管理 | 数据库持久化多 LLM 配置，前端创建 / 编辑 / 设默认 / 连通性测试，对话动态切换 |
+| 安全 | API Key 认证（SHA256 哈希存储，仅 `/v1/` 路径鉴权），MCP 外部工具输出标记为不可信 |
+| 容错降级 | Agent 异常 → hybrid → 纯检索；LLM 不可用 → 返回检索原文；Reranker 异常 → RRF 结果 |
+| 可观测性 | Agent 思考 / 工具 / Token 用量 SSE 事件，会话历史持久化 agent_steps |
+
+## 🚀 快速开始
+
+### 🛠 环境要求
+
+- [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)（20.10+，用于 Milvus / PostgreSQL / Redis）
+- [Python 3.12](https://www.python.org/)（⚠️ 3.13+ 存在兼容问题）
+- [Node.js 18+](https://nodejs.org/)
+- 任意 OpenAI 兼容 LLM API
+- Embedding 远程服务（TEI / Infinity / vLLM，可启动后在前端配置）
+
+### 📦 安装与启动
+
+```bash
+git clone <repo-url>
+cd artoo
+
+# 配置环境变量（本地开发读 backend/.env）
+cp backend/.env.example backend/.env
+# 编辑 backend/.env：至少填 JWT_SECRET（必填）；LLM / Embedding 可启动后在前端配
 ```
-上传文件 → Loader 解析（PDF/DOCX/XLSX/PPTX/TXT/MD）
-         → 文本为空时自动触发 OCR（支持多 Provider + Fallback）
-         → Chunker 结构感知切分（父块 1500 字 / 子块 300 字，表格整块保护）
-         → Embedder 生成稠密向量(1024维) + 稀疏向量
-         → 写入 Milvus（向量）+ SQLite（元数据）
+
+<details open>
+<summary><b>macOS / Linux</b></summary>
+
+```bash
+# 1. 启动中间件（Milvus + PostgreSQL + Redis；自动暴露端口到本机）
+make infra
+
+# 2. 安装依赖（自动创建 .venv）
+make install
+
+# 3. 启动服务（API + Worker + 前端，一条命令并行拉起）
+make dev
 ```
 
-切片策略采用**结构感知的父子 chunk 切分**：
-- 优先识别文档结构标记（条款编号、法律文书关键词、Markdown 标题等）按逻辑段落切分
-- 无结构标记时回退到段落边界切分
-- 子块用于精准检索（语义集中），父块用于上下文返回（信息完整）
-- 子块切分同样感知结构标记，确保每个子块是一个完整的逻辑单元
-- HTML 表格（`<table>...</table>`）整块保护，不会被切断到两个 chunk 中
-- 识别 VL 模型特有标记（`[Non-Text]`、`[Image]` 等）作为分段点
+</details>
 
-**为什么这样设计：**
+<details>
+<summary><b>Windows (PowerShell)</b></summary>
 
-传统 RAG 按固定字符数切分，容易把一个完整的逻辑段落（如"关于误工费的反驳"）切成两半，导致 embedding 向量表示的是混合语义，检索精度下降。结构感知切分保证每个子块是一个独立的语义单元，embedding 精确表示该主题，检索命中率更高。
+Windows 没有 make，分步执行（中间件仍用 Docker）：
 
-**不会丢失召回：**
+```powershell
+# 1. 启动中间件
+docker compose --profile infra up -d
 
-- 检索命中子块后，通过父子映射返回完整的父块内容，LLM 获得充分上下文
-- 跨段落的复杂问题由 Agent 模式处理——查询改写生成多个子查询，迭代检索命中多个子块，合并返回多个父块
-- 结构切分 + 父块扩展 + Agent 迭代三者配合，召回率和精度同时提升
+# 2. 创建 Python 环境（必须 3.12）并装依赖
+conda create -n artoo python=3.12 -y
+conda activate artoo
+pip install --upgrade pip
+pip install -r backend/requirements.txt
+cd frontend; npm install; cd ..
 
-### 三档检索模式
+# 3. 开三个终端分别启动
+# 终端 1：API（端口必须 8000，前端代理写死了它）
+cd backend; python -m uvicorn app.main:app --reload --port 8000
+
+# 终端 2：Worker
+cd backend; python -m app.worker_main
+
+# 终端 3：前端
+cd frontend; npm run dev
+```
+
+</details>
+
+启动后访问 **http://localhost:3000** 即可使用。
+
+> **Embedding / Rerank / LLM 都可以启动后再配置。** 通过前端「Embedding & Rerank 配置」「模型管理」页面添加远程服务地址，即时生效无需重启。
+
+### 🌐 服务地址
+
+| 服务 | 地址 |
+|------|------|
+| 前端界面 | `http://localhost:3000` |
+| API 文档 | `http://localhost:8000/docs` |
+| MCP Server | `http://localhost:8000/mcp` |
+
+### 🧭 使用流程
+
+1. **Embedding 配置** → 添加远程 Embedding 服务地址 → 连通性测试 → 启用
+2. **模型管理** → 添加 LLM 配置 → 连通性测试 → 设为默认
+3. **知识库** → 创建 → 上传文档 → 等待 Worker 处理完成
+4. **对话** → 选择知识库与 Agent 预设 → 提问
+
+## 🐳 部署打包（生产 / 内网离线）
+
+一份统一 `docker-compose.yml`（`profiles: infra / app`）+ 一份 `.env`，打包与部署都走 `deploy/` 下脚本：
+
+```bash
+# ① 在有网的机器构建离线包（应用镜像 + 中间件镜像 + compose + .env.example）
+#    macOS / Linux：
+make build                  # 当前架构
+make build ARCH=arm64       # 指定架构（amd64 | arm64）
+make build-app              # 仅应用镜像的更新包（迭代更新，不含中间件）
+
+#    Windows (PowerShell)：
+.\deploy\build.ps1                 # 当前架构
+.\deploy\build.ps1 -Arch arm64     # 指定架构（amd64 | arm64）
+.\deploy\build.ps1 -AppOnly        # 仅应用镜像的更新包
+# 产物均在 dist/
+
+# ② 把 dist/ 整体拷到（Linux）服务器，一键部署
+cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(infra) → 起应用(app)
+```
+
+`install.sh` 首次运行会从 `.env.example` 生成 `.env` 并提示填写必填项（`JWT_SECRET`、`SUPER_ADMIN_*`、`LLM_*`、`EMBED_BASE_URL`、`RERANK_BASE_URL`），填好后再次执行即可拉起全部服务。
+
+手动等价命令（在 `dist/` 内）：
+
+```bash
+docker compose -f docker-compose.yml --profile infra up -d   # 起中间件，等 healthy
+docker compose -f docker-compose.yml --profile app up -d     # 起应用
+```
+
+## 🔍 检索模式
 
 | 模式 | 流程 | 适用场景 |
 |------|------|----------|
-| direct | 稠密向量 ANN 检索 | 简单查询、低延迟 |
-| hybrid | 稠密+稀疏并行 → RRF 融合 → Rerank 精排 → 父块扩展 | 通用场景 |
-| agent | 路由判定 → 查询改写 → 迭代检索+反思（最多3轮） | 复杂多跳查询 |
+| **direct** | 稠密向量 ANN 检索 | 简单查询、低延迟 |
+| **hybrid**（快速问答） | Dense + Sparse + BM25 并行 → RRF 融合 → Rerank 精排 → MMR → 父块扩展 | 通用场景 |
+| **agent**（智能推理） | ReAct 循环：自主调用 grep / 语义检索 / 深读 / 思考 / 网搜，迭代直至提交答案 | 复杂多跳查询、需推理综合 |
 
-**相比传统 RAG 的核心差异：**
-
-| 能力 | 传统 RAG | 本系统 |
-|------|---------|--------|
-| 切片方式 | 固定字符数切分 | 结构感知切分，保持逻辑完整性 |
-| 检索方式 | 单次向量检索 | 稠密+稀疏混合检索 + RRF 融合 + Rerank 精排 |
-| 查询理解 | 原始 query 直接检索 | LLM 路由判定 + 查询改写（多角度检索） |
-| 迭代能力 | 无 | 检索→反思→补充检索，最多 3 轮迭代 |
-| 上下文返回 | 返回命中的小块 | 子块命中后扩展为父块，上下文完整 |
-| 容错能力 | 无 | 多级降级（Agent异常→hybrid→纯检索） |
-| 性能优化 | 无 | 查询去重、分数快判减少 60% LLM 调用、批量 Rerank 消除锁争用 |
-
-### Agent 编排流程（agent 模式）
+### Agent ReAct 循环
 
 ```
-用户查询
+用户查询 →（有历史时）改写指代、脱敏历史检索结果强制重检
   │
-  ├─ Router + Rewriter 并行执行
-  │    ├─ Router 判定 simple → 取消改写，直接走 hybrid 快路径
-  │    └─ Router 判定 complex → 等待改写结果 ↓
-  │
-  ├─ Executor 并行检索
-  │    ├─ 查询级去重（embedding cosine similarity > 0.92 跳过）
-  │    ├─ 子查询跳过 rerank（纯向量+RRF，完全并行无锁）
-  │    └─ 合并去重后统一 rerank + 父块扩展（只调一次，消除锁争用）
-  │
-  ├─ Reflector 两级评估
-  │    ├─ 快速判定（无 LLM）：top-3 均分 ≥ 0.7 → 充分 / top-5 均分 < 0.3 → 不充分
-  │    ├─ LLM 深度评估：分数中间地带，多维度评分（相关性/覆盖度/一致性）
-  │    ├─ 充分 → 返回结果
-  │    ├─ 覆盖度增幅 < 10% → 提前终止（继续迭代无意义）
-  │    └─ 不充分 → 生成追加查询，回到 Executor（最多 3 轮）
+  └─ while 未完成 且 未达 max_iterations：
+       ├─ Think：流式调用 LLM，实时发射 THOUGHT 事件
+       ├─ 上下文管理：Usage 估算 →（>50%）LLM 摘要合并 →（>80%）分组截断
+       ├─ Analyze：判定终止
+       │    ├─ final_answer 工具 → 提交答案
+       │    ├─ 自然停止 → 引导调用 final_answer
+       │    └─ stuck loop / 空响应 → 重试或合成答案
+       ├─ Act：执行工具调用（可并行），发射 TOOL_CALL / TOOL_RESULT 事件
+       └─ Observe：工具结果追加到消息，进入下一轮
   │
   └─ 异常 → 降级到 hybrid 快路径
 ```
 
-### 容错降级机制
+更多关于工具、提示词、上下文管理与切片策略的细节，见 [技术架构详解](./ARCHITECTURE.md)。
 
-- **Agent 异常降级**：编排过程中任何异常自动回退到 hybrid 检索
-- **LLM 不可用降级**：流式生成失败时直接返回检索到的原文
-- **Reranker 异常降级**：跳过重排序，返回 RRF 融合结果
-- 响应中 `metadata.degraded` 字段标识是否发生降级，`metadata.llm_degraded` 标识 LLM 是否降级
+## 🔧 技术栈
 
-## 技术选型
+| 组件 | 选型 |
+|------|------|
+| 后端框架 | FastAPI + Uvicorn |
+| 向量数据库 | Milvus 2.4+ |
+| 关系数据库 | PostgreSQL 16 |
+| 任务队列 | Redis Stream |
+| 前端 | React 18 + TypeScript + Tailwind CSS v4 |
+| 文档解析 | PyMuPDF / python-docx / openpyxl / python-pptx |
+| Token 估算 | tiktoken（cl100k_base） |
+| LLM | 任意 OpenAI 兼容 API / Ollama |
+| Embedding / Rerank | 任意 OpenAI 兼容远程服务 |
 
-| 组件 | 选型 | 原因 |
-|------|------|------|
-| Web 框架 | FastAPI | 原生异步、自动 OpenAPI 文档、高性能 |
-| 向量数据库 | Milvus | 同时支持稠密+稀疏向量、HNSW 索引、生产级可靠性 |
-| 元数据存储 | SQLite + aiosqlite | 零配置、异步支持、适合中小规模部署 |
-| Embedding | BAAI/bge-m3 | 多语言、同时输出稠密(1024维)+稀疏向量、开源免费 |
-| Reranker | BAAI/bge-reranker-v2-m3 | 多语言交叉编码器、精排效果好、可本地部署 |
-| LLM | Ollama / vLLM (OpenAI 兼容) | 灵活切换本地/远端模型、支持流式生成 |
-| 前端 | React 18 + TypeScript + Tailwind | 类型安全、组件化、快速开发 |
-| 数据请求 | TanStack Query | 自动缓存、后台刷新、乐观更新 |
-| 文档解析 | PyMuPDF / python-docx / openpyxl / python-pptx | 覆盖主流办公文档格式 |
-| 融合算法 | RRF (Reciprocal Rank Fusion) | 无需训练、对不同分数尺度鲁棒 |
-
-## 支持的能力
-
-- **多格式文档**：PDF、Word、Excel、PPT、TXT、Markdown
-- **混合检索**：稠密语义检索 + 稀疏关键词检索，RRF 融合
-- **智能路由**：自动判断查询复杂度，简单问题走快路径（路由与改写并行，零等待）
-- **查询改写**：多策略扩展（关键词提取、假设文档生成 HyDE、视角转换），生成 2-4 个检索查询
-- **查询去重**：基于 embedding 余弦相似度跨迭代去重，避免重复检索
-- **迭代反思**：两级评估（分数快判 + LLM 深度评估），覆盖度增幅不足时提前终止
-- **结构性碎片惩罚**：Rerank 阶段对标题/目录等无实质信息的短文本施加分数惩罚
-- **多模型管理**：数据库持久化多个 LLM 配置，支持创建/编辑/删除/设为默认/连通性测试，对话时动态切换
-- **Embedding/Rerank 可配置**：支持本地模型和远程服务两种模式，前端页面动态切换，无需重启；兼容 OpenAI 标准接口和自定义接口
-- **OCR 服务管理**：可视化管理多个 OCR 服务（PaddleOCR/TextIn/通用API），支持默认+Fallback 自动切换，抽象基类+工厂模式易于扩展
-- **Markdown 切片优化**：VL 模型返回的 Markdown 内容（含表格、标题）智能切分，表格整块保护不切断；切片预览支持 Markdown 渲染（标题、表格、列表等正确展示）
-- **上下文窗口管理**：可配置每个模型的最大上下文 token 数，按 chunk 相关性智能截断，适配不同窗口大小的模型
-- **流式响应**：SSE 流式输出，兼容 OpenAI API 格式，Agent 模式实时推送思考进度事件；支持按模型配置开关流式
-- **引用溯源**：回答附带引用来源（文件名、子块内容、父块上下文、相关性分数）
-- **API Key 认证**：SHA256 哈希存储，支持创建/撤销/调用统计，仅 `/v1/` 路径需认证
-- **检索测试**：独立的检索测试页面，对比不同模式效果
-
-## OCR 服务管理
-
-系统支持可配置的 OCR 服务，用于处理扫描件 PDF 等无文本层的文档。通过前端管理页面（`/ocr-services`）可视化维护多个 OCR 服务配置，支持设置默认服务和 Fallback 自动切换。
-
-### 支持的 OCR Provider
-
-| Provider 类型 | 说明 | 配置要点 |
-|--------------|------|----------|
-| `paddleocr` | PaddleOCR 本地服务 | 需安装 PaddleOCR 依赖，通过 `extra_config` 配置 `lang`（语言）和 `use_gpu` |
-| `textin` | 合合信息 TextIn OCR | 响应格式 `{code, message, data: [{page, content}]}`，填写 API 地址和密钥 |
-| `external_api` | 通用外部 API（兼容模式） | 自动识别常见响应格式，适合快速接入未专门适配的服务 |
-
-### 架构设计
-
-采用抽象基类 + 多实现 + 工厂模式，每个第三方 OCR 服务对应一个独立的 Provider 类：
+## 📂 项目结构
 
 ```
-OCRProvider (抽象基类)
-├── PaddleOCRProvider          # 本地 PaddleOCR
-├── BaseExternalAPIProvider    # 外部 HTTP API 抽象基类（通用上传逻辑）
-│   ├── TextInProvider         # TextIn OCR 适配
-│   └── ExternalAPIProvider    # 通用兼容（自动识别响应格式）
-└── 新增 Provider...           # 继承 BaseExternalAPIProvider 即可
-```
-
-### 接入新的 OCR 服务
-
-1. 在 `backend/app/pipeline/ocr/` 下新建 `xxx_provider.py`
-2. 继承 `BaseExternalAPIProvider`，实现 `_adapt_response` 方法解析该服务的响应格式
-3. 在 `backend/app/pipeline/ocr/manager.py` 的 `_create_provider` 工厂方法中注册新类型
-4. 在 `backend/app/api/ocr_config.py` 的校验逻辑中添加新的 `provider_type`
-5. 在前端 `OcrServices.tsx` 的 Select 中添加选项
-
-### 默认服务与 Fallback
-
-- 同一时刻最多一个默认服务、一个 Fallback 服务
-- 同一配置不能同时为默认和 Fallback
-- 文档处理时优先使用默认服务，失败后自动切换到 Fallback 重试一次
-- 数据库中无 OCR 配置时，Pipeline 正常运行（跳过 OCR 步骤）
-
-### API 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/ocr-configs` | 获取所有配置（api_key 脱敏） |
-| POST | `/api/ocr-configs` | 创建配置 |
-| PUT | `/api/ocr-configs/{id}` | 更新配置（部分更新） |
-| DELETE | `/api/ocr-configs/{id}` | 删除配置 |
-| POST | `/api/ocr-configs/test` | 临时配置连通性测试 |
-| POST | `/api/ocr-configs/{id}/test` | 已保存配置连通性测试 |
-
-## 项目结构
-
-```
-aladdin/
+artoo/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口
-│   │   ├── config.py            # 配置管理（pydantic-settings）
-│   │   ├── api/                 # API 路由层
-│   │   │   ├── chat.py          # Chat API（OpenAI 兼容，流式 Agent 进度推送）
-│   │   │   ├── knowledge_base.py
-│   │   │   ├── document.py
-│   │   │   ├── retrieval.py     # 检索测试
-│   │   │   ├── llm_config.py    # 多模型配置管理（CRUD + 连通性测试）
-│   │   │   ├── embed_config.py  # Embedding/Rerank 配置管理（CRUD + 连通性测试 + 动态切换）
-│   │   │   ├── ocr_config.py   # OCR 服务配置管理（CRUD + 连通性测试）
-│   │   │   ├── api_key.py
-│   │   │   ├── auth.py          # API Key 验证逻辑
-│   │   │   ├── middleware.py    # 认证中间件（仅 /v1/ 路径）
-│   │   │   └── system.py        # 健康检查/系统配置
-│   │   ├── agent/               # Agent 编排层
-│   │   │   ├── orchestrator.py  # 编排主控（路由+改写并行，迭代+反思，异常降级）
-│   │   │   ├── router.py        # 查询路由（simple/complex）
-│   │   │   ├── rewriter.py      # 查询改写（关键词/HyDE/视角转换）
-│   │   │   ├── executor.py      # 并行检索（查询去重 + 批量 Rerank）
-│   │   │   └── reflector.py     # 两级反思（分数快判 + LLM 深度评估）
-│   │   ├── retrieval/           # 检索工具层
-│   │   │   ├── vector.py        # 稠密向量检索
-│   │   │   ├── sparse.py        # 稀疏向量检索
-│   │   │   ├── hybrid.py        # 混合检索 + RRF + Rerank + 结构碎片惩罚 + 父块扩展
-│   │   │   └── reranker.py      # Reranker 封装
-│   │   ├── pipeline/            # 文档处理管道
-│   │   │   ├── pipeline.py      # 管道编排
-│   │   │   ├── chunker.py       # 结构感知切片器
-│   │   │   ├── embedder.py      # 批量向量化
-│   │   │   ├── enricher.py      # 富化器（预留）
-│   │   │   ├── loaders/         # 文档解析器
-│   │   │   └── ocr/             # OCR 服务模块
-│   │   │       ├── provider.py          # 抽象基类 + 统一数据结构
-│   │   │       ├── manager.py           # Provider 管理器（工厂 + fallback）
-│   │   │       ├── paddleocr_provider.py # PaddleOCR 本地
-│   │   │       ├── textin_provider.py    # TextIn OCR 适配
-│   │   │       └── external_api_provider.py # 通用外部 API
-│   │   ├── models/              # 模型抽象层
-│   │   │   ├── provider.py      # Provider 接口定义
-│   │   │   ├── manager.py       # 模型统一管理器（单例，支持动态重载）
-│   │   │   ├── llm/             # Ollama / vLLM 实现
-│   │   │   ├── embedding/       # bge-m3 本地推理 + 远程 API
-│   │   │   └── rerank/          # bge-reranker 本地推理 + 远程 API
-│   │   ├── storage/             # 存储层
-│   │   │   ├── milvus.py        # Milvus 操作封装
-│   │   │   └── database.py      # SQLite 异步会话
-│   │   └── schema/              # 数据模型
-│   │       ├── db.py            # ORM 模型（KnowledgeBase/Document/Chunk/ApiKey/LLMConfig）
-│   │       └── api.py           # API 请求/响应模型
+│   │   ├── worker_main.py       # Worker 入口
+│   │   ├── config.py            # 配置
+│   │   ├── api/                 # API 路由（chat / kb / document / *config …）
+│   │   ├── agent/               # ReAct Agent 引擎
+│   │   │   ├── engine.py        #   核心 ReAct 循环
+│   │   │   ├── events.py        #   EventBus 事件总线
+│   │   │   ├── tools/           #   工具层（检索 / 深读 / 网搜 / MCP …）
+│   │   │   ├── memory/          #   三层递进式上下文管理
+│   │   │   ├── skills/          #   技能（Progressive Disclosure）
+│   │   │   └── prompts/         #   Progressive RAG 系统提示词
+│   │   ├── retrieval/           # 检索工具（hybrid / vector / sparse / bm25 …）
+│   │   ├── pipeline/            # 文档处理管道（loader / ocr / chunker …）
+│   │   ├── models/              # 模型 Provider 抽象（LLM / Embedding / Rerank）
+│   │   └── storage/             # 存储层（Milvus / PostgreSQL）
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/                    # React 前端
-│   └── src/
-│       ├── pages/               # 知识库/对话/检索测试/模型管理/OCR服务/API Key/设置
-│       ├── components/          # UI 组件
-│       └── lib/api.ts           # API 客户端
-├── docker-compose.yml           # Milvus 基础设施
-└── Makefile                     # 开发命令
+├── docker-compose.yml           # 统一编排（profiles: infra / app）
+├── docker-compose.override.yml  # 本地开发覆盖（暴露中间件端口）
+├── deploy/                      # 离线部署（build.sh / install.sh / milvus 调优）
+├── .env.example                 # 部署配置清单
+└── Makefile
 ```
 
-## 环境变量
+## 🛠️ 常用命令
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LLM_PROVIDER` | ollama | LLM 提供者（ollama / vllm） |
-| `LLM_BASE_URL` | http://localhost:11434 | LLM 服务地址 |
-| `LLM_MODEL` | qwen2.5:7b | LLM 模型名称 |
-| `LLM_API_KEY` | - | API 密钥（远端服务需要） |
-| `EMBED_PROVIDER` | sentence-transformers | Embedding 后端（sentence-transformers / flag-embedding / remote） |
-| `EMBED_MODEL` | BAAI/bge-m3 | Embedding 模型名称或本地路径 |
-| `EMBED_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
-| `EMBED_BASE_URL` | - | 远程 Embedding 服务地址（remote provider 使用） |
-| `EMBED_API_KEY` | - | 远程 Embedding 服务密钥（remote provider 使用） |
-| `RERANK_PROVIDER` | sentence-transformers | Rerank 后端（sentence-transformers / flag-embedding / remote） |
-| `RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型 |
-| `RERANK_DEVICE` | cpu | 推理设备（cuda / cpu / mps） |
-| `RERANK_BASE_URL` | - | 远程 Rerank 服务地址（remote provider 使用） |
-| `RERANK_API_KEY` | - | 远程 Rerank 服务密钥（remote provider 使用） |
-| `MILVUS_HOST` | localhost | Milvus 地址 |
-| `MILVUS_PORT` | 19530 | Milvus 端口 |
-| `AGENT_MAX_ITERATIONS` | 3 | Agent 最大迭代次数 |
-| `AGENT_TIMEOUT` | 30.0 | Agent 超时时间（秒） |
-| `PARENT_CHUNK_SIZE` | 1500 | 父块大小（字符） |
-| `CHILD_CHUNK_SIZE` | 300 | 子块大小（字符） |
-| `CHUNK_OVERLAP` | 50 | 子块重叠（字符） |
+```bash
+make install            # 安装所有依赖（自动创建 .venv）
+make dev                # 启动前后端 + Worker
+make dev-backend        # 仅后端 API
+make dev-worker         # 仅 Worker
+make dev-frontend       # 仅前端
+make infra              # 启动基础设施（Milvus + Redis + PostgreSQL）
+make infra-down         # 停止基础设施
+make test               # 运行后端测试
+make build              # 构建离线部署包（deploy/build.sh）
+make build ARCH=arm64   # 指定架构构建（amd64 | arm64）
+make build-app          # 仅应用镜像的更新包（不含中间件）
+```
 
-## 生产部署
+## 🚀 部署
 
-详见 [DEPLOYMENT_GUIDE_MAC.md](./DEPLOYMENT_GUIDE_MAC.md)，包含：
+完整的生产 / 内网离线部署打包流程见上文 [部署打包](#-部署打包生产--内网离线)。
 
-- macOS 开发环境打包 Docker 镜像（ARM64 / AMD64）
-- 模型和服务分离打包策略
-- 远程 Embedding/Rerank 服务配置
-- 内网离线部署流程
-- Makefile 命令速查
+## 📘 文档
 
-Windows 部署详见 [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)。
+| 文档 | 说明 |
+|------|------|
+| [技术架构详解](./ARCHITECTURE.md) | ReAct 引擎、工具层、上下文管理、切片策略、OCR 扩展 |
 
-## 未来扩展方向
+## 🗺️ Roadmap
 
-- **语义切分**：基于 embedding 相似度变化点切分，进一步提升 chunk 质量
-- **LLM Rerank**：用大模型做精排，替代小模型 Reranker，提升专业领域排序精度
-- **Chunk 富化**：启用 Enricher，为每个 chunk 生成摘要和关键词，提升检索召回
-- **多模态支持**：图片/表格识别与检索
-- **对话记忆**：多轮对话上下文管理，支持指代消解
-- **知识图谱**：从文档中抽取实体关系，支持图谱增强检索
-- **评估体系**：集成 RAGAS 等评估框架，量化检索和生成质量
-- **分布式部署**：支持多 Worker 水平扩展，文档处理队列化
-- **权限管理**：知识库级别的访问控制
-- **增量更新**：文档修改后仅重新处理变更部分
+- [ ] 端到端检索评测体系（RAGAS，量化召回与生成质量）
+- [ ] Chunk 元数据增强（Enricher 生成摘要 / 关键词）+ 过滤检索
+- [ ] 数据库迁移管理（Alembic）
+- [ ] 知识图谱增强检索（GraphRAG）
+- [ ] 数据源连接器（飞书 / Notion）
+- [ ] 多 Worker 水平扩展
+
+## 🧭 开发指南
+
+快速开发模式无需每次重建 Docker 镜像：`make infra` 启动基础设施后，分别运行 `make dev-backend`、`make dev-worker`、`make dev-frontend`，后端支持 `--reload` 热重载，前端 Vite 自动热更新。Windows 下无 make，按上文「快速开始 → Windows」分三个终端手动启动。
+
+## 🤝 贡献
+
+欢迎提交 [Issue](../../issues) 和 Pull Request。
+
+**流程：** Fork → 创建分支 → 提交变更 → 发起 PR
+
+## 📄 许可证
+
+本项目基于 [MIT](./LICENSE) 协议发布。你可以自由使用、修改和分发本项目代码，但需保留原始版权声明。

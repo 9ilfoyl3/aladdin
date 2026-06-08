@@ -10,16 +10,24 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_platform
 from app.schema.db import OCRConfig
 from app.storage.database import get_db
 
-router = APIRouter(prefix="/api/ocr-configs", tags=["OCR Config"])
+# 能力配置（OCR 服务）属平台底座，全平台一份，仅超级管理员维护
+# （capability-config-to-platform）。OCRConfig 表本就无 tenant_id（全局单份），
+# 此处仅收紧守卫为 require_platform：超管可管，租户管理员不再可见可改。
+router = APIRouter(
+    prefix="/api/ocr-configs",
+    tags=["OCR Config"],
+    dependencies=[Depends(require_platform())],
+)
 
 
 class OCRConfigCreate(BaseModel):
     """创建 OCR 服务配置请求"""
     name: str
-    provider_type: str  # paddleocr | external_api
+    provider_type: str  # external_api | textin
     api_url: str
     api_key: Optional[str] = None
     timeout: float = 30.0
@@ -79,8 +87,8 @@ def _validate_ocr_config(name: str, provider_type: str, api_url: str, timeout: f
         raise HTTPException(status_code=422, detail="名称不能为空")
     if len(name) > 100:
         raise HTTPException(status_code=422, detail="名称过长，最大 100 字符")
-    if provider_type not in ("paddleocr", "external_api", "textin"):
-        raise HTTPException(status_code=422, detail="类型无效，仅支持 paddleocr、external_api 或 textin")
+    if provider_type not in ("external_api", "textin"):
+        raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api 或 textin")
     if not api_url or not api_url.strip():
         raise HTTPException(status_code=422, detail="API 地址不能为空")
     if timeout < 1 or timeout > 300:
@@ -159,20 +167,12 @@ async def _perform_ocr_test(provider_type: str, api_url: str, api_key: Optional[
     """执行 OCR 连通性测试的核心逻辑"""
     start = time.time()
     try:
-        if provider_type == "paddleocr":
-            from app.pipeline.ocr.paddleocr_provider import PaddleOCRProvider
-            provider = PaddleOCRProvider()
-            if provider.is_available():
-                elapsed_ms = (time.time() - start) * 1000
-                return OCRTestResponse(success=True, message="PaddleOCR 服务可用", elapsed_ms=elapsed_ms)
-            else:
-                return OCRTestResponse(success=False, message="PaddleOCR 未安装", elapsed_ms=None)
-        elif provider_type in ("external_api", "textin"):
+        if provider_type in ("external_api", "textin"):
             headers: dict[str, str] = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=timeout) as client:
-                # 先尝试 GET（健康检查），失败则尝试 HEAD，再失败用 OPTIONS
+                # 先尝试 GET（健康检查），失败则尝试 HEAD
                 # 某些 OCR 服务只接受 POST，GET/HEAD 可能返回 405，视为服务可达
                 try:
                     response = await client.get(api_url, headers=headers)
@@ -244,8 +244,8 @@ async def update_ocr_config(config_id: str, body: OCRConfigUpdate, db: AsyncSess
         update_data["name"] = name.strip()
 
     if "provider_type" in update_data:
-        if update_data["provider_type"] not in ("paddleocr", "external_api", "textin"):
-            raise HTTPException(status_code=422, detail="类型无效，仅支持 paddleocr、external_api 或 textin")
+        if update_data["provider_type"] not in ("external_api", "textin"):
+            raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api 或 textin")
 
     if "api_url" in update_data:
         if not update_data["api_url"] or not update_data["api_url"].strip():

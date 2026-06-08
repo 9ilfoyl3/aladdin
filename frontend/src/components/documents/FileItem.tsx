@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import {
   Loader2,
   FileText,
@@ -6,6 +7,7 @@ import {
   Presentation,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { documentApi } from '@/lib/api'
 
 // 文档数据类型
 export interface DocumentItem {
@@ -17,6 +19,8 @@ export interface DocumentItem {
   status: string
   error_message: string | null
   chunk_count: number
+  progress: number
+  progress_message: string | null
   created_at: string
   folder_id?: string | null
 }
@@ -37,6 +41,8 @@ export interface MergedFile {
   status: string
   error_message: string | null
   chunk_count: number
+  progress: number
+  progress_message: string | null
   isLocal: boolean
 }
 
@@ -44,6 +50,7 @@ interface FileItemProps {
   doc: MergedFile
   isSelected: boolean
   onSelect: (id: string) => void
+  onRetry?: (id: string) => void
 }
 
 // 根据文件类型返回对应图标
@@ -57,7 +64,7 @@ function FileIcon({ filename, className }: { filename: string; className?: strin
   if (['doc', 'docx'].includes(ext)) {
     return <FileText className={`${iconClass} text-blue-400`} />
   }
-  if (['xls', 'xlsx'].includes(ext)) {
+  if (['xls', 'xlsx', 'csv'].includes(ext)) {
     return <FileSpreadsheet className={`${iconClass} text-green-500`} />
   }
   if (['ppt', 'pptx'].includes(ext)) {
@@ -116,7 +123,42 @@ function getFileExt(filename: string) {
 }
 
 // 文件缩略图预览
-function FileThumbnail({ filename, status }: { filename: string; status: string }) {
+function FileThumbnail({ filename, status, docId }: { filename: string; status: string; docId?: string }) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
+  const [imgFailed, setImgFailed] = useState(false)
+
+  // 是否需要加载缩略图：图片/PDF，且非本地上传项、非上传中/排队中状态
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  const canPreview =
+    ['jpg', 'jpeg', 'png', 'pdf'].includes(ext) &&
+    !!docId &&
+    !docId.startsWith('local_') &&
+    status !== 'uploading' &&
+    status !== 'pending'
+
+  // 通过 fetch 带 token 拉取缩略图，转为 blob objectURL 供 <img> 使用；
+  // 卸载或 docId 变化时释放上一个 objectURL，避免内存泄漏。
+  useEffect(() => {
+    if (!canPreview || !docId) return
+    let revoked = false
+    let url: string | null = null
+    documentApi
+      .preview(docId)
+      .then((objectUrl) => {
+        if (revoked) {
+          URL.revokeObjectURL(objectUrl)
+          return
+        }
+        url = objectUrl
+        setThumbUrl(objectUrl)
+      })
+      .catch(() => setImgFailed(true))
+    return () => {
+      revoked = true
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [canPreview, docId])
+
   if (status === 'uploading') {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -125,7 +167,21 @@ function FileThumbnail({ filename, status }: { filename: string; status: string 
     )
   }
 
-  // 模拟文档预览：骨架线在上，图标在下
+  // 缩略图加载成功则展示
+  if (canPreview && thumbUrl && !imgFailed) {
+    return (
+      <div className="w-full h-full">
+        <img
+          src={thumbUrl}
+          alt={filename}
+          className="w-full h-full object-cover rounded-sm"
+          onError={() => setImgFailed(true)}
+        />
+      </div>
+    )
+  }
+
+  // 降级：骨架线在上，图标在下
   return (
     <div className="w-full h-full flex flex-col items-center p-2.5 pt-3">
       {/* 骨架线条 */}
@@ -145,7 +201,7 @@ function FileThumbnail({ filename, status }: { filename: string; status: string 
 }
 
 // Finder 风格文件项
-function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
+function FileItem({ doc, isSelected, onSelect, onRetry }: FileItemProps) {
   const ext = getFileExt(doc.filename)
 
   return (
@@ -157,7 +213,7 @@ function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
     >
       {/* 文件缩略图 */}
       <div className="w-16 h-20 rounded bg-white border border-border/60 flex items-center justify-center mb-2.5 relative overflow-hidden shadow-sm">
-        <FileThumbnail filename={doc.filename} status={doc.status} />
+        <FileThumbnail filename={doc.filename} status={doc.status} docId={doc.id} />
 
         {/* 文件类型角标 - 右上角外侧 */}
         {doc.status !== 'uploading' && (
@@ -168,13 +224,45 @@ function FileItem({ doc, isSelected, onSelect }: FileItemProps) {
           </div>
         )}
 
-        {/* 非完成状态指示器 - 底部居中 */}
-        {doc.status !== 'completed' && doc.status !== 'uploading' && (
+        {/* 处理中：底部进度条 + 旋转图标，简洁直观 */}
+        {doc.status === 'processing' && (
+          <>
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+              <Loader2 className="h-4 w-4 text-primary/70 animate-spin" />
+            </div>
+            <div className="absolute bottom-0 inset-x-0">
+              <div className="h-1.5 bg-muted/60 rounded-b overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all duration-500 ease-out"
+                  style={{ width: `${doc.progress || 0}%` }}
+                />
+              </div>
+            </div>
+          </>
+        )}
+        {doc.status === 'pending' && (
           <div className="absolute bottom-1 inset-x-1 flex justify-center">
             <Badge variant="outline" className={`text-[8px] px-1.5 py-0 leading-tight ${statusColor(doc.status)}`}>
-              {doc.status === 'processing' && <Loader2 className="h-2 w-2 mr-0.5 animate-spin" />}
               {statusLabel(doc.status)}
             </Badge>
+          </div>
+        )}
+
+        {/* 失败状态 - 图标中间显示失败+重试（hover 显示失败原因） */}
+        {doc.status === 'failed' && (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 rounded"
+            title={doc.error_message || doc.progress_message || '处理失败'}
+          >
+            <span className="text-[9px] text-red-500 font-medium">失败</span>
+            {onRetry && (
+              <button
+                className="text-[9px] text-red-500 hover:text-red-700 cursor-pointer underline mt-0.5"
+                onClick={(e) => { e.stopPropagation(); onRetry(doc.id) }}
+              >
+                点击重试
+              </button>
+            )}
           </div>
         )}
       </div>

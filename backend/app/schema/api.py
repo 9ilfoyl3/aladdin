@@ -3,9 +3,29 @@
 定义 Chat API 的 OpenAI 兼容请求和响应结构。
 """
 
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, Field
+
+
+# ============================================================
+# 通用分页响应模型
+# ============================================================
+
+T = TypeVar("T")
+
+
+class PageResult(BaseModel, Generic[T]):
+    """统一分页响应结构
+
+    用于知识库、文件夹、文档等列表接口的滚动加载（infinite scroll）。
+    """
+
+    items: list[T] = Field(default_factory=list, description="当前页数据列表")
+    total: int = Field(default=0, description="总记录数")
+    page: int = Field(default=1, description="当前页码，从 1 开始")
+    page_size: int = Field(default=20, description="每页数量")
+    has_more: bool = Field(default=False, description="是否还有下一页")
 
 
 # ============================================================
@@ -20,6 +40,15 @@ class ChatMessage(BaseModel):
     content: str = Field(..., description="消息内容")
 
 
+class MessageAttachment(BaseModel):
+    """用户消息携带的会话文件附件（发送时绑定的已上传文件快照）。"""
+
+    file_id: str = Field(..., description="会话文件 ID（= SessionFile.id）")
+    filename: str = Field(..., description="原始文件名")
+    file_size: Optional[int] = Field(default=None, description="文件字节数")
+    file_type: Optional[str] = Field(default=None, description="文件类型扩展名（小写，无点）")
+
+
 class ChatCompletionRequest(BaseModel):
     """Chat Completion 请求体（OpenAI 兼容 + RAG 扩展字段）"""
 
@@ -28,10 +57,26 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = Field(default=False, description="是否流式返回")
     knowledge_base_id: Optional[str] = Field(default=None, description="知识库 ID，为空时使用全部知识库")
     retrieval_mode: Optional[str] = Field(
-        default=None, description="检索模式: direct / hybrid / agent，为空时使用知识库默认配置"
+        default=None, description="检索模式: direct / hybrid / agent，为空时使用 Agent 预设配置"
     )
     model_config_id: Optional[str] = Field(
         default=None, description="LLM 模型配置 ID，为空时使用系统默认模型"
+    )
+    agent_preset_id: Optional[str] = Field(
+        default=None, description="Agent 预设 ID，为空时使用默认预设"
+    )
+    filter_doc_ids: Optional[list[str]] = Field(
+        default=None, description="限定文档范围过滤，仅在指定文档中检索"
+    )
+    kb_ids: Optional[list[str]] = Field(
+        default=None, description="多知识库联合检索，指定多个知识库 ID 列表"
+    )
+    session_id: Optional[str] = Field(
+        default=None, description="会话 ID，传入后自动加载历史上下文并保存消息"
+    )
+    attachments: Optional[list[MessageAttachment]] = Field(
+        default=None,
+        description="本次用户消息绑定的会话文件附件（发送时从已上传文件中选取），随用户消息存入历史",
     )
     temperature: Optional[float] = Field(default=None, description="生成温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")

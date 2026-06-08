@@ -1,6 +1,8 @@
+import { copyToClipboard } from '@/lib/clipboard'
 import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import {
   Upload,
   FileText,
@@ -14,8 +16,15 @@ import {
   FolderUp,
   LayoutGrid,
   List,
+  RotateCcw,
+  CheckSquare,
+  Square,
+  X,
 } from 'lucide-react'
-import { documentApi, knowledgeBaseApi, folderApi } from '@/lib/api'
+import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
+import type { PageResult, KBCapacity } from '@/lib/api'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -38,6 +47,9 @@ import FolderBreadcrumb from '@/components/documents/FolderBreadcrumb'
 import NewFolderDialog from '@/components/documents/NewFolderDialog'
 import RenameDialog from '@/components/documents/RenameDialog'
 import ChunkViewer from '@/components/documents/ChunkViewer'
+import KBCapacityBar from '@/components/KBCapacityBar'
+import DocumentGridSkeleton from '@/components/skeletons/DocumentGridSkeleton'
+import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
 import type { DocumentItem, UploadingFile, MergedFile } from '@/components/documents/FileItem'
 import { formatSize, statusLabel, statusColor } from '@/components/documents/FileItem'
@@ -47,6 +59,9 @@ import type { FolderData } from '@/components/documents/FolderItem'
 interface KnowledgeBaseItem {
   id: string
   name: string
+  can_write?: boolean | null
+  // 容量进度条（session-file-upload Req 7）
+  capacity?: KBCapacity | null
 }
 
 // 面包屑项
@@ -59,6 +74,7 @@ interface BreadcrumbItem {
 function Documents() {
   const { id: kbId } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
 
@@ -72,6 +88,10 @@ function Documents() {
   const [renamingFolder, setRenamingFolder] = useState<FolderData | null>(null)
   const [viewingChunks, setViewingChunks] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+
+  // 批量选择状态
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
 
   // 上传状态
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([])
@@ -91,6 +111,13 @@ function Documents() {
   // 数据查询
   // ============================================================
 
+  // 获取前端配置
+  const { data: frontendConfig } = useQuery({
+    queryKey: ['frontend-config'],
+    queryFn: () => systemApi.getFrontendConfig(),
+    staleTime: 60000, // 1 分钟内不重复请求
+  })
+
   // 获取知识库信息
   const { data: kb } = useQuery({
     queryKey: ['knowledge-base', kbId],
@@ -98,19 +125,68 @@ function Documents() {
     enabled: !!kbId,
   })
 
-  // 获取当前目录下的文件夹
-  const { data: folders = [] } = useQuery({
+  // 当前用户对该库是否有写权限（owner/组织读写/write 共享）。
+  // 只读访客（含管理员看他人私有库）隐藏全部写操作入口（上传/新建/删除/重试/拖拽）。
+  // 后端 get 接口未返回 can_write 时（加载中）默认按只读处理，避免误显示写入口。
+  const canWrite = kb?.can_write === true
+
+  // 获取当前目录下的文件夹（分页 + 滚动加载）
+  const PAGE_SIZE = 20
+  const {
+    data: foldersData,
+    fetchNextPage: fetchNextFolders,
+    hasNextPage: hasMoreFolders,
+    isFetchingNextPage: isFetchingFolders,
+  } = useInfiniteQuery({
     queryKey: ['folders', kbId, currentFolderId],
-    queryFn: () => folderApi.list(kbId!, currentFolderId) as Promise<FolderData[]>,
+    queryFn: ({ pageParam }) =>
+      folderApi.list(kbId!, currentFolderId, { page: pageParam, page_size: PAGE_SIZE }) as Promise<
+        PageResult<FolderData>
+      >,
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.page + 1 : undefined),
     enabled: !!kbId,
   })
+  const folders = foldersData?.pages.flatMap((p) => p.items) ?? []
 
-  // 获取当前目录下的文档
-  const { data: documents = [], isLoading } = useQuery({
+  // 获取当前目录下的文档（分页 + 滚动加载）
+  const {
+    data: documentsData,
+    isLoading,
+    fetchNextPage: fetchNextDocuments,
+    hasNextPage: hasMoreDocuments,
+    isFetchingNextPage: isFetchingDocuments,
+  } = useInfiniteQuery({
     queryKey: ['documents', kbId, currentFolderId],
-    queryFn: () => documentApi.list(kbId!, currentFolderId) as Promise<DocumentItem[]>,
+    queryFn: ({ pageParam }) =>
+      documentApi.list(kbId!, currentFolderId, { page: pageParam, page_size: PAGE_SIZE }) as Promise<
+        PageResult<DocumentItem>
+      >,
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.page + 1 : undefined),
     enabled: !!kbId,
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const pages = query.state.data?.pages as PageResult<DocumentItem>[] | undefined
+      const hasProcessing = pages?.some((p) =>
+        p.items.some((d) => d.status === 'processing' || d.status === 'pending')
+      )
+      return hasProcessing || uploadingFiles.length > 0 ? 2000 : 5000
+    },
+  })
+  const documents = documentsData?.pages.flatMap((p) => p.items) ?? []
+
+  // 滚动加载哨兵：先加载文件夹，文件夹加载完再加载文档
+  const loadMore = useCallback(() => {
+    if (hasMoreFolders) {
+      fetchNextFolders()
+    } else if (hasMoreDocuments) {
+      fetchNextDocuments()
+    }
+  }, [hasMoreFolders, hasMoreDocuments, fetchNextFolders, fetchNextDocuments])
+
+  const sentinelRef = useInfiniteScroll(loadMore, {
+    hasMore: !!hasMoreFolders || !!hasMoreDocuments,
+    loading: isFetchingFolders || isFetchingDocuments,
   })
 
   // 获取面包屑
@@ -130,6 +206,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setShowNewFolder(false)
+      toast('文件夹已创建')
+    },
+    onError: (err) => {
+      toast(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -140,6 +220,10 @@ function Documents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       setRenamingFolder(null)
+      toast('已重命名')
+    },
+    onError: (err) => {
+      toast(`重命名失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -148,20 +232,42 @@ function Documents() {
     mutationFn: (folderId: string) => folderApi.delete(folderId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
+      toast('文件夹已删除')
+    },
+    onError: (err) => {
+      toast(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
   // 上传文件
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const uploadMutation = useMutation({
     mutationFn: ({ file, localId }: { file: File; localId: string }) => {
       return documentApi.upload(kbId!, file, currentFolderId).then((res) => ({ res, localId }))
     },
-    onSuccess: ({ localId }) => {
-      setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
-      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+    onSuccess: ({ res, localId }) => {
+      if (res?.status === 'duplicate') {
+        setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
+        toast(res.error_message || '文件已存在（内容重复）')
+      } else {
+        // 标记为 uploaded，保留在列表中直到服务端数据确认包含该文件
+        setUploadingFiles((prev) =>
+          prev.map((f) => (f.id === localId ? { ...f, status: 'uploaded' as const } : f))
+        )
+      }
+      // 防抖刷新：批量上传时多个 onSuccess 只触发一次 refetch
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current)
+      }
+      refreshTimerRef.current = setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+        refreshTimerRef.current = null
+      }, 800)
     },
-    onError: (_err, { localId }) => {
+    onError: (err, { localId }) => {
       setUploadingFiles((prev) => prev.filter((f) => f.id !== localId))
+      toast(`上传失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -170,6 +276,89 @@ function Documents() {
     mutationFn: (id: string) => documentApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast('文档已删除')
+    },
+    onError: (err) => {
+      toast(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    },
+  })
+
+  // 批量删除文档
+  const batchDeleteMutation = useMutation({
+    mutationFn: (docIds: string[]) => documentApi.batchDelete(docIds),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast(`已删除 ${data.deleted_count} 个文档`)
+      setSelectedIds(new Set())
+      setSelectionMode(false)
+    },
+    onError: (err) => {
+      toast(`批量删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    },
+  })
+
+  // ============================================================
+  // 统一删除确认交互
+  // ============================================================
+
+  // 删除文件夹
+  async function handleDeleteFolder(folder: FolderData) {
+    const ok = await confirm({
+      title: '删除文件夹',
+      description: (
+        <>
+          确定要删除文件夹「{folder.name}」吗？文件夹内的所有文档与子文件夹将被一并删除，此操作不可撤销。
+        </>
+      ),
+    })
+    if (ok) deleteFolderMutation.mutate(folder.id)
+  }
+
+  // 删除单个文档
+  async function handleDeleteDocument(doc: MergedFile) {
+    const ok = await confirm({
+      title: '删除文档',
+      description: <>确定要删除文档「{doc.filename}」吗？相关的向量数据也将被清除，此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(doc.id)
+  }
+
+  // 批量删除文档
+  async function handleBatchDelete() {
+    if (selectedIds.size === 0) return
+    const ok = await confirm({
+      title: '批量删除文档',
+      description: (
+        <>
+          确定要删除选中的 {selectedIds.size} 个文档吗？相关的向量数据也将被清除，此操作不可撤销。
+        </>
+      ),
+    })
+    if (ok) batchDeleteMutation.mutate(Array.from(selectedIds))
+  }
+
+  const batchRetryMutation = useMutation({
+    mutationFn: (docIds: string[]) => documentApi.batchRetry(docIds),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast(`已重试 ${data.retried_count} 个文档${data.skipped_count > 0 ? `，跳过 ${data.skipped_count} 个` : ''}`)
+      setSelectedIds(new Set())
+      setSelectionMode(false)
+    },
+    onError: (err) => {
+      toast(`批量重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    },
+  })
+
+  // 重试失败文档
+  const retryMutation = useMutation({
+    mutationFn: (id: string) => documentApi.retry(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      toast('已重新提交解析')
+    },
+    onError: (err) => {
+      toast(`重试失败: ${err instanceof Error ? err.message : '未知错误'}`)
     },
   })
 
@@ -183,17 +372,28 @@ function Documents() {
     setSelectedId(null)
   }
 
-  // 处理文件选择
+  // 处理文件选择（限制并发上传数，避免后端过载）
   function handleFileSelect(files: FileList | null) {
     if (!files) return
-    Array.from(files).forEach((file) => {
+    const fileArray = Array.from(files)
+    const MAX_CONCURRENT = frontendConfig?.upload_max_concurrent ?? 3
+    let index = 0
+
+    function uploadNext() {
+      if (index >= fileArray.length) return
+      const file = fileArray[index++]
       const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`
       setUploadingFiles((prev) => [
         ...prev,
         { id: localId, filename: file.name, file_size: file.size, status: 'uploading' },
       ])
-      uploadMutation.mutate({ file, localId })
-    })
+      uploadMutation.mutate({ file, localId }, { onSettled: uploadNext })
+    }
+
+    // 启动最多 MAX_CONCURRENT 个并行上传
+    for (let i = 0; i < Math.min(MAX_CONCURRENT, fileArray.length); i++) {
+      uploadNext()
+    }
   }
 
   // 处理文件夹选择
@@ -251,11 +451,12 @@ function Documents() {
     }
   }
 
-  // 拖拽事件
+  // 拖拽事件（只读库禁用上传）
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
+    if (!canWrite) return
     setIsDragging(true)
-  }, [])
+  }, [canWrite])
 
   const handleDragLeave = useCallback(() => {
     setIsDragging(false)
@@ -264,8 +465,9 @@ function Documents() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
+    if (!canWrite) return
     handleFileSelect(e.dataTransfer.files)
-  }, [currentFolderId, kbId])
+  }, [currentFolderId, kbId, canWrite])
 
   // 选中项
   function handleSelectFolder(id: string) {
@@ -279,22 +481,59 @@ function Documents() {
   // 点击空白取消选中
   function handleBackgroundClick() {
     setSelectedId(null)
+    // 不在批量选择模式下才清空
+    if (!selectionMode) {
+      setSelectedIds(new Set())
+    }
+  }
+
+  // 批量选择：切换单个文档
+  function toggleDocSelection(docId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(docId)) {
+        next.delete(docId)
+      } else {
+        next.add(docId)
+      }
+      return next
+    })
+  }
+
+  // 批量选择：全选/取消全选
+  function toggleSelectAll() {
+    const serverDocs = documents.filter((d) => d.status !== 'uploading')
+    if (selectedIds.size === serverDocs.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(serverDocs.map((d) => d.id)))
+    }
+  }
+
+  // 退出批量选择模式
+  function exitSelectionMode() {
+    setSelectionMode(false)
+    setSelectedIds(new Set())
   }
 
   // ============================================================
   // 合并列表
   // ============================================================
 
+  // 当服务端数据返回后，清理已标记为 uploaded 且服务端已确认的本地条目
+  const serverFilenames = new Set(documents.map((d) => d.filename))
+  const idsToRemove = uploadingFiles
+    .filter((f) => f.status === 'uploaded' && serverFilenames.has(f.filename))
+    .map((f) => f.id)
+  if (idsToRemove.length > 0) {
+    setTimeout(() => {
+      setUploadingFiles((prev) => prev.filter((f) => !idsToRemove.includes(f.id)))
+    }, 0)
+  }
+
+  // 构建合并列表：服务端文档（已按状态排序）+ 本地条目排在最后
+  const confirmedLocalIds = new Set(idsToRemove)
   const allFiles: MergedFile[] = [
-    ...uploadingFiles.map((f) => ({
-      id: f.id,
-      filename: f.filename,
-      file_size: f.file_size,
-      status: f.status,
-      error_message: null,
-      chunk_count: 0,
-      isLocal: true,
-    })),
     ...documents.map((doc) => ({
       id: doc.id,
       filename: doc.filename,
@@ -302,8 +541,23 @@ function Documents() {
       status: doc.status,
       error_message: doc.error_message,
       chunk_count: doc.chunk_count,
+      progress: doc.progress ?? 0,
+      progress_message: doc.progress_message ?? null,
       isLocal: false,
     })),
+    ...uploadingFiles
+      .filter((f) => !confirmedLocalIds.has(f.id))
+      .map((f) => ({
+        id: f.id,
+        filename: f.filename,
+        file_size: f.file_size,
+        status: f.status === 'uploaded' ? 'pending' : f.status,
+        error_message: null,
+        chunk_count: 0,
+        progress: 0,
+        progress_message: null,
+        isLocal: true,
+      })),
   ]
 
   const totalItems = folders.length + allFiles.length
@@ -346,40 +600,100 @@ function Documents() {
           </div>
         </div>
 
-        {/* 操作按钮 */}
+        {/* 操作按钮（只读库隐藏全部写操作入口） */}
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <FolderPlus className="h-4 w-4" />
-            新建文件夹
-          </Button>
-          <Button
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <Upload className="h-4 w-4" />
-            上传文件
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
-            className="gap-1.5 cursor-pointer"
-          >
-            <FolderUp className="h-4 w-4" />
-            上传文件夹
-          </Button>
+          {canWrite && (selectionMode ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); toggleSelectAll() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                {selectedIds.size === documents.length && documents.length > 0 ? (
+                  <CheckSquare className="h-4 w-4" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+                {selectedIds.size === documents.length && documents.length > 0 ? '取消全选' : '全选'}
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={selectedIds.size === 0}
+                onClick={(e) => { e.stopPropagation(); handleBatchDelete() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="h-4 w-4" />
+                删除 ({selectedIds.size})
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={selectedIds.size === 0 || batchRetryMutation.isPending}
+                onClick={(e) => { e.stopPropagation(); batchRetryMutation.mutate(Array.from(selectedIds)) }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <RotateCcw className="h-4 w-4" />
+                重试 ({selectedIds.size})
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); exitSelectionMode() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+                取消
+              </Button>
+            </>
+          ) : (
+            <>
+              {documents.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
+                  className="gap-1.5 cursor-pointer"
+                >
+                  <CheckSquare className="h-4 w-4" />
+                  批量选择
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <FolderPlus className="h-4 w-4" />
+                新建文件夹
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <Upload className="h-4 w-4" />
+                上传文件
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
+                className="gap-1.5 cursor-pointer"
+              >
+                <FolderUp className="h-4 w-4" />
+                上传文件夹
+              </Button>
+            </>
+          ))}
           <input
             ref={fileInputRef}
             type="file"
             className="hidden"
             multiple
-            accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.jpg,.jpeg,.png"
+            accept=".pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png"
             onChange={(e) => handleFileSelect(e.target.files)}
           />
           <input
@@ -391,6 +705,13 @@ function Documents() {
           />
         </div>
       </div>
+
+      {/* 容量进度条（chunk 真实度量；接近/已满变色，session-file-upload Req 7） */}
+      {kb?.capacity && (
+        <div className="mb-4 shrink-0 max-w-2xl">
+          <KBCapacityBar capacity={kb.capacity} />
+        </div>
+      )}
 
       {/* 面包屑导航 */}
       <div className="flex items-center justify-between mb-4 shrink-0">
@@ -414,12 +735,11 @@ function Documents() {
       {/* 内容区域 */}
       <div className="flex-1 min-h-0 overflow-auto">
         {isLoading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="text-center">
-              <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">加载中...</p>
-            </div>
-          </div>
+          viewMode === 'grid' ? (
+            <DocumentGridSkeleton count={18} />
+          ) : (
+            <TableSkeleton rows={6} columns={5} />
+          )
         ) : totalItems === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="w-20 h-20 rounded-2xl bg-muted/40 flex items-center justify-center mb-4">
@@ -428,28 +748,34 @@ function Documents() {
             <p className="text-muted-foreground mb-1">
               {currentFolderId ? '此文件夹为空' : '暂无文档'}
             </p>
-            <p className="text-sm text-muted-foreground/70 mb-4">拖拽文件到此处或点击上传按钮</p>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-                className="gap-2 cursor-pointer"
-              >
-                <FolderPlus className="h-4 w-4" />
-                新建文件夹
-              </Button>
-              <Button
-                variant="outline"
-                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-                className="gap-2 cursor-pointer"
-              >
-                <Upload className="h-4 w-4" />
-                选择文件
-              </Button>
-            </div>
+            {canWrite ? (
+              <>
+                <p className="text-sm text-muted-foreground/70 mb-4">拖拽文件到此处或点击上传按钮</p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
+                    className="gap-2 cursor-pointer"
+                  >
+                    <FolderPlus className="h-4 w-4" />
+                    新建文件夹
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                    className="gap-2 cursor-pointer"
+                  >
+                    <Upload className="h-4 w-4" />
+                    选择文件
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground/70">该知识库暂无可查看的文档</p>
+            )}
           </div>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2">
+          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2 animate-in fade-in-0 duration-500">
             {/* 文件夹列表 */}
             {folders.map((folder) => (
               <ContextMenu key={folder.id}>
@@ -466,18 +792,22 @@ function Documents() {
                     <FolderInput className="h-4 w-4 mr-2" />
                     打开
                   </ContextMenuItem>
-                  <ContextMenuItem onClick={() => setRenamingFolder(folder)}>
-                    <Pencil className="h-4 w-4 mr-2" />
-                    重命名
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem
-                    destructive
-                    onClick={() => deleteFolderMutation.mutate(folder.id)}
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    删除文件夹
-                  </ContextMenuItem>
+                  {canWrite && (
+                    <>
+                      <ContextMenuItem onClick={() => setRenamingFolder(folder)}>
+                        <Pencil className="h-4 w-4 mr-2" />
+                        重命名
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        destructive
+                        onClick={() => handleDeleteFolder(folder)}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        删除文件夹
+                      </ContextMenuItem>
+                    </>
+                  )}
                 </ContextMenuContent>
               </ContextMenu>
             ))}
@@ -491,6 +821,7 @@ function Documents() {
                       doc={doc}
                       isSelected={selectedId === doc.id}
                       onSelect={handleSelectFile}
+                      onRetry={(id) => retryMutation.mutate(id)}
                     />
                   </div>
                 )
@@ -499,11 +830,37 @@ function Documents() {
               return (
                 <ContextMenu key={doc.id}>
                   <ContextMenuTrigger>
-                    <FileItem
-                      doc={doc}
-                      isSelected={selectedId === doc.id}
-                      onSelect={handleSelectFile}
-                    />
+                    <div
+                      className="relative"
+                      onClick={(e) => {
+                        if (selectionMode) {
+                          e.stopPropagation()
+                          toggleDocSelection(doc.id)
+                        }
+                      }}
+                    >
+                      {selectionMode && (
+                        <div className="absolute -top-1 -left-1 z-10">
+                          <div className={`h-5 w-5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                            selectedIds.has(doc.id)
+                              ? 'bg-primary border-primary text-primary-foreground'
+                              : 'border-muted-foreground/50 bg-background/80'
+                          }`}>
+                            {selectedIds.has(doc.id) && (
+                              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none">
+                                <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      <FileItem
+                        doc={doc}
+                        isSelected={selectionMode ? selectedIds.has(doc.id) : selectedId === doc.id}
+                        onSelect={selectionMode ? toggleDocSelection : handleSelectFile}
+                        onRetry={canWrite ? (id) => retryMutation.mutate(id) : undefined}
+                      />
+                    </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
                     <ContextMenuItem
@@ -514,19 +871,34 @@ function Documents() {
                       查看切片
                     </ContextMenuItem>
                     <ContextMenuItem
-                      onClick={() => navigator.clipboard.writeText(doc.filename)}
+                      onClick={() => {
+                        copyToClipboard(doc.filename)
+                        toast('已复制文件名')
+                      }}
                     >
                       <Copy className="h-4 w-4 mr-2" />
                       复制文件名
                     </ContextMenuItem>
-                    <ContextMenuSeparator />
-                    <ContextMenuItem
-                      destructive
-                      onClick={() => deleteMutation.mutate(doc.id)}
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      删除文件
-                    </ContextMenuItem>
+                    {canWrite && (
+                      <>
+                        <ContextMenuSeparator />
+                        {doc.status !== 'processing' && (
+                          <ContextMenuItem
+                            onClick={() => retryMutation.mutate(doc.id)}
+                          >
+                            <RotateCcw className="h-4 w-4 mr-2" />
+                            重新识别
+                          </ContextMenuItem>
+                        )}
+                        <ContextMenuItem
+                          destructive
+                          onClick={() => handleDeleteDocument(doc)}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          删除文件
+                        </ContextMenuItem>
+                      </>
+                    )}
                   </ContextMenuContent>
                 </ContextMenu>
               )
@@ -534,10 +906,28 @@ function Documents() {
           </div>
         ) : (
           /* 列表视图 */
-          <div className="border border-border rounded-xl overflow-hidden">
+          <div className="border border-border rounded-xl overflow-hidden animate-in fade-in-0 duration-500">
             <table className="w-full text-sm">
               <thead className="bg-muted/80 border-b border-border">
                 <tr>
+                  {selectionMode && (
+                    <th className="w-10 px-3 py-2.5">
+                      <div
+                        className={`h-4 w-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                          selectedIds.size === documents.length && documents.length > 0
+                            ? 'bg-primary border-primary text-primary-foreground'
+                            : 'border-muted-foreground/50'
+                        }`}
+                        onClick={(e) => { e.stopPropagation(); toggleSelectAll() }}
+                      >
+                        {selectedIds.size === documents.length && documents.length > 0 && (
+                          <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="none">
+                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        )}
+                      </div>
+                    </th>
+                  )}
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">名称</th>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden md:table-cell">大小</th>
                   <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden lg:table-cell">状态</th>
@@ -555,6 +945,7 @@ function Documents() {
                     onClick={(e) => { e.stopPropagation(); handleSelectFolder(folder.id) }}
                     onDoubleClick={(e) => { e.stopPropagation(); navigateToFolder(folder.id) }}
                   >
+                    {selectionMode && <td className="px-3 py-2.5" />}
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <FolderInput className="h-4 w-4 text-blue-400" />
@@ -571,7 +962,7 @@ function Documents() {
                         <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 cursor-pointer" onClick={(e) => { e.stopPropagation(); setRenamingFolder(folder) }}>
                           <Pencil className="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteFolderMutation.mutate(folder.id) }}>
+                        <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer" onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder) }}>
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
@@ -582,10 +973,37 @@ function Documents() {
                   <tr
                     key={doc.id}
                     className={`border-b border-border/50 last:border-0 transition-colors cursor-default ${
+                      selectionMode && selectedIds.has(doc.id) ? 'bg-primary/5' :
                       selectedId === doc.id ? 'bg-primary/5' : 'hover:bg-muted/30'
                     }`}
-                    onClick={(e) => { e.stopPropagation(); handleSelectFile(doc.id) }}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (selectionMode && !doc.isLocal) {
+                        toggleDocSelection(doc.id)
+                      } else {
+                        handleSelectFile(doc.id)
+                      }
+                    }}
                   >
+                    {selectionMode && (
+                      <td className="px-3 py-2.5">
+                        {!doc.isLocal && (
+                          <div
+                            className={`h-4 w-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                              selectedIds.has(doc.id)
+                                ? 'bg-primary border-primary text-primary-foreground'
+                                : 'border-muted-foreground/50'
+                            }`}
+                          >
+                            {selectedIds.has(doc.id) && (
+                              <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="none">
+                                <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    )}
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <FileText className="h-4 w-4 text-muted-foreground" />
@@ -603,7 +1021,7 @@ function Documents() {
                     </td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center justify-end gap-1">
-                        {!doc.isLocal && (
+                        {!doc.isLocal && !selectionMode && (
                           <>
                             <Button
                               variant="ghost"
@@ -614,14 +1032,16 @@ function Documents() {
                             >
                               <Eye className="h-3 w-3" />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer"
-                              onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(doc.id) }}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
+                            {canWrite && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs text-destructive hover:text-destructive cursor-pointer"
+                                onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc) }}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            )}
                           </>
                         )}
                       </div>
@@ -630,6 +1050,15 @@ function Documents() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* 滚动加载哨兵 + 加载状态（网格/列表视图共用） */}
+        {!isLoading && totalItems > 0 && (hasMoreFolders || hasMoreDocuments) && (
+          <div ref={sentinelRef} className="flex items-center justify-center py-6">
+            {(isFetchingFolders || isFetchingDocuments) && (
+              <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+            )}
           </div>
         )}
       </div>
@@ -752,6 +1181,7 @@ function Documents() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
     </div>
   )
 }

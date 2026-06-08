@@ -11,10 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.llm.ollama import OllamaLLM
 from app.models.llm.vllm import VllmLLM
 
+from app.api.deps import require_authenticated, require_platform
 from app.schema.db import LLMConfig
 from app.storage.database import get_db
 
-router = APIRouter(prefix="/api/llm-configs", tags=["LLM Config"])
+# 配置面：增删改/测试属能力配置（平台底座，全平台一份，require_platform，禁 api_key，
+# 仅超级管理员维护 —— capability-config-to-platform）；列表为只读，对任意登录用户开放
+# （require_authenticated），供成员对话时选择 chat_visible 的模型。LLMConfig 表本就无
+# tenant_id（全局单份），此处仅收紧管理端点守卫。逐端点声明守卫（不再整路由级 Guard）。
+router = APIRouter(
+    prefix="/api/llm-configs",
+    tags=["LLM Config"],
+)
 
 
 class LLMConfigCreate(BaseModel):
@@ -26,6 +34,7 @@ class LLMConfigCreate(BaseModel):
     is_default: bool = False
     chat_visible: bool = True
     stream_enabled: bool = True
+    thinking_enabled: bool = False
     max_context_tokens: Optional[int] = None
 
     @field_validator("max_context_tokens", mode="before")
@@ -45,6 +54,7 @@ class LLMConfigUpdate(BaseModel):
     is_default: Optional[bool] = None
     chat_visible: Optional[bool] = None
     stream_enabled: Optional[bool] = None
+    thinking_enabled: Optional[bool] = None
     max_context_tokens: Optional[int] = None
 
     @field_validator("max_context_tokens", mode="before")
@@ -66,13 +76,18 @@ class LLMConfigResponse(BaseModel):
     is_default: bool
     chat_visible: bool
     stream_enabled: bool
+    thinking_enabled: bool
     max_context_tokens: Optional[int] = None
     created_at: str
 
 
 @router.get("", response_model=list[LLMConfigResponse])
-async def list_llm_configs(chat_visible: Optional[bool] = None, db: AsyncSession = Depends(get_db)):
-    """获取所有 LLM 模型配置"""
+async def list_llm_configs(
+    chat_visible: Optional[bool] = None,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_authenticated()),
+):
+    """获取所有 LLM 模型配置（任意登录用户可读，供对话选模型；不含密钥明文）"""
     query = select(LLMConfig).order_by(LLMConfig.created_at.desc())
     if chat_visible is not None:
         query = query.where(LLMConfig.chat_visible == chat_visible)
@@ -89,6 +104,7 @@ async def list_llm_configs(chat_visible: Optional[bool] = None, db: AsyncSession
             is_default=c.is_default,
             chat_visible=c.chat_visible,
             stream_enabled=c.stream_enabled,
+            thinking_enabled=c.thinking_enabled,
             max_context_tokens=c.max_context_tokens,
             created_at=c.created_at.isoformat() if c.created_at else "",
         )
@@ -97,7 +113,11 @@ async def list_llm_configs(chat_visible: Optional[bool] = None, db: AsyncSession
 
 
 @router.post("", response_model=LLMConfigResponse, status_code=201)
-async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(get_db)):
+async def create_llm_config(
+    body: LLMConfigCreate,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_platform()),
+):
     """创建 LLM 模型配置"""
     config_id = str(uuid.uuid4())
 
@@ -117,6 +137,7 @@ async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(ge
         is_default=body.is_default,
         chat_visible=body.chat_visible,
         stream_enabled=body.stream_enabled,
+        thinking_enabled=body.thinking_enabled,
         max_context_tokens=body.max_context_tokens,
     )
     db.add(config)
@@ -133,13 +154,19 @@ async def create_llm_config(body: LLMConfigCreate, db: AsyncSession = Depends(ge
         is_default=config.is_default,
         chat_visible=config.chat_visible,
         stream_enabled=config.stream_enabled,
+        thinking_enabled=config.thinking_enabled,
         max_context_tokens=config.max_context_tokens,
         created_at=config.created_at.isoformat() if config.created_at else "",
     )
 
 
 @router.put("/{config_id}", response_model=LLMConfigResponse)
-async def update_llm_config(config_id: str, body: LLMConfigUpdate, db: AsyncSession = Depends(get_db)):
+async def update_llm_config(
+    config_id: str,
+    body: LLMConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_platform()),
+):
     """更新 LLM 模型配置"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
     config = result.scalar_one_or_none()
@@ -170,13 +197,18 @@ async def update_llm_config(config_id: str, body: LLMConfigUpdate, db: AsyncSess
         is_default=config.is_default,
         chat_visible=config.chat_visible,
         stream_enabled=config.stream_enabled,
+        thinking_enabled=config.thinking_enabled,
         max_context_tokens=config.max_context_tokens,
         created_at=config.created_at.isoformat() if config.created_at else "",
     )
 
 
 @router.delete("/{config_id}", status_code=204)
-async def delete_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_llm_config(
+    config_id: str,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_platform()),
+):
     """删除 LLM 模型配置"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
     config = result.scalar_one_or_none()
@@ -203,7 +235,11 @@ class LLMTestResponse(BaseModel):
 
 
 @router.post("/test", response_model=LLMTestResponse)
-async def test_llm_connection(body: LLMTestRequest, db: AsyncSession = Depends(get_db)):
+async def test_llm_connection(
+    body: LLMTestRequest,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_platform()),
+):
     """测试 LLM 模型连通性，发送一条简单消息验证配置是否正确"""
     api_key = body.api_key or ""
 
@@ -234,7 +270,11 @@ async def test_llm_connection(body: LLMTestRequest, db: AsyncSession = Depends(g
 
 
 @router.post("/{config_id}/test", response_model=LLMTestResponse)
-async def test_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
+async def test_llm_config(
+    config_id: str,
+    db: AsyncSession = Depends(get_db),
+    _identity=Depends(require_platform()),
+):
     """测试已保存的模型配置连通性"""
     result = await db.execute(select(LLMConfig).where(LLMConfig.id == config_id))
     config = result.scalar_one_or_none()

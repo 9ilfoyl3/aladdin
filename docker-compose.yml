@@ -1,14 +1,28 @@
-version: '3.8'
-
-# 生产部署用 docker-compose（内网全 Docker 化）
-# 使用方式：docker compose -f docker-compose-production.yml up -d
+# ============================================================
+# Artoo 统一编排（唯一真源）
+#
+# 用 profiles 区分两组服务，不再拆多份文件：
+#   infra —— 中间件：etcd / minio / milvus / postgres / redis
+#   app   —— 应用：  backend / worker / frontend
+#
+# 配置全部走 .env（env_file 一把注入），compose 内只写「容器内固定值」
+# （服务名、容器端口、连接串），用户无需也不应在 .env 里配它们。
+#
+# 常用命令：
+#   生产单机（跳过 dev 端口暴露）：
+#     docker compose -f docker-compose.yml --profile infra --profile app up -d
+#   本地开发（自动加载 override 暴露中间件端口，应用用 make dev 跑在宿主机）：
+#     docker compose --profile infra up -d
+# ============================================================
 
 services:
-  # ============ 基础设施 ============
-
+  # ============ 中间件（profile: infra）============
   etcd:
-    image: quay.io/coreos/etcd:v3.5.18
+    container_name: arag-etcd
+    image: quay.io/coreos/etcd:v3.5.25
+    profiles: ["infra"]
     environment:
+      - TZ=${TZ:-Asia/Shanghai}
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
@@ -24,8 +38,11 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: arag-minio
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    profiles: ["infra"]
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
     volumes:
@@ -39,15 +56,20 @@ services:
     restart: unless-stopped
 
   milvus:
-    image: milvusdb/milvus:v2.4.6
+    container_name: arag-milvus
+    image: milvusdb/milvus:v2.5.4
+    profiles: ["infra"]
     command: ["milvus", "run", "standalone"]
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
-    ports:
-      - "19530:19530"
+      # mmap 调优：把冷数据/原始向量放磁盘 + page cache，降低常驻内存。详见文件注释。
+      - ./deploy/milvus-user.yaml:/milvus/configs/user.yaml:ro
+    expose:
+      - "19530"
     depends_on:
       - etcd
       - minio
@@ -59,13 +81,24 @@ services:
     restart: unless-stopped
 
   postgres:
+    container_name: arag-postgres
     image: postgres:16-alpine
+    profiles: ["infra"]
+    # 抬高最大连接数：每个 backend/worker 进程一个连接池（pool 10 + overflow 20 = 上限 30）。
+    # BACKEND_WORKERS=2 + 1 worker ≈ 峰值 90 连接，默认 100 余量过窄，设 200 留足。
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
     environment:
-      POSTGRES_DB: aladdin
+      POSTGRES_DB: artoo
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - "5432:5432"
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -75,46 +108,89 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ============ 应用服务 ============
-
-  backend:
-    image: aladdin-backend:latest
-    ports:
-      - "8000:8000"
+  redis:
+    container_name: arag-redis
+    image: redis:7-alpine
+    profiles: ["infra"]
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aladdin
+      - TZ=${TZ:-Asia/Shanghai}
+    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ============ 应用（profile: app）============
+  backend:
+    container_name: arag-backend
+    image: artoo-backend:latest
+    build: ./backend
+    profiles: ["app"]
+    # 单机多进程，提升并发问答吞吐与单进程崩溃韧性。进程数由 BACKEND_WORKERS 控制。
+    command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-2}"]
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    # 业务可调配置统一从 .env 注入；下方 environment 只覆盖「容器内拓扑」固定值。
+    env_file: .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBED_DEVICE=${EMBED_DEVICE:-cpu}
-      - RERANK_DEVICE=${RERANK_DEVICE:-cpu}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-sentence-transformers}
-      - RERANK_PROVIDER=${RERANK_PROVIDER:-sentence-transformers}
-      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
-      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
-      - EMBED_BASE_URL=${EMBED_BASE_URL:-}
-      - EMBED_API_KEY=${EMBED_API_KEY:-}
-      - RERANK_BASE_URL=${RERANK_BASE_URL:-}
-      - RERANK_API_KEY=${RERANK_API_KEY:-}
-      - LLM_PROVIDER=${LLM_PROVIDER:-vllm}
-      - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434}
-      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - HF_HUB_OFFLINE=1
-      - TRANSFORMERS_OFFLINE=1
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - upload_data:/app/data
-      - model_data:/root/.cache/huggingface/hub
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
       milvus:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    container_name: arag-worker
+    image: artoo-backend:latest
+    build: ./backend
+    profiles: ["app"]
+    command: ["python", "-m", "app.worker_main"]
+    env_file: .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - upload_data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
-    image: aladdin-frontend:latest
+    container_name: arag-frontend
+    image: artoo-frontend:latest
+    build: ./frontend
+    profiles: ["app"]
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-8888}:80"
+    # nginx.conf 已在镜像内（frontend/nginx.conf），无需挂载覆盖。
     depends_on:
       - backend
     restart: unless-stopped
@@ -124,5 +200,9 @@ volumes:
   minio_data:
   milvus_data:
   postgres_data:
+  redis_data:
   upload_data:
-  model_data:
+
+networks:
+  default:
+    name: arag-network

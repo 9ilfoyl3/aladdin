@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Server, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
+import { toast } from 'sonner'
+import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
 import { ocrConfigApi } from '@/lib/api'
 import type { OCRConfigItem, OCRTestResult } from '@/lib/api'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordInput } from '@/components/ui/password-input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 
 interface OCRFormData {
   name: string
@@ -18,29 +22,25 @@ interface OCRFormData {
   timeout: string
   is_default: boolean
   is_fallback: boolean
-  lang: string
-  use_gpu: boolean
 }
 
 const emptyForm: OCRFormData = {
   name: '',
-  provider_type: 'paddleocr',
+  provider_type: 'external_api',
   api_url: '',
   api_key: '',
   timeout: '30',
   is_default: false,
   is_fallback: false,
-  lang: 'ch',
-  use_gpu: false,
 }
 
 function OcrServices() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [testResults, setTestResults] = useState<Record<string, OCRTestResult>>({})
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<OCRConfigItem | null>(null)
-  const [deletingItem, setDeletingItem] = useState<OCRConfigItem | null>(null)
   const [form, setForm] = useState<OCRFormData>(emptyForm)
   const [formError, setFormError] = useState<string | null>(null)
   const [dialogTestResult, setDialogTestResult] = useState<OCRTestResult | null>(null)
@@ -53,9 +53,6 @@ function OcrServices() {
 
   const createMutation = useMutation({
     mutationFn: (data: OCRFormData) => {
-      const extra_config = data.provider_type === 'paddleocr'
-        ? { lang: data.lang, use_gpu: data.use_gpu }
-        : undefined
       return ocrConfigApi.create({
         name: data.name,
         provider_type: data.provider_type,
@@ -64,7 +61,6 @@ function OcrServices() {
         timeout: parseFloat(data.timeout) || 30,
         is_default: data.is_default,
         is_fallback: data.is_fallback,
-        extra_config,
       })
     },
     onSuccess: () => {
@@ -78,9 +74,6 @@ function OcrServices() {
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: OCRFormData }) => {
-      const extra_config = data.provider_type === 'paddleocr'
-        ? { lang: data.lang, use_gpu: data.use_gpu }
-        : undefined
       const payload: Record<string, unknown> = {
         name: data.name,
         provider_type: data.provider_type,
@@ -88,7 +81,6 @@ function OcrServices() {
         timeout: parseFloat(data.timeout) || 30,
         is_default: data.is_default,
         is_fallback: data.is_fallback,
-        extra_config,
       }
       // api_key 留空表示不修改
       if (data.api_key) {
@@ -109,12 +101,21 @@ function OcrServices() {
     mutationFn: (id: string) => ocrConfigApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['ocr-configs'] })
-      setDeletingItem(null)
+      toast('OCR 服务已删除')
     },
     onError: (err: Error) => {
-      setFormError(err.message)
+      toast(`删除失败: ${err.message}`)
     },
   })
+
+  // 删除 OCR 服务（统一确认交互）
+  async function handleDelete(config: OCRConfigItem) {
+    const ok = await confirm({
+      title: '删除 OCR 服务',
+      description: <>确定要删除 OCR 服务「{config.name}」吗？此操作不可撤销。</>,
+    })
+    if (ok) deleteMutation.mutate(config.id)
+  }
 
   function openCreate() {
     setEditingItem(null)
@@ -126,7 +127,6 @@ function OcrServices() {
 
   function openEdit(item: OCRConfigItem) {
     setEditingItem(item)
-    const extra = item.extra_config || {}
     setForm({
       name: item.name,
       provider_type: item.provider_type,
@@ -135,17 +135,10 @@ function OcrServices() {
       timeout: String(item.timeout),
       is_default: item.is_default,
       is_fallback: item.is_fallback,
-      lang: (extra.lang as string) || 'ch',
-      use_gpu: (extra.use_gpu as boolean) || false,
     })
     setFormError(null)
     setDialogTestResult(null)
     setShowDialog(true)
-  }
-
-  function openDelete(item: OCRConfigItem) {
-    setFormError(null)
-    setDeletingItem(item)
   }
 
   function closeDialog() {
@@ -210,7 +203,7 @@ function OcrServices() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">OCR 服务管理</h1>
-          <p className="text-muted-foreground text-sm mt-1">配置多个 OCR 服务，支持本地 PaddleOCR 和外部 API</p>
+          <p className="text-muted-foreground text-sm mt-1">配置远程 OCR 服务（TextIn / 通用外部 API），支持默认 + 备用自动切换</p>
         </div>
         <Button onClick={openCreate} className="gap-2 cursor-pointer">
           <Plus className="h-4 w-4" />
@@ -220,12 +213,7 @@ function OcrServices() {
 
       {/* 服务列表 */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <Loader2 className="h-8 w-8 animate-spin mx-auto mb-3 text-primary" />
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          </div>
-        </div>
+        <CardGridSkeleton count={3} />
       ) : configs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <div className="w-16 h-16 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -238,7 +226,7 @@ function OcrServices() {
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 animate-in fade-in-0 duration-500">
           {configs.map((config) => (
             <div
               key={config.id}
@@ -258,18 +246,14 @@ function OcrServices() {
 
               {/* 类型图标 */}
               <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
-                {config.provider_type === 'paddleocr' ? (
-                  <Server className="h-5 w-5 text-primary" />
-                ) : (
-                  <Globe className="h-5 w-5 text-primary" />
-                )}
+                <Globe className="h-5 w-5 text-primary" />
               </div>
 
               {/* 名称 + Provider Type */}
               <div className="flex items-center gap-2 mb-3">
                 <h3 className="font-semibold text-base truncate">{config.name}</h3>
                 <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                  {config.provider_type === 'paddleocr' ? 'PaddleOCR' : config.provider_type === 'textin' ? 'TextIn' : '外部 API'}
+                  {config.provider_type === 'textin' ? 'TextIn' : '外部 API'}
                 </Badge>
               </div>
 
@@ -315,7 +299,7 @@ function OcrServices() {
                   variant="ghost"
                   size="sm"
                   className="h-8 text-xs gap-1 text-destructive hover:text-destructive cursor-pointer"
-                  onClick={() => openDelete(config)}
+                  onClick={() => handleDelete(config)}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   删除
@@ -351,7 +335,7 @@ function OcrServices() {
               <Input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="如：本地 PaddleOCR"
+                placeholder="如：TextIn OCR"
                 className="mt-1.5"
                 required
               />
@@ -363,7 +347,6 @@ function OcrServices() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="paddleocr">PaddleOCR 本地</SelectItem>
                   <SelectItem value="textin">TextIn</SelectItem>
                   <SelectItem value="external_api">外部 API（通用）</SelectItem>
                 </SelectContent>
@@ -374,15 +357,14 @@ function OcrServices() {
               <Input
                 value={form.api_url}
                 onChange={(e) => setForm({ ...form, api_url: e.target.value })}
-                placeholder="如：http://localhost:8866"
+                placeholder="如：http://10.30.1.2:8909/parse"
                 className="mt-1.5"
                 required
               />
             </div>
             <div>
               <Label>API Key</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 placeholder={editingItem ? '留空保持不变' : '输入 API 密钥（可选）'}
@@ -422,32 +404,6 @@ function OcrServices() {
               <Label htmlFor="ocr_is_fallback" className="text-sm font-normal cursor-pointer">设为备用服务</Label>
             </div>
 
-            {/* PaddleOCR 额外字段 */}
-            {form.provider_type === 'paddleocr' && (
-              <>
-                <div>
-                  <Label>识别语言</Label>
-                  <Input
-                    value={form.lang}
-                    onChange={(e) => setForm({ ...form, lang: e.target.value })}
-                    placeholder="ch"
-                    className="mt-1.5"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">如：ch（中文）、en（英文）、japan（日文）</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="ocr_use_gpu"
-                    checked={form.use_gpu}
-                    onChange={(e) => setForm({ ...form, use_gpu: e.target.checked })}
-                    className="rounded border-border"
-                  />
-                  <Label htmlFor="ocr_use_gpu" className="text-sm font-normal cursor-pointer">启用 GPU 加速</Label>
-                </div>
-              </>
-            )}
-
             {/* 对话框内测试结果 */}
             {dialogTestResult && (
               <div className={`p-2.5 rounded-lg text-xs ${dialogTestResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
@@ -482,37 +438,6 @@ function OcrServices() {
               </Button>
             </DialogFooter>
           </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* 删除确认对话框 */}
-      <Dialog open={!!deletingItem} onOpenChange={() => setDeletingItem(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认删除</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            确定要删除 OCR 服务 <span className="font-medium text-foreground">{deletingItem?.name}</span> 吗？此操作不可撤销。
-          </p>
-          {formError && (
-            <div className="p-2.5 rounded-lg text-xs bg-red-50 text-red-700 border border-red-200">
-              <div className="flex items-center gap-1.5">
-                <XCircle className="h-3.5 w-3.5" />
-                <span>{formError}</span>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeletingItem(null)} className="cursor-pointer">取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => deletingItem && deleteMutation.mutate(deletingItem.id)}
-              disabled={deleteMutation.isPending}
-              className="cursor-pointer"
-            >
-              {deleteMutation.isPending ? '删除中...' : '确认删除'}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

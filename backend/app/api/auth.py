@@ -1,18 +1,13 @@
-"""API Key 认证工具模块
+"""API Key 工具模块（密钥生成 / SHA256 哈希 / 前缀展示）。
 
-提供 API Key 的生成、哈希存储和验证功能。
-Key 格式: sk- + 48 位随机十六进制字符
-存储方式: SHA256 哈希，数据库中不保存明文
+仅保留 Key 的生成、哈希、前缀工具。认证与身份合成（校验 + 判型 + 解析外部用户）
+已统一迁入 `app/auth/apikey_auth.py` 的 ApiKeyAuthenticator（三处收敛点之一，
+经 Authorization_Guard 调用），不再在此提供独立的 verify_key 仅校验函数，
+避免两处鉴权逻辑漂移。
 """
 
 import hashlib
 import secrets
-from datetime import datetime, timezone
-
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.schema.db import ApiKey
 
 # Key 前缀
 _KEY_PREFIX = "sk-"
@@ -40,34 +35,3 @@ def hash_key(key: str) -> str:
 def get_key_prefix(key: str) -> str:
     """提取 Key 前缀用于展示（sk-xxxx...）"""
     return key[:11] + "..."
-
-
-async def verify_key(key: str, session: AsyncSession) -> ApiKey | None:
-    """验证 API Key 是否有效
-
-    查找哈希匹配且处于激活状态的 Key 记录。
-    验证通过后自动更新 call_count 和 last_used_at。
-
-    Returns:
-        匹配的 ApiKey 记录，无效时返回 None
-    """
-    key_hash = hash_key(key)
-    stmt = select(ApiKey).where(
-        ApiKey.key_hash == key_hash,
-        ApiKey.is_active == True,  # noqa: E712
-    )
-    result = await session.execute(stmt)
-    api_key = result.scalar_one_or_none()
-
-    if api_key is None:
-        return None
-
-    # 更新调用计数和最后使用时间
-    await session.execute(
-        update(ApiKey)
-        .where(ApiKey.id == api_key.id)
-        .values(call_count=ApiKey.call_count + 1, last_used_at=datetime.now(timezone.utc))
-    )
-    await session.commit()
-
-    return api_key

@@ -10,12 +10,21 @@ sqlalchemy>=2.0.35
 asyncpg>=0.29.0
 aiosqlite>=0.20.0
 greenlet>=3.0.0
-pymilvus>=2.4.7
+pymilvus>=2.5.0
+
+# Redis
+redis>=5.0.0
 
 # HTTP & API
 httpx>=0.27.2
 python-multipart>=0.0.12
 sse-starlette>=2.1.3
+
+# YAML 解析（Agent Skills 加载）
+PyYAML>=6.0
+
+# Token 计算（Agent 上下文估算）
+tiktoken>=0.7.0
 
 # 文档解析
 pymupdf>=1.25.0
@@ -23,17 +32,23 @@ python-docx>=1.1.2
 openpyxl>=3.1.5
 python-pptx>=1.0.2
 
-# ML 模型
-sentence-transformers>=3.4.0
-transformers>=4.44.0,<5.0.0
-torch>=2.5.0
-numpy>=2.0.0
+# 中文分词（MMR 去冗余的词级 Jaccard；缺失时退化字符 bigram，不强依赖）
+jieba>=0.42.1
 
-# OCR (optional)
-# paddleocr>=2.7.0  # 本地 OCR 引擎，不安装则 PaddleOCRProvider 不注册
-# httpx 已在上方 HTTP & API 部分引入，ExternalAPIProvider 直接使用
+# ML 模型依赖已移除，Embedding/Rerank 统一使用远程服务
+
+# OCR：统一使用远程 API（external_api / textin）
+# httpx 已在上方 HTTP & API 部分引入，OCR Provider 直接复用
+
+# 认证与授权（tenant-auth）
+bcrypt>=4.1          # 口令哈希（自带 salt + 工作因子，纯 C 跨平台 wheel）
+PyJWT>=2.9           # JWT 签发/校验（HS256）
+
+# 系统资源检测（session-file-upload：单库 chunk 上限内存推荐，cgroup 不可用时回退物理内存）
+psutil>=5.9
 
 # 测试
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
 nest-asyncio>=1.6.0
+hypothesis>=6.112.1

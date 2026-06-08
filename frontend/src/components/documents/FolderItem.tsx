@@ -38,6 +38,19 @@ function FolderItem({ folder, isSelected, onSelect, onOpen }: FolderItemProps) {
       <p className="text-[11px] text-center text-foreground leading-tight w-full px-0.5 line-clamp-2" title={folder.name}>
         {folder.name}
       </p>
+
+      {/* 概要信息：文档数 / 子文件夹数；空文件夹显示"空文件夹" */}
+      <p className="text-[10px] text-center text-muted-foreground mt-0.5 leading-tight">
+        {folder.doc_count === 0 && folder.subfolder_count === 0 ? (
+          '空文件夹'
+        ) : (
+          <>
+            {folder.doc_count > 0 && `${folder.doc_count} 文档`}
+            {folder.doc_count > 0 && folder.subfolder_count > 0 && ' · '}
+            {folder.subfolder_count > 0 && `${folder.subfolder_count} 子目录`}
+          </>
+        )}
+      </p>
     </div>
   )
 }

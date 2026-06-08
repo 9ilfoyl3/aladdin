@@ -1,9 +1,10 @@
 """向量化管道节点
 
 调用 EmbedProvider 对文本块批量生成稠密向量和稀疏向量，
-支持可配置的批次大小以控制内存和并发。
+支持可配置的批次大小和并发数以控制内存和吞吐。
 """
 
+import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
@@ -23,15 +24,36 @@ class EmbedResult:
 class PipelineEmbedder:
     """管道向量化节点，封装 EmbedProvider 的批量调用"""
 
-    def __init__(self, embed_provider: EmbedProvider, batch_size: int = 32):
+    # embedding 模型的最大输入字符数
+    # BGE-M3 支持 8192 tokens，中文约 1.5 字符/token，保守取 8000 字符
+    MAX_EMBED_CHARS = 8000
+
+    def __init__(self, embed_provider: EmbedProvider = None, batch_size: int = 32, concurrency: int = 8, per_doc_concurrency: int | None = None, model_manager=None):
         """初始化向量化器
 
         Args:
-            embed_provider: 向量嵌入模型 Provider 实例
+            embed_provider: 向量嵌入模型 Provider 实例（直接引用，不推荐）
             batch_size: 每批处理的文本数量，控制内存占用
+            concurrency: 进程级全局 Embedding 并发上限（所有文档共享，保护远程服务）
+            per_doc_concurrency: 单文档并发上限（限制单文档最多占用多少全局 slot，
+                                 保证多文档交错执行；None 时取 min(concurrency, 2)）
+            model_manager: ModelManager 实例，优先使用（动态获取最新 embedder）
         """
-        self.provider = embed_provider
+        self._model_manager = model_manager
+        self._direct_provider = embed_provider
         self.batch_size = batch_size
+        self.concurrency = concurrency
+        self.per_doc_concurrency = (
+            per_doc_concurrency if per_doc_concurrency is not None
+            else min(concurrency, 2)
+        )
+
+    @property
+    def provider(self) -> EmbedProvider:
+        """动态获取最新的 embed provider（支持热更新）"""
+        if self._model_manager is not None:
+            return self._model_manager.embedder
+        return self._direct_provider
 
     @staticmethod
     def _sanitize_texts(texts: list[str]) -> list[str]:
@@ -43,6 +65,23 @@ class PipelineEmbedder:
                 cleaned = "empty"
             sanitized.append(cleaned)
         return sanitized
+
+    def _truncate_texts(self, texts: list[str]) -> list[str]:
+        """截断超长文本，确保不超过 embedding 模型的输入限制
+
+        截断时保留前部内容（通常包含表头和关键信息）。
+        """
+        truncated = []
+        truncate_count = 0
+        for t in texts:
+            if len(t) > self.MAX_EMBED_CHARS:
+                truncated.append(t[:self.MAX_EMBED_CHARS])
+                truncate_count += 1
+            else:
+                truncated.append(t)
+        if truncate_count > 0:
+            print(f"[Embedder] 截断了 {truncate_count}/{len(texts)} 个超长文本 (>{self.MAX_EMBED_CHARS} 字符)")
+        return truncated
 
     @staticmethod
     def _fix_nan_vector(vector: list[float]) -> list[float]:
@@ -61,7 +100,7 @@ class PipelineEmbedder:
     async def embed(self, texts: list[str]) -> EmbedResult:
         """批量生成稠密+稀疏向量
 
-        将输入文本按 batch_size 分批调用 EmbedProvider，
+        将输入文本按 batch_size 分批，并发调用 EmbedProvider，
         合并所有批次结果后返回。
 
         Args:
@@ -77,16 +116,52 @@ class PipelineEmbedder:
         # 清洗文本，避免空文本导致 NaN
         sanitized = self._sanitize_texts(texts)
 
+        # 截断超长文本，避免超过 embedding 模型输入限制
+        sanitized = self._truncate_texts(sanitized)
+
+        total_batches = (len(sanitized) + self.batch_size - 1) // self.batch_size
+        print(f"[Embedder] 开始 embedding，共 {len(sanitized)} 个文本块，分 {total_batches} 批处理 (batch_size={self.batch_size}, 全局并发={self.concurrency}, 单文档并发={self.per_doc_concurrency})")
+
+        # 构建批次
+        batches = []
+        for i in range(0, len(sanitized), self.batch_size):
+            batches.append(sanitized[i:i + self.batch_size])
+
+        # 并发控制：全局信号量（进程级，所有文档共享）+ 单文档信号量（限制本文档占用的 slot 数）。
+        # 双层信号量保证：① 对远程 Embedding 服务的总并发恒定可控；
+        # ② 单个大文档不会独占全部全局 slot，多文档之间能交错执行。
+        from app.pipeline.concurrency import get_embed_semaphore
+        global_sem = get_embed_semaphore()
+        doc_sem = asyncio.Semaphore(self.per_doc_concurrency)
+        results: list[tuple[list[list[float]], list[dict[int, float]]]] = [None] * len(batches)
+        completed_count = 0
+        progress_lock = asyncio.Lock()
+
+        async def _process_batch(batch_idx: int, batch: list[str]):
+            nonlocal completed_count
+            async with doc_sem:
+                async with global_sem:
+                    dense = await self.provider.embed(batch)
+                    sparse = await self.provider.embed_sparse(batch)
+                    results[batch_idx] = (dense, sparse)
+            # 让出事件循环，避免长时间占用导致 API 无响应
+            await asyncio.sleep(0)
+            # 进度报告（每批都输出）
+            async with progress_lock:
+                completed_count += 1
+                print(f"[Embedder] 批次 {completed_count}/{total_batches} 完成 ({completed_count * 100 // total_batches}%，本批 {len(batch)} 个文本)")
+
+        # 一次性提交所有任务，双层 semaphore 自动控制并发窗口
+        await asyncio.gather(*[_process_batch(i, batch) for i, batch in enumerate(batches)])
+
+        # 合并结果（保持顺序）
         all_dense: list[list[float]] = []
         all_sparse: list[dict[int, float]] = []
-
-        # 按批次处理
-        for i in range(0, len(sanitized), self.batch_size):
-            batch = sanitized[i:i + self.batch_size]
-            dense = await self.provider.embed(batch)
-            sparse = await self.provider.embed_sparse(batch)
+        for dense, sparse in results:
             all_dense.extend(dense)
             all_sparse.extend(sparse)
+
+        print(f"[Embedder] embedding 完成，共生成 {len(all_dense)} 个向量")
 
         # 检测并修复 NaN 值
         has_nan = False

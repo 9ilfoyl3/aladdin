@@ -1,21 +1,60 @@
 """文件夹 CRUD 接口"""
 
+import asyncio
 import logging
+import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_db_session, require_authenticated, require_member
+from app.api.errors import CrossTenantError, PermissionDeniedError
 from app.api.validators import NameValidationError, validate_folder_name
-from app.schema.db import Document, Folder, KnowledgeBase
-from app.storage.database import get_db
+from app.auth.identity import IdentityContext
+from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
+from app.schema.api import PageResult
+from app.schema.db import Document, Folder, KnowledgeBase, KnowledgeBaseGrant
+from app.storage.milvus import get_milvus_client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Folder"])
+
+# 上传文件存储目录
+_UPLOAD_DIR = Path("data/uploads")
+
+
+async def _authorize_kb(
+    db: AsyncSession, identity: IdentityContext, kb_id: str, access: KbAccessEnum
+) -> KnowledgeBase:
+    """加载 KB 并经唯一授权判定（读404不泄露 / 写403）。"""
+    kb = await db.get(KnowledgeBase, kb_id)
+    if kb is None:
+        raise CrossTenantError()
+    rows = await db.execute(
+        select(
+            KnowledgeBaseGrant.grantee_type,
+            KnowledgeBaseGrant.grantee_id,
+            KnowledgeBaseGrant.permission,
+        ).where(KnowledgeBaseGrant.kb_id == kb_id)
+    )
+    grants = [GrantView(gt, gid, perm) for gt, gid, perm in rows.all()]
+    decision = kb_authorization_decision(
+        identity,
+        kb_id=kb.id, kb_tenant_id=kb.tenant_id, kb_owner_user_id=kb.owner_user_id,
+        kb_visibility=kb.visibility, kb_org_permission=kb.org_permission,
+        access=access, grants=grants,
+    )
+    if not decision.allow:
+        if decision.http_status == 403:
+            raise PermissionDeniedError()
+        raise CrossTenantError()
+    return kb
 
 
 # ============================================================
@@ -67,61 +106,88 @@ class BreadcrumbItem(BaseModel):
 # ============================================================
 
 
-@router.get("/api/knowledge-bases/{kb_id}/folders", response_model=list[FolderResponse])
+@router.get("/api/knowledge-bases/{kb_id}/folders", response_model=PageResult[FolderResponse])
 async def list_folders(
     kb_id: str,
     parent_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
+    page: int = 1,
+    page_size: int = 20,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
 ):
-    """获取指定目录下的文件夹列表"""
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    """获取指定目录下的文件夹列表（分页/滚动加载）"""
+    # 校验对该 KB 的读权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.READ)
 
-    # 查询文件夹
+    # 参数兜底
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
+    # 构造同级文件夹过滤条件
     if parent_id:
-        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id == parent_id)
+        cond = (Folder.kb_id == kb_id, Folder.parent_id == parent_id)
     else:
-        query = select(Folder).where(Folder.kb_id == kb_id, Folder.parent_id.is_(None))
+        cond = (Folder.kb_id == kb_id, Folder.parent_id.is_(None))
 
-    result = await db.execute(query.order_by(Folder.name))
+    # 总数
+    total = await db.scalar(select(func.count(Folder.id)).where(*cond)) or 0
+
+    # 当前页文件夹
+    result = await db.execute(
+        select(Folder).where(*cond).order_by(Folder.name).offset(offset).limit(page_size)
+    )
     folders = result.scalars().all()
 
-    # 统计每个文件夹的子文件夹数和文档数
-    responses = []
-    for folder in folders:
-        # 子文件夹数
-        sub_result = await db.execute(
-            select(Folder).where(Folder.parent_id == folder.id)
-        )
-        subfolder_count = len(sub_result.scalars().all())
+    folder_ids = [f.id for f in folders]
 
-        # 文档数
-        doc_result = await db.execute(
-            select(Document).where(Document.folder_id == folder.id)
+    # 一次聚合查询统计本页文件夹的文档数（避免 N+1）
+    doc_count_map: dict[str, int] = {}
+    sub_count_map: dict[str, int] = {}
+    if folder_ids:
+        doc_rows = await db.execute(
+            select(Document.folder_id, func.count(Document.id))
+            .where(Document.folder_id.in_(folder_ids))
+            .group_by(Document.folder_id)
         )
-        doc_count = len(doc_result.scalars().all())
+        doc_count_map = {row[0]: row[1] for row in doc_rows.all()}
 
-        responses.append(FolderResponse(
+        sub_rows = await db.execute(
+            select(Folder.parent_id, func.count(Folder.id))
+            .where(Folder.parent_id.in_(folder_ids))
+            .group_by(Folder.parent_id)
+        )
+        sub_count_map = {row[0]: row[1] for row in sub_rows.all()}
+
+    items = [
+        FolderResponse(
             id=folder.id,
             kb_id=folder.kb_id,
             parent_id=folder.parent_id,
             name=folder.name,
-            doc_count=doc_count,
-            subfolder_count=subfolder_count,
+            doc_count=doc_count_map.get(folder.id, 0),
+            subfolder_count=sub_count_map.get(folder.id, 0),
             created_at=folder.created_at,
             updated_at=folder.updated_at,
-        ))
+        )
+        for folder in folders
+    ]
 
-    return responses
+    return PageResult[FolderResponse](
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("/api/knowledge-bases/{kb_id}/folders", response_model=FolderResponse, status_code=201)
 async def create_folder(
     kb_id: str,
     body: FolderCreate,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """创建文件夹"""
     # 校验文件夹名称
@@ -130,10 +196,8 @@ async def create_folder(
     except NameValidationError as e:
         raise HTTPException(status_code=422, detail=e.message)
 
-    # 验证知识库存在
-    kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
-    if kb_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    # 校验对该 KB 的写权限
+    kb = await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
 
     # 验证父文件夹存在（如果指定了）
     if body.parent_id:
@@ -148,10 +212,12 @@ async def create_folder(
         kb_id=kb_id,
         parent_id=body.parent_id,
         name=cleaned_name,
+        tenant_id=kb.tenant_id,
     )
     db.add(folder)
     await db.flush()
     await db.refresh(folder)
+    await db.commit()
 
     return FolderResponse(
         id=folder.id,
@@ -169,13 +235,16 @@ async def create_folder(
 async def update_folder(
     folder_id: str,
     body: FolderUpdate,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """更新文件夹（重命名/移动）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
-        raise HTTPException(status_code=404, detail="文件夹不存在")
+        raise CrossTenantError()
+    # 校验对所属 KB 的写权限
+    await _authorize_kb(db, identity, folder.kb_id, KbAccessEnum.WRITE)
 
     if body.name is not None:
         try:
@@ -193,9 +262,10 @@ async def update_folder(
                 raise HTTPException(status_code=400, detail="不能将文件夹移动到其子文件夹中")
         folder.parent_id = body.parent_id if body.parent_id else None
 
-    folder.updated_at = datetime.now(timezone.utc)
+    folder.updated_at = datetime.utcnow()
     await db.flush()
     await db.refresh(folder)
+    await db.commit()
 
     return FolderResponse(
         id=folder.id,
@@ -210,24 +280,82 @@ async def update_folder(
 
 
 @router.delete("/api/folders/{folder_id}", status_code=204)
-async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
-    """删除文件夹（级联删除子文件夹和文档）"""
+async def delete_folder(
+    folder_id: str,
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """删除文件夹（快速响应版：立即删除 DB 记录并返回，后台异步清理 Milvus 和文件）"""
     result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     if folder is None:
-        raise HTTPException(status_code=404, detail="文件夹不存在")
+        raise CrossTenantError()
 
+    kb_id = folder.kb_id
+    # 校验对所属 KB 的写权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
+
+    # 递归收集该文件夹及所有子文件夹下的文档信息（用于后台清理）
+    all_doc_ids: list[str] = []
+    all_doc_info: list[dict] = []  # {"id": ..., "file_type": ...}
+    folder_ids_to_check = [folder_id]
+
+    while folder_ids_to_check:
+        current_folder_id = folder_ids_to_check.pop()
+        # 收集当前文件夹下的文档
+        doc_result = await db.execute(
+            select(Document.id, Document.file_type).where(Document.folder_id == current_folder_id)
+        )
+        for doc_id, file_type in doc_result.all():
+            all_doc_ids.append(doc_id)
+            all_doc_info.append({"id": doc_id, "file_type": file_type})
+
+        # 收集子文件夹
+        sub_result = await db.execute(
+            select(Folder.id).where(Folder.parent_id == current_folder_id)
+        )
+        for (sub_id,) in sub_result.all():
+            folder_ids_to_check.append(sub_id)
+
+    # 更新知识库文档计数
+    if all_doc_ids:
+        kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
+        kb = kb_result.scalar_one_or_none()
+        if kb:
+            kb.doc_count = max(0, (kb.doc_count or 0) - len(all_doc_ids))
+
+    # 标记正在处理的文档为 cancelled
+    if all_doc_ids:
+        from sqlalchemy import update as sql_update
+        await db.execute(
+            sql_update(Document)
+            .where(Document.id.in_(all_doc_ids))
+            .where(Document.status.in_(("pending", "processing")))
+            .values(status="cancelled")
+        )
+
+    # 删除文件夹（ORM cascade 会自动删除子文件夹、文档和 chunks）
     await db.delete(folder)
-    await db.flush()
+    await db.commit()
+
+    # 后台异步清理 Milvus 向量和物理文件（不阻塞 API 响应）
+    if all_doc_ids or all_doc_info:
+        asyncio.create_task(
+            _folder_cleanup_background(kb_id, all_doc_ids, all_doc_info)
+        )
 
 
 @router.post("/api/knowledge-bases/{kb_id}/move", status_code=200)
 async def move_items(
     kb_id: str,
     body: FolderMoveRequest,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """移动文件或文件夹到目标目录"""
+    # 校验对该 KB 的写权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.WRITE)
+
     # 验证目标文件夹存在
     if body.target_folder_id:
         target_result = await db.execute(
@@ -238,18 +366,18 @@ async def move_items(
 
     if body.item_type == "folder":
         for item_id in body.item_ids:
-            result = await db.execute(select(Folder).where(Folder.id == item_id))
+            result = await db.execute(select(Folder).where(Folder.id == item_id, Folder.kb_id == kb_id))
             folder = result.scalar_one_or_none()
             if folder:
                 folder.parent_id = body.target_folder_id
     elif body.item_type == "document":
         for item_id in body.item_ids:
-            result = await db.execute(select(Document).where(Document.id == item_id))
+            result = await db.execute(select(Document).where(Document.id == item_id, Document.kb_id == kb_id))
             doc = result.scalar_one_or_none()
             if doc:
                 doc.folder_id = body.target_folder_id
 
-    await db.flush()
+    await db.commit()
     return {"message": "移动成功"}
 
 
@@ -257,14 +385,18 @@ async def move_items(
 async def get_breadcrumb(
     kb_id: str,
     folder_id: str,
-    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """获取文件夹的面包屑路径"""
+    # 校验对该 KB 的读权限
+    await _authorize_kb(db, identity, kb_id, KbAccessEnum.READ)
+
     breadcrumb = []
     current_id: str | None = folder_id
 
     while current_id:
-        result = await db.execute(select(Folder).where(Folder.id == current_id))
+        result = await db.execute(select(Folder).where(Folder.id == current_id, Folder.kb_id == kb_id))
         folder = result.scalar_one_or_none()
         if folder is None:
             break
@@ -287,3 +419,36 @@ async def _is_descendant(db: AsyncSession, folder_id: str, ancestor_id: str) -> 
             break
         current_id = folder.parent_id
     return False
+
+
+async def _folder_cleanup_background(
+    kb_id: str, doc_ids: list[str], doc_info_list: list[dict]
+) -> None:
+    """后台清理 Milvus 向量和物理文件（不阻塞 API 响应）"""
+    # 使用 doc_id 表达式删除 Milvus 向量（无需预先收集 chunk_ids，更快更可靠）
+    if doc_ids:
+        try:
+            milvus = get_milvus_client()
+            if await milvus.has_collection(kb_id):
+                await milvus.delete_by_doc_ids(kb_id, doc_ids)
+            logger.info("文件夹删除 - Milvus 向量清理完成，共 %d 个文档", len(doc_ids))
+        except Exception as e:
+            logger.warning("文件夹删除 - Milvus 向量清理失败: %s", e)
+
+    # 删除物理文件
+    for info in doc_info_list:
+        file_path = _UPLOAD_DIR / f"{info['id']}.{info['file_type']}"
+        if file_path.exists():
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.warning("文件夹删除 - 删除文件失败 %s: %s", file_path, e)
+
+    # 清除检索缓存
+    try:
+        from app.retrieval.cache import get_retrieval_cache
+        cache = await get_retrieval_cache()
+        if cache:
+            await cache.invalidate_kb(kb_id)
+    except Exception as e:
+        logger.warning("文件夹删除 - 清除缓存失败: %s", e)

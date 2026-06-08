@@ -2,12 +2,15 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Key, Copy, Check } from 'lucide-react'
 import { apiKeyApi } from '@/lib/api'
+import { copyToClipboard } from '@/lib/clipboard'
+import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import TableSkeleton from '@/components/skeletons/TableSkeleton'
 
 // API Key 数据类型
 interface ApiKeyItem {
@@ -31,6 +34,7 @@ interface CreateKeyResponse {
 // API Key 管理页面：创建 + 列表 + 撤销
 function ApiKeys() {
   const queryClient = useQueryClient()
+  const confirm = useConfirm()
   const [showCreate, setShowCreate] = useState(false)
   const [keyName, setKeyName] = useState('')
   const [newKey, setNewKey] = useState<string | null>(null)
@@ -59,6 +63,20 @@ function ApiKeys() {
     },
   })
 
+  // 撤销 Key（统一确认交互）
+  async function handleRevoke(key: ApiKeyItem) {
+    const ok = await confirm({
+      title: '撤销 API Key',
+      description: (
+        <>
+          确定要撤销 Key「{key.name || key.prefix + '...'}」吗？撤销后使用该 Key 的调用将立即失效，此操作不可撤销。
+        </>
+      ),
+      confirmText: '撤销',
+    })
+    if (ok) deleteMutation.mutate(key.id)
+  }
+
   // 提交创建
   function handleCreate(e: React.FormEvent) {
     e.preventDefault()
@@ -76,7 +94,7 @@ function ApiKeys() {
   // 复制 Key
   function copyKey() {
     if (newKey) {
-      navigator.clipboard.writeText(newKey)
+      copyToClipboard(newKey)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -104,14 +122,14 @@ function ApiKeys() {
 
       {/* Key 列表 */}
       {isLoading ? (
-        <p className="text-muted-foreground">加载中...</p>
+        <TableSkeleton rows={4} columns={6} />
       ) : apiKeys.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
           <Key className="h-12 w-12 mx-auto mb-4 opacity-50" />
           <p>暂无 API Key，点击上方按钮创建</p>
         </div>
       ) : (
-        <div className="border rounded-lg">
+        <div className="border rounded-lg animate-in fade-in-0 duration-500">
           <Table>
             <TableHeader>
               <TableRow>
@@ -144,7 +162,7 @@ function ApiKeys() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => deleteMutation.mutate(key.id)}
+                        onClick={() => handleRevoke(key)}
                         disabled={!key.is_active}
                         title="撤销"
                       >

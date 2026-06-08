@@ -1,0 +1,30 @@
+# ============================================================
+# 本地开发覆盖（docker compose 默认自动加载此文件）
+#
+# 用途：本地只用 docker 跑中间件，后端/Worker/前端用 `make dev` 跑在宿主机热重载。
+# 因此把中间件端口暴露到宿主机，供宿主机进程通过 localhost 连接。
+#
+#   docker compose --profile infra up -d     # 自动叠加本文件，暴露端口
+#
+# 生产部署需显式忽略本文件，避免把中间件端口暴露到宿主机：
+#   docker compose -f docker-compose.yml --profile infra --profile app up -d
+# ============================================================
+
+services:
+  milvus:
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
