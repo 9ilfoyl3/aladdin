@@ -620,12 +620,18 @@ export interface SessionFileResponse {
 }
 
 // multipart 上传专用：复用 request() 的错误解析（含 413/422 友好中文 detail）
-async function uploadFile<T>(endpoint: string, formData: FormData): Promise<T> {
+// 支持传入 AbortSignal，便于上传中途取消（abort 时 fetch 抛 AbortError）。
+async function uploadFile<T>(
+  endpoint: string,
+  formData: FormData,
+  signal?: AbortSignal,
+): Promise<T> {
   const url = `${BASE_URL}${endpoint}`
   const response = await fetch(url, {
     method: 'POST',
     headers: authHeaders(),
     body: formData,
+    signal,
   })
   if (!response.ok) {
     if (response.status === 401) handleUnauthorized()
@@ -652,10 +658,10 @@ async function uploadFile<T>(endpoint: string, formData: FormData): Promise<T> {
 export const sessionFileApi = {
   list: (sessionId: string) =>
     request<SessionFileResponse[]>(`/sessions/${sessionId}/files`),
-  upload: (sessionId: string, file: File) => {
+  upload: (sessionId: string, file: File, signal?: AbortSignal) => {
     const fd = new FormData()
     fd.append('file', file)
-    return uploadFile<SessionFileResponse>(`/sessions/${sessionId}/files`, fd)
+    return uploadFile<SessionFileResponse>(`/sessions/${sessionId}/files`, fd, signal)
   },
   remove: (sessionId: string, fileId: string) =>
     request<void>(`/sessions/${sessionId}/files/${fileId}`, { method: 'DELETE' }),

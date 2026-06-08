@@ -4,7 +4,25 @@ import { cn } from "@/lib/utils"
 
 const TooltipProvider = TooltipPrimitive.Provider
 const Tooltip = TooltipPrimitive.Root
-const TooltipTrigger = TooltipPrimitive.Trigger
+
+// 修复：点击触发元素后，元素会保持 focus，导致 Radix Tooltip 常驻显示。
+// 鼠标点击（e.detail > 0）后主动失焦以关闭 tooltip；键盘触发（e.detail === 0）保留焦点，确保无障碍行为不受影响。
+const TooltipTrigger = React.forwardRef<
+  React.ComponentRef<typeof TooltipPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Trigger>
+>(({ onClick, ...props }, ref) => (
+  <TooltipPrimitive.Trigger
+    ref={ref}
+    onClick={(e) => {
+      onClick?.(e)
+      if (e.detail > 0) {
+        (e.currentTarget as HTMLElement).blur()
+      }
+    }}
+    {...props}
+  />
+))
+TooltipTrigger.displayName = TooltipPrimitive.Trigger.displayName
 
 const TooltipContent = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Content>,

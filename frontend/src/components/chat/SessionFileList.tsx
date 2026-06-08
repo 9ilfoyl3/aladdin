@@ -22,9 +22,11 @@ interface SessionFileListProps {
   files: SessionFileResponse[]
   /** 同步上传中的本地占位 */
   pending: PendingSessionFile[]
-  /** 移除单个已建索引文件（点击 X） */
+  /** 移除单个已建索引文件（点击取消图标） */
   onRemove: (fileId: string) => void
-  /** 关闭一个失败占位（点击 X 仅本地清理） */
+  /** 取消一个上传中的占位（中止在飞的 POST） */
+  onCancelPending: (localId: string) => void
+  /** 关闭一个失败占位（仅本地清理） */
   onDismissPending: (localId: string) => void
   /** 文件名 → 图片预览 URL（仅本会话内上传的图片可用：服务端临时文件处理后即删） */
   imagePreviewUrls?: Record<string, string>
@@ -38,8 +40,10 @@ interface ChipModel {
   status: 'completed' | 'processing' | 'failed'
   chunkCount?: number
   errorMessage?: string
-  /** 点击 X 的行为；null 表示该状态不可移除（如处理中） */
-  onRemove: (() => void) | null
+  /** 取消/移除该 chip 的行为（全状态可取消，悬浮时由状态图标处触发） */
+  onCancel: () => void
+  /** 取消按钮的无障碍文案（上传中=取消上传 / 其余=移除） */
+  cancelLabel: string
 }
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'])
@@ -86,15 +90,18 @@ function SessionFileList({
   files,
   pending,
   onRemove,
+  onCancelPending,
   onDismissPending,
   imagePreviewUrls = {},
 }: SessionFileListProps) {
   // 放大预览的图片（点击图片 chip 缩略图时打开）。
   const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
+  // 当前悬浮的 chip key：悬浮时把状态图标替换为取消图标（取消按钮不常驻）。
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null)
 
   if (files.length === 0 && pending.length === 0) return null
 
-  // 服务端文件 -> 归一化模型
+  // 服务端文件 -> 归一化模型（全状态可取消：处理中=取消，其余=移除）
   const serverChips: ChipModel[] = files.map((f) => ({
     key: f.id,
     filename: f.filename,
@@ -106,18 +113,22 @@ function SessionFileList({
           ? 'failed'
           : 'completed',
     chunkCount: f.chunk_count,
-    onRemove: f.status === 'processing' ? null : () => onRemove(f.id),
+    onCancel: () => onRemove(f.id),
+    cancelLabel: f.status === 'processing' ? `取消上传 ${f.filename}` : `移除 ${f.filename}`,
   }))
 
-  // 本地占位 -> 归一化模型
+  // 本地占位 -> 归一化模型（上传中=中止 POST；失败=本地关闭）
   const pendingChips: ChipModel[] = pending.map((p) => ({
     key: p.localId,
     filename: p.filename,
     sizeBytes: p.size,
     status: p.status === 'failed' ? 'failed' : 'processing',
     errorMessage: p.errorMessage,
-    // 上传中不可移除；失败可本地关闭
-    onRemove: p.status === 'failed' ? () => onDismissPending(p.localId) : null,
+    onCancel:
+      p.status === 'failed'
+        ? () => onDismissPending(p.localId)
+        : () => onCancelPending(p.localId),
+    cancelLabel: p.status === 'failed' ? `关闭 ${p.filename}` : `取消上传 ${p.filename}`,
   }))
 
   const chips = [...serverChips, ...pendingChips]
@@ -139,65 +150,78 @@ function SessionFileList({
           const isImg = isImageFilename(c.filename)
           const previewUrl = isImg ? imagePreviewUrls[c.filename] : undefined
           const canPreview = !!previewUrl
+          const showCancel = hoveredKey === c.key
+
+          // 取消按钮：悬浮时占据状态图标位置（不常驻）。
+          const cancelButton = (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                c.onCancel()
+              }}
+              className="h-full w-full flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
+              aria-label={c.cancelLabel}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )
+
+          // 状态图标（默认态）：处理中转圈 / 失败警告 / 图片或文件图标。
+          const statusIcon =
+            c.status === 'processing' ? (
+              <Spinner size="sm" />
+            ) : c.status === 'failed' ? (
+              <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+            ) : isImg ? (
+              <ImageIcon className="h-3.5 w-3.5 text-muted-foreground" />
+            ) : (
+              <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+            )
 
           return (
             <Tooltip key={c.key}>
               <TooltipTrigger asChild>
                 <div
                   className={cn(
-                    'group inline-flex items-center gap-1.5 h-8 pl-1.5 pr-1 rounded-xl border text-xs transition-colors max-w-[15em]',
+                    'group inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2 rounded-xl border text-xs transition-colors max-w-[15em]',
                     STATUS_CHIP_CLASS[c.status]
                   )}
+                  onMouseEnter={() => setHoveredKey(c.key)}
+                  onMouseLeave={() => setHoveredKey((k) => (k === c.key ? null : k))}
+                  onFocus={() => setHoveredKey(c.key)}
+                  onBlur={() => setHoveredKey((k) => (k === c.key ? null : k))}
                 >
-                  {/* 前导：图片缩略图（可点开大图）或文件/状态图标 */}
+                  {/* 前导槽：图片缩略图（可点开大图）；非图片时为状态图标，悬浮替换为取消按钮 */}
                   {canPreview ? (
-                    <button
-                      type="button"
-                      onClick={() => setPreview({ url: previewUrl!, name: c.filename })}
-                      className="h-6 w-6 shrink-0 rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
-                      aria-label={`预览图片 ${c.filename}`}
-                    >
-                      <img src={previewUrl} alt="" className="h-full w-full object-cover" />
-                    </button>
+                    <span className="h-6 w-6 shrink-0">
+                      {showCancel ? (
+                        cancelButton
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setPreview({ url: previewUrl!, name: c.filename })}
+                          className="h-full w-full rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
+                          aria-label={`预览图片 ${c.filename}`}
+                        >
+                          <img src={previewUrl} alt="" className="h-full w-full object-cover" />
+                        </button>
+                      )}
+                    </span>
                   ) : (
                     <span className="h-6 w-6 shrink-0 flex items-center justify-center">
-                      {c.status === 'processing' ? (
-                        <Spinner size="sm" />
-                      ) : c.status === 'failed' ? (
-                        <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
-                      ) : isImg ? (
-                        <ImageIcon className="h-3.5 w-3.5 text-muted-foreground" />
-                      ) : (
-                        <FileText className="h-3.5 w-3.5 text-muted-foreground" />
-                      )}
+                      {showCancel ? cancelButton : statusIcon}
                     </span>
                   )}
 
                   <span className="truncate font-medium">{c.filename}</span>
 
-                  {/* 尾随状态标识：就绪=绿勾；处理中（有缩略图时补一个小转圈）；失败用前导图标已表达 */}
-                  {c.status === 'completed' && (
+                  {/* 尾随状态标识：就绪=绿勾；图片处理中补转圈。悬浮时（图片 chip）让位给前导取消按钮，此处隐藏。 */}
+                  {!showCancel && c.status === 'completed' && (
                     <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                   )}
-                  {c.status === 'processing' && canPreview && <Spinner size="sm" className="shrink-0" />}
-
-                  {/* 移除/关闭按钮 */}
-                  {c.onRemove ? (
-                    <button
-                      type="button"
-                      onClick={c.onRemove}
-                      className={cn(
-                        'h-5 w-5 shrink-0 flex items-center justify-center rounded-md cursor-pointer transition-colors',
-                        c.status === 'failed'
-                          ? 'text-destructive/80 hover:text-destructive hover:bg-destructive/15'
-                          : 'text-muted-foreground hover:text-destructive hover:bg-destructive/10'
-                      )}
-                      aria-label={`移除 ${c.filename}`}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  ) : (
-                    <span className="w-1 shrink-0" />
+                  {!showCancel && c.status === 'processing' && canPreview && (
+                    <Spinner size="sm" className="shrink-0" />
                   )}
                 </div>
               </TooltipTrigger>

@@ -46,6 +46,8 @@ function Chat() {
   // 会话文件本地占位（POST 在飞 / 失败提示），与服务端列表一起展示。
   // 同步上传完成后由 react-query 刷新列表 + 清掉对应占位。
   const [pendingFiles, setPendingFiles] = useState<PendingSessionFile[]>([])
+  // 上传中占位的 AbortController：localId → controller，用于中途取消在飞的 POST。
+  const uploadControllersRef = useRef<Record<string, AbortController>>({})
   // 本会话内上传的图片：文件名 → object URL（用于 chip 缩略图与放大预览）。
   // 服务端临时文件处理后即删，无法回源取图，故在上传时就地从客户端 blob 生成。
   const [imagePreviewUrls, setImagePreviewUrls] = useState<Record<string, string>>({})
@@ -719,20 +721,30 @@ function Chat() {
         ...prev,
         { localId, filename: file.name, size: file.size, status: 'uploading' },
       ])
+      // 该次上传的中止句柄：用户在上传中点取消时 abort
+      const controller = new AbortController()
+      uploadControllersRef.current[localId] = controller
       try {
-        await sessionFileApi.upload(sessionId, file)
+        await sessionFileApi.upload(sessionId, file, controller.signal)
         // 成功：刷新服务端列表 + 清占位（让服务端条目无缝替换）
         await queryClient.invalidateQueries({ queryKey: ['session-files', sessionId] })
         setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
       } catch (err) {
-        const msg = err instanceof Error ? err.message : '上传失败'
-        toast.error(msg)
-        // 失败的占位保留并标红，让用户能看到失败原因；点击 X 才本地清掉
-        setPendingFiles((prev) =>
-          prev.map((p) =>
-            p.localId === localId ? { ...p, status: 'failed', errorMessage: msg } : p
+        // 用户主动取消：静默清掉占位，不报错（占位已在取消处理器中移除）
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
+        } else {
+          const msg = err instanceof Error ? err.message : '上传失败'
+          toast.error(msg)
+          // 失败的占位保留并标红，让用户能看到失败原因；点击取消才本地清掉
+          setPendingFiles((prev) =>
+            prev.map((p) =>
+              p.localId === localId ? { ...p, status: 'failed', errorMessage: msg } : p
+            )
           )
-        )
+        }
+      } finally {
+        delete uploadControllersRef.current[localId]
       }
     }
   }
@@ -766,6 +778,17 @@ function Chat() {
   }
 
   function handleDismissPendingSessionFile(localId: string) {
+    setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
+  }
+
+  // 取消一个上传中的占位：中止在飞的 POST，并立即清掉占位。
+  // 占位清理也由 upload 的 AbortError 分支兜底，这里先行移除让 UI 即时响应。
+  function handleCancelPendingSessionFile(localId: string) {
+    const controller = uploadControllersRef.current[localId]
+    if (controller) {
+      controller.abort()
+      delete uploadControllersRef.current[localId]
+    }
     setPendingFiles((prev) => prev.filter((p) => p.localId !== localId))
   }
 
@@ -812,6 +835,7 @@ function Chat() {
     canUploadSessionFile: !isStreaming,
     onUploadSessionFiles: handleUploadSessionFiles,
     onRemoveSessionFile: handleRemoveSessionFile,
+    onCancelPendingSessionFile: handleCancelPendingSessionFile,
     onDismissPendingSessionFile: handleDismissPendingSessionFile,
     sessionImagePreviewUrls: imagePreviewUrls,
   }

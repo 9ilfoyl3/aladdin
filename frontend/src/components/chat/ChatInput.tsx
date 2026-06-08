@@ -58,6 +58,8 @@ interface ChatInputProps {
   onUploadSessionFiles?: (files: FileList) => void
   /** 移除单个已建索引文件 */
   onRemoveSessionFile?: (fileId: string) => void
+  /** 取消一个上传中的占位（中止在飞的 POST） */
+  onCancelPendingSessionFile?: (localId: string) => void
   /** 关闭一个失败占位（仅本地清理） */
   onDismissPendingSessionFile?: (localId: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片缩略图/放大预览） */
@@ -86,6 +88,7 @@ function ChatInput({
   canUploadSessionFile = false,
   onUploadSessionFiles,
   onRemoveSessionFile,
+  onCancelPendingSessionFile,
   onDismissPendingSessionFile,
   sessionImagePreviewUrls = {},
 }: ChatInputProps) {
@@ -170,6 +173,7 @@ function ChatInput({
         files={sessionFiles}
         pending={pendingSessionFiles}
         onRemove={(id) => onRemoveSessionFile?.(id)}
+        onCancelPending={(id) => onCancelPendingSessionFile?.(id)}
         onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
         imagePreviewUrls={sessionImagePreviewUrls}
       />
