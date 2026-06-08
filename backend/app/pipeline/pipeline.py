@@ -206,7 +206,12 @@ class DocumentPipeline:
                 )
             elif not stripped_content or len(stripped_content) < 10:
                 if not self.ocr_manager:
-                    raise ValueError("文档提取文本为空，且未配置 OCR 服务")
+                    # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
+                    # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
+                    # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("文档提取文本为空，且未配置 OCR 服务")
 
             final_content = load_result.content
             if load_result.images and self.ocr_manager:

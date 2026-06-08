@@ -108,7 +108,7 @@ def validate_org_permission(org_permission: str) -> str:
 # 简介：可空，最长 500 字符
 DESCRIPTION_MAX = 500
 # 头像：data URL 字符串，限制大小与类型（避免大图撑爆库与响应体）
-_AVATAR_MAX_CHARS = 300_000  # ~200KB 二进制 base64 后约 270KB，留余量
+_AVATAR_MAX_CHARS = 2_800_000  # ~2MB 二进制 base64 后约 2.7MB，留余量
 _AVATAR_DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$")
 
 
@@ -135,7 +135,7 @@ def validate_avatar(avatar: str | None) -> str | None:
     if a == "":
         return None
     if len(a) > _AVATAR_MAX_CHARS:
-        raise ValidationInputError("头像图片过大，请控制在 200KB 以内")
+        raise ValidationInputError("头像图片过大，请控制在 2MB 以内")
     if not _AVATAR_DATA_URL_RE.match(a):
         raise ValidationInputError("头像格式不合法，仅支持 png/jpeg/webp 图片")
     return a

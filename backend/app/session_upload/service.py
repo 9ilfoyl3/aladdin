@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import delete as sa_delete, func, select
 
-from app.api.errors import FileTooLargeError
+from app.api.errors import EmptyDocumentContentError, FileTooLargeError
 from app.pipeline.factory import create_pipeline
 from app.schema.db import SessionChunk, SessionFile
 from app.storage.database import async_session
@@ -201,7 +201,7 @@ class SessionUploadService:
         Raises:
             FileTooLargeError: 文件大小超 upload_max_file_bytes。
             UploadCapExceeded: Chunk 数超 kb_chunk_cap（Pre_Embed_Gate）。
-            ValueError: 无可提取文本。
+            EmptyDocumentContentError: 无可提取文本 / 切分后零 chunk。
         """
         # 1) 文件大小校验
         file_size = len(content)
@@ -230,9 +230,9 @@ class SessionUploadService:
 
             child_count = len(processed.enriched_children)
             if child_count == 0:
-                # 防御性兜底：pipeline 通常已对空内容 raise ValueError；走到此处说明
-                # 切分后零 child chunk（极端边界），无可建索引内容，统一报错告知用户。
-                raise ValueError("文档无可提取内容，无法建立索引")
+                # 防御性兜底：pipeline 通常已对空内容 raise；走到此处说明切分后零 child
+                # chunk（极端边界），无可建索引内容，统一以 422 优雅提示（非 500）。
+                raise EmptyDocumentContentError()
 
             # 5) 共享 collection 幂等建表（首个会话上传时创建）
             await self.milvus.ensure_session_files_collection()

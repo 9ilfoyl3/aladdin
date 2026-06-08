@@ -33,6 +33,7 @@ class ErrorCodeEnum(str, Enum):
     VALIDATION_ERROR = "validation_error"
     BAD_REQUEST = "bad_request"
     FILE_TOO_LARGE = "file_too_large"
+    EMPTY_DOCUMENT_CONTENT = "empty_document_content"
 
 
 class AppError(Exception):
@@ -130,6 +131,19 @@ class FileTooLargeError(AppError):
         """据生效字节上限构造异常，文案带上允许的 MB 上限（Req 3.2）。"""
         limit_mb = limit_bytes // (1024 * 1024)
         return cls(f"上传文件超过允许的大小上限（最大 {limit_mb}MB）")
+
+
+class EmptyDocumentContentError(AppError):
+    """文档无可提取内容，无法建立索引 -> 422。
+
+    出现场景：上传的文件（如扫描件 / 纯图片）经解析与 OCR 后仍无可用文本，或切分后
+    得到零 child chunk。此为用户输入问题而非服务端故障，应优雅提示而非 500。文案对用户
+    友好，提示更换文件或确认文件含可识别文本。
+    """
+
+    code = ErrorCodeEnum.EMPTY_DOCUMENT_CONTENT
+    http_status = 422
+    default_detail = "文档无可提取内容，无法建立索引（请确认文件包含可识别的文本）"
 
 
 def register_exception_handlers(app: FastAPI) -> None:
