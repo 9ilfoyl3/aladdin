@@ -73,20 +73,27 @@ function Invitations() {
     return `${window.location.origin}/invite/${token}`
   }
 
-  function copyLink() {
-    if (created) {
-      copyToClipboard(inviteLink(created.token))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+  async function copyLink() {
+    if (!created) return
+    const ok = await copyToClipboard(inviteLink(created.token))
+    if (!ok) {
+      toast.error('复制失败，请手动选择链接复制')
+      return
     }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
-  function copyRowLink(inv: InvitationItem) {
+  async function copyRowLink(inv: InvitationItem) {
     if (!inv.token) {
       toast.error('该邀请无可复制链接')
       return
     }
-    copyToClipboard(inviteLink(inv.token))
+    const ok = await copyToClipboard(inviteLink(inv.token))
+    if (!ok) {
+      toast.error('复制失败，请手动选择链接复制')
+      return
+    }
     setCopiedId(inv.id)
     setTimeout(() => setCopiedId(null), 2000)
     toast.success('链接已复制')

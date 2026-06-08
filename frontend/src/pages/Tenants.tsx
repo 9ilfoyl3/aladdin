@@ -173,20 +173,26 @@ function Tenants() {
     setCopied(false)
   }
 
-  function copyPwd() {
-    if (created?.admin_temp_password) {
-      copyToClipboard(created.admin_temp_password)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+  async function copyPwd() {
+    if (!created?.admin_temp_password) return
+    const ok = await copyToClipboard(created.admin_temp_password)
+    if (!ok) {
+      toast.error('复制失败，请手动选择密码复制')
+      return
     }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
-  function copyTemp() {
-    if (tempResult) {
-      copyToClipboard(tempResult.pwd)
-      setTempCopied(true)
-      setTimeout(() => setTempCopied(false), 2000)
+  async function copyTemp() {
+    if (!tempResult) return
+    const ok = await copyToClipboard(tempResult.pwd)
+    if (!ok) {
+      toast.error('复制失败，请手动选择密码复制')
+      return
     }
+    setTempCopied(true)
+    setTimeout(() => setTempCopied(false), 2000)
   }
 
   return (

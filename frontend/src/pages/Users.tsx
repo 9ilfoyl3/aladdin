@@ -104,12 +104,15 @@ function Users() {
     if (ok) resetMutation.mutate(u.id)
   }
 
-  function copyPwd() {
-    if (tempResult) {
-      copyToClipboard(tempResult.pwd)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+  async function copyPwd() {
+    if (!tempResult) return
+    const ok = await copyToClipboard(tempResult.pwd)
+    if (!ok) {
+      toast.error('复制失败，请手动选择密码复制')
+      return
     }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
   return (
