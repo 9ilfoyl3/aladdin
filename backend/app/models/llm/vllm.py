@@ -193,7 +193,13 @@ class VllmLLM(LLMProvider):
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] chat_with_tools: {len(tools)} tools, url={url}")
+            print(f"[vLLM] chat_with_tools payload keys: {list(payload.keys())}")
             resp = await self._client.post(url, json=payload)
+            if resp.status_code != 200:
+                print(
+                    f"[vLLM] chat_with_tools 失败 状态码: {resp.status_code}, "
+                    f"响应内容: {resp.text[:1000]}"
+                )
             resp.raise_for_status()
             data = resp.json()
 

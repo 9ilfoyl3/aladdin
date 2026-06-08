@@ -196,13 +196,25 @@ function Chat() {
                     existing.success = step.success as boolean
                     existing.durationMs = step.duration_ms as number | undefined
                   }
-                } else if (step.type === 'final_answer' && step.content) {
-                  // 合并连续的 answer 段落
-                  const lastSeg = segments[segments.length - 1]
-                  if (lastSeg && lastSeg.type === 'answer') {
-                    lastSeg.content += String(step.content)
-                  } else {
-                    segments.push({ type: 'answer', content: String(step.content) })
+                } else if (step.type === 'final_answer') {
+                  if (step.content) {
+                    // 合并连续的 answer 段落
+                    const lastSeg = segments[segments.length - 1]
+                    if (lastSeg && lastSeg.type === 'answer') {
+                      lastSeg.content += String(step.content)
+                    } else {
+                      segments.push({ type: 'answer', content: String(step.content) })
+                    }
+                  } else if ((step as Record<string, unknown>).done) {
+                    // done=true 且无 content：natural_stop / stuck_loop 场景。
+                    // 答案已作为最后一个 thought 段落流式发出（弱 function-calling 模型
+                    // 闲聊时把答案当普通 content 输出），需与流式渲染逻辑一致，把它转为
+                    // answer。否则末尾兜底会用 base.content 再补一个 answer 段落，导致
+                    // 历史恢复时「思考面板 + 正文」双份显示同一内容。
+                    const lastSeg = segments[segments.length - 1]
+                    if (lastSeg && lastSeg.type === 'thought') {
+                      lastSeg.type = 'answer'
+                    }
                   }
                 } else if (step.type === 'complete' && typeof (step as Record<string, unknown>).total_duration_ms === 'number') {
                   // 恢复整体耗时
