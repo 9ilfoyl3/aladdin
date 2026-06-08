@@ -28,7 +28,7 @@ from app.retrieval.config import (
     get_platform_config_store,
     get_retrieval_config_store,
 )
-from app.schema.db import Chunk
+from app.schema.db import Chunk, SessionChunk
 
 logger = logging.getLogger(__name__)
 
@@ -751,6 +751,11 @@ class HybridRetriever(BaseRetriever):
         self, results: list[RetrievalResult]
     ) -> list[RetrievalResult]:
         """父块扩展：若 chunk 有 parent_id，用父块内容替换 content，子块内容保留到 child_content"""
+        # 空值兜底：无检索结果（未选知识库 / 未上传附件 / 检索为空）直接返回，
+        # 不进行任何 DB 查询。
+        if not results:
+            return results
+
         # 收集需要扩展的 parent_id
         parent_ids = set()
         for r in results:
@@ -764,20 +769,45 @@ class HybridRetriever(BaseRetriever):
                 r.child_content = r.content
             return results
 
-        # 批量查询父块内容
+        # 批量查询父块内容。
+        # 正式知识库父块存 ``chunks`` 表，会话上传文件父块存 ``session_chunks`` 表
+        # （两表 id 均为 Milvus chunk_id，UUID 全局唯一，不会冲突）。父块扩展对两条
+        # 来源都要生效——否则会话文件命中查不到父块、回退到子块小片段，LLM 拿不到
+        # 完整父块上下文，问答中会话文件被系统性矮化（session-file 父块扩展缺失修复）。
+        # 仅收集非空父块内容：父块行存在但内容为空（异常数据）时不写入，
+        # 让下方 .get 回退到子块内容，避免给 LLM 空上下文。
+        parent_id_list = list(parent_ids)
         parent_contents: dict[str, str] = {}
         async with self.db_session_factory() as session:
-            stmt = select(Chunk.id, Chunk.content).where(Chunk.id.in_(list(parent_ids)))
-            rows = await session.execute(stmt)
-            for row in rows:
-                parent_contents[row.id] = row.content
+            kb_rows = await session.execute(
+                select(Chunk.id, Chunk.content).where(Chunk.id.in_(parent_id_list))
+            )
+            for row in kb_rows:
+                if row.content:
+                    parent_contents[row.id] = row.content
 
-        # 保留子块内容，用父块内容替换 content
+            # 未在正式库命中的 parent_id，再查会话文件父块表（避免无谓查询）。
+            missing_ids = [pid for pid in parent_id_list if pid not in parent_contents]
+            if missing_ids:
+                session_rows = await session.execute(
+                    select(SessionChunk.id, SessionChunk.content).where(
+                        SessionChunk.id.in_(missing_ids)
+                    )
+                )
+                for row in session_rows:
+                    if row.content:
+                        parent_contents[row.id] = row.content
+
+        # 保留子块内容，用父块内容替换 content。
+        # 任一环节缺失（无 parent_id / 两表都查不到 / 父块内容为空）均回退到子块内容，
+        # 保证 content 永不为空。
         expanded = []
         for r in results:
             parent_id = r.metadata.get("parent_id", "")
             child_content = r.content  # 原始子块内容
-            parent_content = parent_contents.get(parent_id, r.content) if parent_id else r.content
+            parent_content = parent_contents.get(parent_id) if parent_id else None
+            if not parent_content:
+                parent_content = child_content
             expanded.append(
                 RetrievalResult(
                     chunk_id=r.chunk_id,
