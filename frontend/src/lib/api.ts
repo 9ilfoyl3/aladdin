@@ -532,6 +532,7 @@ export interface AgentPresetItem {
     temperature?: number
     thinking_enabled?: boolean
     allowed_tools?: string[]
+    custom_instructions?: string
   } | null
   is_default: boolean
   created_at: string
@@ -546,10 +547,6 @@ export interface AgentPresetItem {
 
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
-  placeholders: () => request<{
-    placeholders: { name: string; description: string }[]
-    default_prompt: string
-  }>('/agent-presets/placeholders'),
   rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
     request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
       method: 'POST',

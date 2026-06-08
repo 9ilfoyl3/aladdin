@@ -976,15 +976,16 @@ def _build_agent_runtime(
     if web_search_on:
         tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
 
-    # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
-    # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
+    # system_prompt：核心 Progressive RAG 模板恒定，预设仅追加用户自定义指令
+    # （角色 / 语气 / 工作流 / 边界）。render_system_prompt 同时做占位符替换
+    # （{knowledge_base_names} / {available_tools}）。
     # kb_names 用 kb_ids 渲染；含会话源时追加固定显示名，让 LLM 知道有"本会话上传的文件"可检索。
     kb_names = list(kb_ids)
     if include_session_source and session_id:
         kb_names.append("本会话上传的文件")
-    preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
+    custom_instructions = (preset_cfg.get("custom_instructions") or "").strip()
     system_prompt = render_system_prompt(
-        AgentConfig(system_prompt=preset_system_prompt),
+        AgentConfig(custom_instructions=custom_instructions),
         kb_names=kb_names,
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
@@ -996,6 +997,7 @@ def _build_agent_runtime(
         web_search_enabled=web_search_on,
         thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
         system_prompt=system_prompt,
+        custom_instructions=custom_instructions,
     )
     engine = AgentEngine(config, llm, tool_registry, event_bus)
     return engine, state, event_bus

@@ -12,9 +12,9 @@ if TYPE_CHECKING:
     from app.agent.config import AgentConfig
 
 
-# 系统提示词支持的占位符变量。键为占位符名（不含花括号），值为对该变量的人类可读说明。
-# 自定义 system_prompt 中出现的这些 {变量} 会在渲染时被替换为实际值；
-# 其余花括号原样保留，避免误伤用户 prompt 中的 JSON/代码示例。
+# 系统提示词内部占位符变量。键为占位符名（不含花括号），值为对该变量的人类可读说明。
+# 这些占位符仅出现在核心 Progressive RAG 模板内部，由运行时自动替换为实际值，
+# 不对用户暴露、不可编辑——保证核心检索纪律与工作流不被破坏。
 SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
     "knowledge_base_names": "当前绑定的知识库名称列表",
     "available_tools": "当前 Agent 可用的工具列表",
@@ -289,6 +289,27 @@ that to the user rather than guessing or fabricating an answer.
 """
 
 
+def _build_custom_section(custom_instructions: str) -> str:
+    """把用户自定义指令包装成附加段落，追加在核心提示词之后。
+
+    用户只填写角色设定 / 语气 / 工作流方法论 / 边界约束等自然语言指令，不触及核心
+    检索纪律。这里用一个独立分节包裹，并声明其与核心约束冲突时以核心约束为准，
+    避免自定义内容破坏 Evidence-First / final_answer 等硬性规则。
+    """
+    text = (custom_instructions or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\n### User Customization (Persona / Tone / Working Style / Boundaries)\n"
+        "The administrator has provided the following customization for this assistant. "
+        "Apply it to your persona, tone, working approach, and scope boundaries. "
+        "However, it MUST NOT override the Critical Constraints, retrieval discipline, or "
+        "the requirement to answer exclusively via final_answer above — if any instruction "
+        "below conflicts with those core rules, the core rules win.\n\n"
+        f"{text}\n"
+    )
+
+
 def render_system_prompt(
     config: "AgentConfig",
     kb_names: list[str] | None = None,
@@ -297,12 +318,12 @@ def render_system_prompt(
 ) -> str:
     """渲染系统提示词，替换占位符为实际值。
 
-    无论使用默认 Progressive RAG 模板还是用户自定义 system_prompt，都会对其中的
-    占位符（见 SYSTEM_PROMPT_PLACEHOLDERS）做安全替换。只替换已知占位符，其余
-    花括号原样保留，避免误伤用户 prompt 中的 JSON/代码示例。
+    始终以核心 Progressive RAG 模板为基底（保证检索纪律与工作流不被破坏），并在其
+    末尾追加用户自定义指令段落（config.custom_instructions，可选）。占位符（见
+    SYSTEM_PROMPT_PLACEHOLDERS）仅出现在核心模板内部，由本函数安全替换为实际值。
 
     Args:
-        config: Agent 运行配置。若 config.system_prompt 非空则使用自定义提示词。
+        config: Agent 运行配置。使用 config.custom_instructions 作为附加段落。
         kb_names: 可用知识库名称列表。
         available_tools: 可用工具名称列表。
         web_search_enabled: 网络搜索是否启用；None 时回退到 config.web_search_enabled。
@@ -335,8 +356,10 @@ def render_system_prompt(
         "current_date": now.strftime("%Y-%m-%d"),
     }
 
-    # 自定义提示词优先；否则使用默认 Progressive RAG 模板
-    template = config.system_prompt or PROGRESSIVE_RAG_PROMPT
+    # 核心模板恒定，仅在其后追加用户自定义段落（角色 / 语气 / 工作流 / 边界）
+    template = PROGRESSIVE_RAG_PROMPT + _build_custom_section(
+        getattr(config, "custom_instructions", "")
+    )
 
     return _safe_substitute(template, values)
 

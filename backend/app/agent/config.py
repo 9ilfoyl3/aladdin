@@ -49,5 +49,11 @@ class AgentConfig:
     # 是否保留历史检索结果（为 True 时不对历史 KB 工具结果做脱敏处理）
     retain_retrieval_history: bool = False
 
-    # 自定义系统提示词，空字符串表示使用默认 Progressive RAG prompt
+    # 完整系统提示词（运行时已渲染好的最终 prompt）。非空时引擎直接原样使用，
+    # 不再叠加核心模板——chat 链路会把渲染结果回填到这里供引擎使用。
     system_prompt: str = ""
+
+    # 用户自定义指令（角色设定 / 语气 / 工作流方法论 / 边界约束）。
+    # 不覆盖核心 Progressive RAG 提示词，而是作为附加段落追加在核心提示词之后；
+    # 仅在 system_prompt 为空（即使用默认核心模板）时生效。
+    custom_instructions: str = ""

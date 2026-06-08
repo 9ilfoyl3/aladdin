@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import require_authenticated, require_member, require_tenant_admin
+from app.api.deps import require_member, require_tenant_admin
 from app.auth.identity import IdentityContext
 from app.schema.db import AgentPreset
 from app.storage.database import async_session
@@ -62,9 +62,9 @@ class AgentPresetResponse(BaseModel):
 
 
 class PromptRewriteRequest(BaseModel):
-    """AI 改写系统提示词请求"""
+    """AI 生成自定义指令请求"""
     instruction: str = Field(..., max_length=2000, description="用户描述的角色与特性")
-    current_prompt: str | None = Field(default=None, max_length=20000, description="当前已有的提示词（可选，作为改写基础）")
+    current_prompt: str | None = Field(default=None, max_length=20000, description="当前已有的自定义指令（可选，作为改写基础）")
 
 
 # ============ 内置预设 ============
@@ -233,43 +233,18 @@ def _to_response(
 
 # ============ CRUD Endpoints ============
 
-@router.get("/placeholders")
-async def list_placeholders(
-    _identity: IdentityContext = Depends(require_authenticated()),
-):
-    """返回 system_prompt 支持的占位符变量及默认模板
-
-    供前端在编辑预设时渲染"可插入变量"标签，以及"插入默认模板"功能。
-    """
-    from app.agent.prompts.progressive_rag import (
-        PROGRESSIVE_RAG_PROMPT,
-        SYSTEM_PROMPT_PLACEHOLDERS,
-    )
-
-    return {
-        "placeholders": [
-            {"name": name, "description": desc}
-            for name, desc in SYSTEM_PROMPT_PLACEHOLDERS.items()
-        ],
-        "default_prompt": PROGRESSIVE_RAG_PROMPT,
-    }
-
-
 @router.post("/rewrite-prompt")
 async def rewrite_prompt(
     data: PromptRewriteRequest,
     _identity: IdentityContext = Depends(require_tenant_admin()),
 ):
-    """基于 Progressive RAG 结构，用默认模型把用户的角色/特性描述改写为完整系统提示词
+    """用默认模型把用户的自然语言描述润色成一段可直接使用的「自定义指令」
 
-    用户只需用自然语言描述想要的角色与特性，AI 会产出一份结构完整、保留
-    Evidence-First 检索纪律的系统提示词，并保留可用占位符。
+    自定义指令只描述角色设定、语气、工作流方法论与边界约束，会被追加在固定的核心
+    系统提示词之后，绝不覆盖核心检索纪律。因此这里产出的也只是这一段附加指令，
+    不包含、也不需要复述核心 Progressive RAG 结构与 final_answer 等硬性规则。
     """
     from app.api.chat import _get_llm_for_request
-    from app.agent.prompts.progressive_rag import (
-        PROGRESSIVE_RAG_PROMPT,
-        SYSTEM_PROMPT_PLACEHOLDERS,
-    )
 
     instruction = (data.instruction or "").strip()
     if not instruction:
@@ -278,32 +253,34 @@ async def rewrite_prompt(
     # 使用默认模型（model_config_id=None → 走数据库默认配置 → 全局配置兜底）
     llm, _, _, _ = await _get_llm_for_request(None)
 
-    placeholder_lines = "\n".join(
-        f"- {{{name}}}: {desc}" for name, desc in SYSTEM_PROMPT_PLACEHOLDERS.items()
-    )
-
     meta_system = (
-        "你是一名资深的提示词工程师，专门为「知识库问答 Agent」编写系统提示词。"
-        "你将参考一份成熟的 Progressive RAG 系统提示词作为结构与风格基准，"
-        "并依据用户对角色和特性的描述，产出一份全新的、可直接使用的完整系统提示词。\n\n"
+        "你是一名提示词写作助手，负责为「知识库问答助手」编写一段【自定义指令】。"
+        "这段自定义指令会被追加到一份固定的核心系统提示词之后，用来定制助手的"
+        "角色设定、语气风格、工作方法论和边界约束。\n\n"
         "硬性要求：\n"
-        "1. 必须保留 Evidence-First（基于检索证据回答、不臆造）的核心检索纪律。\n"
-        "2. 必须保留「先检索知识库、深读 chunk、再作答」的 ReAct 工作流要点。\n"
-        "3. 融入用户描述的角色定位、语气、专长与行为偏好。\n"
-        "4. 可在合适位置使用以下占位符变量（保持花括号原样，运行时会被替换）：\n"
-        f"{placeholder_lines}\n"
-        "5. 结构清晰（用 ### 分节），语言与基准提示词一致（以英文为主、可中英混排）。\n"
-        "6. 只输出最终的系统提示词正文本身，不要任何前言、解释、代码块包裹或额外说明。"
+        "1. 只输出这段自定义指令本身，不要复述检索流程、工具调用、引用格式、"
+        "final_answer 等底层规则——这些已由核心提示词负责，你无需也不要涉及。\n"
+        "2. 聚焦于：角色定位、语气与表达风格、回答时的侧重与方法、可做与不可做的边界。\n"
+        "3. 用与用户描述一致的语言书写（用户用中文则用中文），简洁清晰，可用要点列举。\n"
+        "4. 不要使用占位符变量，不要包含花括号模板。\n"
+        "5. 不要任何前言、解释或代码块包裹，直接输出指令正文。"
     )
 
-    base_prompt = (data.current_prompt or "").strip() or PROGRESSIVE_RAG_PROMPT
-    meta_user = (
-        "【基准 Progressive RAG 系统提示词】\n"
-        f"{base_prompt}\n\n"
-        "【用户希望的角色与特性】\n"
-        f"{instruction}\n\n"
-        "请基于以上基准，结合用户描述，产出改写后的完整系统提示词。"
-    )
+    base = (data.current_prompt or "").strip()
+    if base:
+        meta_user = (
+            "【已有的自定义指令】\n"
+            f"{base}\n\n"
+            "【用户希望调整或补充的角色与特性】\n"
+            f"{instruction}\n\n"
+            "请在已有指令基础上融合用户的新要求，产出润色后的完整自定义指令。"
+        )
+    else:
+        meta_user = (
+            "【用户希望的角色与特性】\n"
+            f"{instruction}\n\n"
+            "请据此产出一段完整的自定义指令。"
+        )
 
     try:
         rewritten = await llm.generate(
@@ -314,8 +291,8 @@ async def rewrite_prompt(
             temperature=0.7,
         )
     except Exception as e:
-        logger.exception("AI 改写提示词失败")
-        raise HTTPException(status_code=502, detail=f"AI 改写失败：{e}")
+        logger.exception("AI 生成自定义指令失败")
+        raise HTTPException(status_code=502, detail=f"AI 生成失败：{e}")
 
     rewritten = (rewritten or "").strip()
     if not rewritten:
