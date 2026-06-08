@@ -298,23 +298,14 @@ async def test_embed_connection(body: EmbedTestRequest, db: AsyncSession = Depen
     # - 路径对 + Key 对 → 400/422（参数不全,预期行为,证明端点可达且鉴权通过）
     # 不会占用推理队列（请求在参数校验阶段就被拒绝,不入队）。
     if health is True:
-        from app.models.embedding.remote import RemoteEmbedder
-        probe_base = body.base_url.rstrip("/")
-        # 推导实际推理端点 URL（与 RemoteEmbedder 逻辑一致）
+        from app.models.embedding.remote import embeddings_url
+        from app.models.rerank.remote import rerank_url
+        # 推导实际推理端点 URL —— 复用 Provider 同款逻辑（含 DashScope 归一化），
+        # 保证「测试连通性」与真实入库走完全一致的 URL，不再各自拼接导致分叉。
         if body.config_type == "rerank":
-            if probe_base.endswith("/v1"):
-                probe_url = f"{probe_base}/reranks"
-            elif "/" not in probe_base.split("://", 1)[-1].lstrip("/"):
-                probe_url = f"{probe_base}/rerank"
-            else:
-                probe_url = probe_base
+            probe_url = rerank_url(body.base_url)
         else:
-            if probe_base.endswith("/v1"):
-                probe_url = f"{probe_base}/embeddings"
-            elif "/" not in probe_base.split("://", 1)[-1].lstrip("/"):
-                probe_url = f"{probe_base}/embeddings"
-            else:
-                probe_url = probe_base
+            probe_url = embeddings_url(body.base_url)
 
         headers = {"Content-Type": "application/json"}
         if body.api_key:

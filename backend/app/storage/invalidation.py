@@ -59,6 +59,7 @@ class InvalidationBus:
         max_delay = 30.0
 
         while self._running:
+            pubsub = None
             try:
                 pubsub = self._redis.pubsub()
                 await pubsub.subscribe(CHANNEL)
@@ -90,6 +91,18 @@ class InvalidationBus:
                 logger.warning("InvalidationBus: 连接断开，%0.1fs 后重连: %s", retry_delay, e)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
+            finally:
+                # 关键：无论正常退出还是异常断开，都释放本轮 pubsub 占用的专用连接，
+                # 否则每次重连都会泄漏一条连接，最终触发 Redis "Too many connections"。
+                if pubsub is not None:
+                    try:
+                        await pubsub.aclose()
+                    except Exception:
+                        # 旧版本 redis-py 没有 aclose，退回 close/reset
+                        try:
+                            await pubsub.reset()
+                        except Exception:
+                            pass
 
         logger.info("InvalidationBus: 订阅循环结束")
 

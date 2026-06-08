@@ -232,42 +232,25 @@ class PipelineWorker:
             await asyncio.sleep(self._health_check_interval)
 
     async def _ping_embedding(self) -> bool:
-        """检查 Embedding 服务是否可用
+        """检查 Embedding 服务是否可用：发一个最小真实推理请求。
 
-        探活策略与连通性测试接口共用 app.models.probe：
-        1. 优先探 /health（自建服务即使推理队列打满也能秒回，不占队列）。
-        2. /health 不存在（云端网关如百炼）→ 降级为最小推理请求验证。
+        这是主流知识库（WeKnora / Dify / Open-WebUI）的统一做法——以「能否成功 embed
+        一小段文本」作为可用性判据，而非探 /health 或 /models：
+        - /health 不是所有服务都有（云端 OpenAI 兼容网关、DashScope 等没有）。
+        - /v1 路径前缀也因服务而异（TEI 裸 host、Infinity 根路径、DashScope /compatible-mode/v1、
+          Azure 完全不同），靠推导 health 路径必然在某类服务上判错。
+        - 最小推理请求直接复用「实际生效的 embedder」（manager.embedder，来自数据库 is_active
+          配置），与入库时真正发请求的对象、地址、鉴权完全一致，判定结果最可信。
+
+        注意：embedder.embed() 是直接 HTTP 调远程服务，不经过 Redis 入库队列，
+        因此这里探活不会消费/占用任务队列。
         """
         try:
-            from app.config import get_settings
-            from app.models.probe import check_health
-
-            settings = get_settings()
-            base_url = settings.embed_base_url
-            if not base_url:
-                # 没配置远程地址，回退到发真实请求
-                from app.models.manager import get_model_manager
-                manager = get_model_manager()
-                await asyncio.wait_for(
-                    manager.embedder.embed(["ping"]),
-                    timeout=10.0,
-                )
-                return True
-
-            # 1. 先探 /health（不经过推理队列）
-            health = await check_health(base_url, timeout=10.0)
-            if health is True:
-                return True
-            if health is False:
-                return False
-
-            # 2. health is None：无 /health 路由（云端网关），发最小推理请求验证
             from app.models.manager import get_model_manager
+
             manager = get_model_manager()
-            await asyncio.wait_for(
-                manager.embedder.embed(["ping"]),
-                timeout=10.0,
-            )
+            # 直接发最小推理请求；占位 Provider（未配置）会抛错 → 判定不可用
+            await asyncio.wait_for(manager.embedder.embed(["ping"]), timeout=10.0)
             return True
         except Exception as e:
             logger.debug("Embedding health check failed: %s", e)
