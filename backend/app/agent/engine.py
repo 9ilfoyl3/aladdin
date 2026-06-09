@@ -230,6 +230,18 @@ class AgentEngine:
             except Exception as e:
                 logger.warning("[Agent] Failed to query KB names: %s", e)
 
+        # 追加「按用户提问语种书写」的强制语言+final_answer 指令到 system prompt 末尾。
+        # 结尾位置权重高，且用目标语言本身书写的指令对弱指令模型（尤其 DeepSeek 系）
+        # 远比埋在模板中段的英文 "same language" 有效，缓解「输出夹带英文 / 不调用
+        # final_answer」的问题。
+        try:
+            from app.agent.prompts.progressive_rag import build_language_directive
+            directive = build_language_directive(query)
+            if directive:
+                system_prompt = f"{system_prompt}\n\n{directive}"
+        except Exception as e:
+            logger.warning("[Agent] Failed to build language directive: %s", e)
+
         # 构建初始消息列表
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 

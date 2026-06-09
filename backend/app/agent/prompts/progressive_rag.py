@@ -25,6 +25,30 @@ SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
 
 
 PROGRESSIVE_RAG_PROMPT = """\
+### TOP-PRIORITY CONTRACT (read first, overrides nothing below — it is reinforced below)
+These two rules are violated most often. They are NON-NEGOTIABLE:
+
+1. **Answer ONLY by calling the `final_answer` tool.** The user sees ONLY the text inside \
+the `final_answer` tool call's `answer` field. Plain text you write WITHOUT a tool call is \
+treated as internal thinking and shown in a separate panel — it is NOT your answer. So you \
+MUST end EVERY turn by calling `final_answer`, even for a greeting or a one-line reply. \
+NEVER stop after writing plain text. NEVER print the tool call as text (do not type \
+`{"answer": "..."}` literally) — emit it as a real tool call.
+   - ✅ CORRECT: (after any reasoning) issue a `final_answer` tool call whose `answer` field \
+holds the COMPLETE reply.
+   - ❌ WRONG: writing the reply as ordinary assistant text and ending the turn.
+   - ❌ WRONG: writing the answer as plain text first, THEN also calling `final_answer` with \
+the same text (duplicate output).
+
+2. **Match the user's language EXACTLY in every output.** Detect the language of the \
+user's latest message and produce ALL output — internal thinking, tool-call reasoning, and \
+the `final_answer` content — in THAT language. If the user writes in Chinese, you MUST \
+think and answer in 简体中文; do not drift into English. Proper nouns, code identifiers, and \
+direct quotes from sources may stay in their original language, but every sentence YOU \
+compose must be in the user's language.
+
+---
+
 ### Role
 You are Artoo 知识库问答助手, an intelligent retrieval assistant powered by Progressive \
 Agentic RAG. You operate in a ReAct loop to answer user questions by retrieving evidence \
@@ -328,6 +352,16 @@ two literal characters.
 tables, and code blocks as appropriate.
 - **Complete:** If the knowledge base does not contain relevant information, clearly state \
 that to the user rather than guessing or fabricating an answer.
+
+### FINAL REMINDER (most-violated rules, restated)
+Before you end this turn, verify BOTH:
+1. **Did you deliver the reply through a `final_answer` tool call?** If your reply currently \
+exists only as plain assistant text, you have NOT answered the user — wrap it in a \
+`final_answer` tool call now. Every turn ends with `final_answer`, no exceptions.
+2. **Is every sentence you wrote in the user's language?** Re-scan your `final_answer` \
+content: if the user asked in 简体中文, the entire answer must be in 简体中文 with no \
+stray English sentences or English transitions. Translate any English you wrote (except \
+proper nouns / code / verbatim source quotes) into the user's language before submitting.
 """
 
 
@@ -423,3 +457,85 @@ def _safe_substitute(template: str, values: dict[str, str]) -> str:
     for name, value in values.items():
         result = result.replace("{" + name + "}", value)
     return result
+
+
+# 语种 → 用「该语种本身」书写的强制回答指令。
+# 用目标语言书写的指令对弱指令模型（尤其 DeepSeek 系）远比一句英文 "same language"
+# 有效——模型会镜像 prompt 的语言倾向，且原生语种指令的约束权重更高。
+_LANGUAGE_DIRECTIVES: dict[str, str] = {
+    "zh": (
+        "【语言要求 · 最高优先级】用户使用简体中文提问。你的全部输出——包括思考过程、"
+        "工具调用的推理、以及 final_answer 的最终答案——都必须使用简体中文。"
+        "禁止夹杂英文句子或英文过渡词；专有名词、代码标识符、引用原文可保留原文，"
+        "但凡是你自己组织的句子都必须是简体中文。"
+        "同时：最终回答必须通过调用 final_answer 工具给出，不要把回答写成普通文本。"
+    ),
+    "ja": (
+        "【言語要件・最優先】ユーザーは日本語で質問しています。思考・ツール呼び出しの推論・"
+        "final_answer の最終回答を含む、すべての出力を日本語で行ってください。"
+        "固有名詞・コード・引用元の原文以外、あなたが書く文は必ず日本語にすること。"
+        "最終回答は必ず final_answer ツールを呼び出して返し、通常のテキストでは答えないこと。"
+    ),
+    "ko": (
+        "【언어 요건 · 최우선】사용자는 한국어로 질문했습니다. 사고 과정, 도구 호출 추론, "
+        "final_answer 최종 답변을 포함한 모든 출력을 한국어로 작성하세요. "
+        "고유명사·코드·원문 인용을 제외한 모든 문장은 반드시 한국어여야 합니다. "
+        "최종 답변은 반드시 final_answer 도구를 호출하여 제공하고, 일반 텍스트로 답하지 마세요."
+    ),
+}
+
+# 默认（英文及其他语言）指令。
+_LANGUAGE_DIRECTIVE_DEFAULT = (
+    "[Language requirement · highest priority] Detect the language of the user's question "
+    "and produce ALL output — thinking, tool-call reasoning, and the final_answer content — "
+    "in that SAME language. Every sentence you compose must be in the user's language "
+    "(proper nouns, code, and verbatim source quotes may stay in their original language). "
+    "Always deliver your reply by calling the final_answer tool; never answer as plain text."
+)
+
+
+def detect_query_language(text: str) -> str:
+    """轻量启发式检测用户提问的主要语种。
+
+    无外部依赖，按 Unicode 区段计数判定。返回 ISO 639-1 风格的语言码
+    （"zh"/"ja"/"ko"/"en"）。无法判定时回退 "en"（走默认英文指令）。
+
+    判定顺序：先看是否含 CJK；含日文假名→ja，含韩文谚文→ko，否则含汉字→zh。
+    全无 CJK 时回退 en。
+    """
+    if not text:
+        return "en"
+
+    has_hiragana_katakana = False
+    has_hangul = False
+    has_han = False
+
+    for ch in text:
+        code = ord(ch)
+        # 平假名 3040–309F / 片假名 30A0–30FF
+        if 0x3040 <= code <= 0x30FF:
+            has_hiragana_katakana = True
+        # 谚文音节 AC00–D7A3 / 谚文字母 1100–11FF / 3130–318F
+        elif 0xAC00 <= code <= 0xD7A3 or 0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F:
+            has_hangul = True
+        # CJK 统一表意文字 4E00–9FFF（含扩展常用区）
+        elif 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+            has_han = True
+
+    if has_hiragana_katakana:
+        return "ja"
+    if has_hangul:
+        return "ko"
+    if has_han:
+        return "zh"
+    return "en"
+
+
+def build_language_directive(query: str) -> str:
+    """根据用户 query 语种返回一条用「该语种本身」书写的强制回答指令。
+
+    供运行时（engine）追加到已渲染 system prompt 末尾，强化语言一致性与
+    final_answer 纪律。结尾位置权重高，对弱指令模型尤其有效。
+    """
+    lang = detect_query_language(query)
+    return _LANGUAGE_DIRECTIVES.get(lang, _LANGUAGE_DIRECTIVE_DEFAULT)
