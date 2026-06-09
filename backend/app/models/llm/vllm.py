@@ -379,13 +379,35 @@ class VllmLLM(LLMProvider):
                                         )
                                     continue
 
+                                # thinking 工具：与 final_answer 对称，从增量 arguments 中
+                                # 安全提取 thought 字段，逐 token 作为 thinking_tool 类型流式
+                                # 发射，让"内部思考"内容实时进思考面板，而非工具执行后整段蹦出。
+                                # 用独立 response_type（区别于模型原生 reasoning_content 的
+                                # "thinking"），便于引擎隔离处理：发 THOUGHT 但不计入 content。
+                                if entry["function_name"] == "thinking":
+                                    extractor = entry.get("_thought_extractor")
+                                    if extractor is None:
+                                        extractor = JSONFieldExtractor("thought")
+                                        entry["_thought_extractor"] = extractor
+                                    thought_delta = extractor.feed(func_data["arguments"])
+                                    if thought_delta:
+                                        yield StreamChunk(
+                                            content=thought_delta,
+                                            tool_calls=None,
+                                            finish_reason="",
+                                            response_type="thinking_tool",
+                                        )
+                                    continue
+
                         # 发送 tool_call 类型的 StreamChunk（通知有工具调用进行中）
-                        # 仅对非 final_answer 的工具发送
-                        has_non_final_answer = any(
-                            tool_call_map.get(tc_delta.get("index", 0), {}).get("function_name", "") != "final_answer"
+                        # 仅对非 final_answer、非 thinking 的工具发送（这两者的内容已分别
+                        # 作为 answer / thinking_tool 流式发出，无需再发 tool_call 通知）
+                        _SILENT_STREAM_TOOLS = {"final_answer", "thinking"}
+                        has_visible_tool = any(
+                            tool_call_map.get(tc_delta.get("index", 0), {}).get("function_name", "") not in _SILENT_STREAM_TOOLS
                             for tc_delta in delta_tool_calls
                         )
-                        if has_non_final_answer:
+                        if has_visible_tool:
                             yield StreamChunk(
                                 content="",
                                 tool_calls=None,

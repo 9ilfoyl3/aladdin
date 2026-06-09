@@ -492,7 +492,8 @@ class AgentEngine:
 
                 # 执行工具调用
                 tool_results = await self._execute_tool_calls(
-                    response.tool_calls, step, state, session_id
+                    response.tool_calls, step, state, session_id,
+                    thought_streamed=response.thought_streamed,
                 )
 
                 # 4. Observe: 追加工具结果到消息
@@ -600,6 +601,7 @@ class AgentEngine:
         tool_calls_accumulated: list[LLMToolCall] = []
         finish_reason = ""
         answer_streamed = False  # final_answer 的正文是否已逐 token 作为 answer 发射
+        thought_streamed = False  # thinking 工具的 thought 是否已逐 token 作为 THOUGHT 发射
         # content 路由器：区分普通 content 是「思考」还是「被写成文本 JSON 的 final_answer」
         # （千问等弱 function-calling 模型会把 final_answer 调用写成纯文本输出）
         router = ContentStreamRouter()
@@ -651,6 +653,19 @@ class AgentEngine:
                     done=False,
                 ))
 
+            # thinking 工具的 thought 字段（vLLM 增量解析）→ 思考面板，逐 token 流式。
+            # 注意：不累加进 full_content（thought 不是模型的"回答内容"，且 ThinkingTool
+            # 执行时已把完整 thought 落入 step.thought）；此处仅负责实时发射 THOUGHT 事件。
+            # ThinkingTool.execute 不再自行 emit THOUGHT，避免与此处重复。
+            elif chunk.content and chunk.response_type == "thinking_tool":
+                thought_streamed = True
+                await self._event_bus.emit(AgentEvent(
+                    type=EventType.THOUGHT,
+                    session_id=session_id,
+                    data={"content": chunk.content, "iteration": iteration},
+                    done=False,
+                ))
+
             # 累积 tool_calls（VllmLLM 在最终 chunk 中携带完整列表）
             if chunk.tool_calls:
                 tool_calls_accumulated = chunk.tool_calls
@@ -686,6 +701,7 @@ class AgentEngine:
             finish_reason=finish_reason or "stop",
             answer_streamed=answer_streamed,
             inline_answer=inline_answer,
+            thought_streamed=thought_streamed,
         )
 
     def _analyze_response(
@@ -786,6 +802,7 @@ class AgentEngine:
         step: AgentStep,
         state: AgentState,
         session_id: str,
+        thought_streamed: bool = False,
     ) -> list[tuple[str, ToolResult]]:
         """执行工具调用列表
 
@@ -793,6 +810,11 @@ class AgentEngine:
         使用 asyncio.gather 并行执行所有工具。否则顺序执行。
 
         结果按原始 tool_calls 顺序返回，tool_call_id 与对应 tool_call 匹配。
+
+        Args:
+            thought_streamed: thinking 工具的 thought 是否已在流式阶段逐 token 发射。
+                False（非增量 provider，如 Ollama）时，在此对 thinking 工具补发完整
+                THOUGHT 事件，保证思考面板有内容；True 时不补发（流式层已逐 token 发过）。
 
         Returns:
             list of (tool_call_id, ToolResult) tuples
@@ -816,6 +838,20 @@ class AgentEngine:
                     tc.arguments,
                 )
             parsed_calls.append((tc, args))
+
+        # thinking 工具的 thought 内容：非增量 provider 未流式发过时在此补发完整 THOUGHT，
+        # 保证思考面板有内容。流式 provider（thought_streamed=True）已逐 token 发过，跳过。
+        if not thought_streamed:
+            for tc, args in parsed_calls:
+                if tc.function_name == "thinking":
+                    thought = args.get("thought", "")
+                    if thought:
+                        await self._event_bus.emit(AgentEvent(
+                            type=EventType.THOUGHT,
+                            session_id=session_id,
+                            data={"content": thought, "iteration": step.iteration},
+                            done=False,
+                        ))
 
         # 发射所有 TOOL_CALL 事件
         for tc, args in parsed_calls:

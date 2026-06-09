@@ -71,7 +71,7 @@ class ThinkingTool(BaseTool):
         }
 
     async def execute(self, args: dict) -> ToolResult:
-        """记录思考内容到 AgentStep 并发射 THOUGHT 事件"""
+        """记录思考内容到 AgentStep（THOUGHT 事件由引擎统一发射，见下方说明）"""
         thought: str = args.get("thought", "")
         next_thought_needed = args.get("next_thought_needed", True)
 
@@ -87,14 +87,10 @@ class ThinkingTool(BaseTool):
             else:
                 current_step.thought = thought
 
-        # 通过 EventBus 发射 THOUGHT 事件
-        await self._event_bus.emit(
-            AgentEvent(
-                type=EventType.THOUGHT,
-                session_id=self._session_id,
-                data={"content": thought},
-            )
-        )
+        # 注意：THOUGHT 事件不在此处发射。思考内容的实时展示由引擎统一负责——
+        # 增量 provider（vLLM）在流式层逐 token 发 THOUGHT；非增量 provider（Ollama）
+        # 由引擎在 _execute_tool_calls 中补发完整 THOUGHT。工具本身只负责落库到
+        # step.thought，避免与引擎重复发射导致思考面板内容翻倍。
 
         # 工具结果回传给模型时，显式提醒"想完了就去调 final_answer / 检索工具"，
         # 把 thinking → 收尾 的过渡固化进观察（observe）环节，减少模型停在思考、

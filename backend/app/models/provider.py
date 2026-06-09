@@ -49,6 +49,11 @@ class ChatResponse:
     # 流式阶段路由器从普通 content 中提取出的答案文本。非空表示这是内联 final_answer，
     # 引擎应将其作为最终答案（而非把原始 JSON 当答案或思考）。
     inline_answer: str = ""
+    # thinking 工具的 thought 是否已在流式阶段逐 token 作为 THOUGHT 发射（vLLM 增量解析）。
+    # 引擎据此决定是否在执行 thinking 工具时补发完整 thought：
+    #   True  → 已逐 token 发过，不重发（避免思考面板重复）
+    #   False → 非增量 provider（Ollama / vLLM 降级非流式），由引擎补发完整 thought
+    thought_streamed: bool = False
 
 
 @dataclass
