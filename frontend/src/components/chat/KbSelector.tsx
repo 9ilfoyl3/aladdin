@@ -64,7 +64,7 @@ function KbSelector({ knowledgeBases, selectedKbIds, onToggle }: KbSelectorProps
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap">
+        <button className="h-7 flex items-center gap-1.5 border-none bg-muted/50 hover:bg-muted rounded-lg px-2.5 text-xs text-muted-foreground cursor-pointer transition-colors whitespace-nowrap outline-none focus:outline-none focus-visible:outline-none focus:ring-0">
           <Database className="h-3 w-3 shrink-0" />
           {count > 0 ? (
             <span className="h-4 min-w-4 px-1 flex items-center justify-center rounded-full bg-muted-foreground/20 text-foreground text-[10px] leading-none">
