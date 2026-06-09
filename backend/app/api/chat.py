@@ -954,11 +954,17 @@ def _build_agent_runtime(
             SearchTarget(kb_id=SESSION_FILES_KB_ID, expr=build_session_id_expr(session_id))
         )
 
-    # 按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止
+    # 按预设 allowed_tools 过滤；基础设施工具始终豁免白名单：
+    # - final_answer：Agent 终止信号，缺失则无法收尾。
+    # - read_attachment：本条消息附件的确定性直读能力，由"是否带附件"决定是否注册
+    #   （见下方注册处），与业务预设的检索工具白名单无关。若受白名单管控，老预设
+    #   不含此新工具名 → 工具不注册，但 prompt 仍提示"用 read_attachment 读取附件"，
+    #   会让模型陷入"系统说有、工具列表没有"的矛盾而空转。
+    _INFRA_TOOLS = {"final_answer", "read_attachment"}
     preset_allowed = preset_cfg.get("allowed_tools")
 
     def _tool_enabled(tool_name: str) -> bool:
-        if tool_name == "final_answer":
+        if tool_name in _INFRA_TOOLS:
             return True
         if not preset_allowed:
             return True
@@ -977,7 +983,10 @@ def _build_agent_runtime(
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
     anchored_attachments = [a for a in (attachments or []) if a.get("file_id")]
-    if _tool_enabled("read_attachment") and anchored_attachments and session_id:
+    read_attachment_on = bool(
+        _tool_enabled("read_attachment") and anchored_attachments and session_id
+    )
+    if read_attachment_on:
         tool_registry.register(ReadAttachmentTool(session_id, anchored_attachments))
     tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
 
@@ -994,9 +1003,9 @@ def _build_agent_runtime(
     kb_names = list(kb_ids)
     if include_session_source and session_id:
         kb_names.append("本会话上传的文件")
-    # 本条消息附件：以具体文件名提示，并明确"用 read_attachment 直读"，让 Agent 不要
-    # 把附件解析误派给 knowledge_search（后者会与知识库文档竞争召回，可能答非所问）。
-    if anchored_attachments:
+    # 本条消息附件：仅当 read_attachment 工具确实注册时，才在 prompt 里提示"用
+    # read_attachment 直接读取"，避免"提示说有、工具列表没有"的矛盾让模型空转。
+    if read_attachment_on:
         att_names = "、".join(a.get("filename", "") for a in anchored_attachments)
         kb_names.append(f"本条消息附件（用 read_attachment 直接读取）：{att_names}")
     custom_instructions = (preset_cfg.get("custom_instructions") or "").strip()
