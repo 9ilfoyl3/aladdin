@@ -10,6 +10,7 @@ import type { PendingSessionFile } from '@/components/chat/SessionFileList'
 import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
+import SideRays from '@/components/SideRays'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
@@ -856,8 +857,12 @@ function Chat() {
   // 加载历史消息期间不显示空态，避免「Artoo 欢迎页」闪现
   if (isEmpty && !isLoadingMessages) {
     return (
-      <div className="h-full flex flex-col items-center justify-center px-4">
-        <div className="w-full max-w-3xl flex flex-col items-center -mt-12">
+      <div className="relative h-full flex flex-col items-center justify-center px-4 overflow-hidden">
+        {/* 新对话页背景：Side Rays 动态光线（reactbits）。仅暗色模式显示，浅色模式会蒙灰故隐藏 */}
+        <div className="pointer-events-none absolute inset-0 z-0 hidden dark:block">
+          <SideRays />
+        </div>
+        <div className="relative z-10 w-full max-w-3xl flex flex-col items-center -mt-12">
           <h1 className="text-3xl font-semibold text-foreground text-center mb-8">
             我是 <span className="font-serif">Artoo</span>，你的知识库问答助手
           </h1>
