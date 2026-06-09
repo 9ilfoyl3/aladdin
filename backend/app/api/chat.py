@@ -31,6 +31,7 @@ from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
+from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.prompts.progressive_rag import render_system_prompt
@@ -956,11 +957,14 @@ def _build_agent_runtime(
 
     # 按预设 allowed_tools 过滤；基础设施工具始终豁免白名单：
     # - final_answer：Agent 终止信号，缺失则无法收尾。
+    # - thinking：模型推理的"正确去处"。提示词多处引导"use the thinking tool"，若不注册，
+    #   模型想推理时无处可去 → 把 verbalized CoT 写进普通 content → natural_stop 时整段
+    #   （CoT+答案）被当正文展示（参考 WeKnora：推理走 thinking 工具，与正文物理隔离）。
     # - read_attachment：本条消息附件的确定性直读能力，由"是否带附件"决定是否注册
     #   （见下方注册处），与业务预设的检索工具白名单无关。若受白名单管控，老预设
     #   不含此新工具名 → 工具不注册，但 prompt 仍提示"用 read_attachment 读取附件"，
     #   会让模型陷入"系统说有、工具列表没有"的矛盾而空转。
-    _INFRA_TOOLS = {"final_answer", "read_attachment"}
+    _INFRA_TOOLS = {"final_answer", "thinking", "read_attachment"}
     preset_allowed = preset_cfg.get("allowed_tools")
 
     def _tool_enabled(tool_name: str) -> bool:
@@ -979,6 +983,11 @@ def _build_agent_runtime(
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool())
+    # thinking：注册为基础设施工具，给模型推理一个"正确去处"。推理内容经 execute
+    # 记录到 step.thought 并发 THOUGHT 事件 → 进思考面板，与 final_answer 正文隔离，
+    # 从源头减少 verbalized CoT 漏进正文（E）。
+    if _tool_enabled("thinking"):
+        tool_registry.register(ThinkingTool(state, event_bus, session_id or ""))
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
@@ -995,6 +1004,15 @@ def _build_agent_runtime(
     web_search_on = bool(settings.searxng_url) and _tool_enabled("web_search")
     if web_search_on:
         tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
+
+    # 诊断日志：确认实际注册的工具列表与预设白名单，定位 thinking/read_attachment 是否生效。
+    logger.info(
+        "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | thinking_in_list=%s | attachments=%d",
+        tool_registry.list_tools(),
+        preset_allowed,
+        "thinking" in tool_registry.list_tools(),
+        len(anchored_attachments),
+    )
 
     # system_prompt：核心 Progressive RAG 模板恒定，预设仅追加用户自定义指令
     # （角色 / 语气 / 工作流 / 边界）。render_system_prompt 同时做占位符替换
