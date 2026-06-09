@@ -31,14 +31,18 @@ class SkillManager:
         self,
         skill_dirs: list[str],
         allowed_skills: list[str] | None = None,
+        extra_skills: list[Skill] | None = None,
     ):
         """
         Args:
-            skill_dirs: 技能搜索目录列表
+            skill_dirs: 技能搜索目录列表（预置技能，文件式只读）
             allowed_skills: 允许加载的技能名称白名单，None 表示全部允许
+            extra_skills: 额外注入的技能（如数据库中的用户自定义技能），与文件预置技能
+                合并。名称与预置技能冲突时，extra_skills 优先（覆盖）。
         """
         self.skill_dirs = skill_dirs
         self.allowed_skills = allowed_skills
+        self._extra_skills = extra_skills or []
         self._metadata_cache: list[SkillMetadata] = []
         self._skill_cache: dict[str, Skill] = {}
 
@@ -87,6 +91,23 @@ class SkillManager:
                 # 同时缓存完整 Skill 以避免重复解析
                 self._skill_cache[skill.name] = skill
 
+        # 合并额外注入的技能（如 DB 用户自定义技能）。名称与文件预置技能冲突时
+        # extra_skills 优先：先移除同名的文件技能元数据，再追加 extra。
+        if self._extra_skills:
+            extra_names = {s.name for s in self._extra_skills}
+            metadata_list = [m for m in metadata_list if m.name not in extra_names]
+            for skill in self._extra_skills:
+                if self.allowed_skills is not None and skill.name not in self.allowed_skills:
+                    continue
+                metadata_list.append(
+                    SkillMetadata(
+                        name=skill.name,
+                        description=skill.description,
+                        base_path=skill.base_path,
+                    )
+                )
+                self._skill_cache[skill.name] = skill
+
         self._metadata_cache = metadata_list
         logger.info(f"发现 {len(metadata_list)} 个技能")
         return metadata_list
@@ -106,6 +127,13 @@ class SkillManager:
         # 先检查缓存
         if name in self._skill_cache:
             return self._skill_cache[name]
+
+        # 额外注入技能（DB 自定义）优先于文件预置技能
+        for skill in self._extra_skills:
+            if skill.name == name:
+                if self.allowed_skills is None or skill.name in self.allowed_skills:
+                    self._skill_cache[skill.name] = skill
+                    return skill
 
         # 未缓存则搜索所有目录
         for skill_dir in self.skill_dirs:

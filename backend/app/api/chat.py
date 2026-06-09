@@ -31,9 +31,12 @@ from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
+from app.agent.tools.read_skill import ReadSkillTool
 from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
+from app.agent.skills import SkillManager, default_skill_dirs
+from app.api.skills import load_user_custom_skills
 from app.agent.prompts.progressive_rag import render_system_prompt
 from app.config import get_settings
 from app.models.manager import get_model_manager
@@ -908,6 +911,7 @@ def _build_agent_runtime(
     session_id: str | None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
+    custom_skills: list | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -964,7 +968,7 @@ def _build_agent_runtime(
     #   （见下方注册处），与业务预设的检索工具白名单无关。若受白名单管控，老预设
     #   不含此新工具名 → 工具不注册，但 prompt 仍提示"用 read_attachment 读取附件"，
     #   会让模型陷入"系统说有、工具列表没有"的矛盾而空转。
-    _INFRA_TOOLS = {"final_answer", "thinking", "read_attachment"}
+    _INFRA_TOOLS = {"final_answer", "thinking", "read_attachment", "read_skill"}
     preset_allowed = preset_cfg.get("allowed_tools")
 
     def _tool_enabled(tool_name: str) -> bool:
@@ -1005,6 +1009,20 @@ def _build_agent_runtime(
     if web_search_on:
         tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
 
+    # Skills（Progressive Disclosure）：扫描内置技能目录拿到 Level 1 元数据
+    # （name+description），注入 system prompt 供模型判断是否需要某个技能；模型按需
+    # 调用 read_skill 工具加载 Level 2 完整指令。预设可用 allowed_skills 收敛白名单
+    # （None=全部允许）。无任何技能时不注册 read_skill，避免提示与工具列表矛盾。
+    preset_allowed_skills = preset_cfg.get("allowed_skills")
+    skill_manager = SkillManager(
+        skill_dirs=default_skill_dirs(),
+        allowed_skills=preset_allowed_skills,
+        extra_skills=custom_skills or None,
+    )
+    skill_metadata = skill_manager.get_all_metadata() if _tool_enabled("read_skill") else []
+    if skill_metadata:
+        tool_registry.register(ReadSkillTool(skill_manager))
+
     # 诊断日志：确认实际注册的工具列表与预设白名单，定位 thinking/read_attachment 是否生效。
     logger.info(
         "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | thinking_in_list=%s | attachments=%d",
@@ -1032,6 +1050,7 @@ def _build_agent_runtime(
         kb_names=kb_names,
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
+        skills=[(m.name, m.description) for m in skill_metadata],
     )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
@@ -1064,6 +1083,7 @@ async def _run_agent_nonstream(
     history: list[dict] | None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
+    owner_user_id: str | None = None,
 ) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
@@ -1083,6 +1103,7 @@ async def _run_agent_nonstream(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
         include_session_source=include_session_source,
         attachments=attachments,
+        custom_skills=await load_user_custom_skills(owner_user_id),
     )
 
     steps_collected: list[dict] = []
@@ -1144,6 +1165,7 @@ async def _stream_response(
     requested_kb_ids: list[str] | None = None,
     session_has_files: bool = False,
     multi_kb_requested: bool = False,
+    owner_user_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件
 
@@ -1201,6 +1223,7 @@ async def _stream_response(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
             tenant_id, session_id, include_session_source=session_has_files,
             attachments=attachments,
+            custom_skills=await load_user_custom_skills(owner_user_id),
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1551,7 +1574,7 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids)),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id),
             media_type="text/event-stream",
         )
 
@@ -1586,6 +1609,7 @@ async def chat_completions(
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
             include_session_source=session_has_files,
             attachments=nonstream_attachments,
+            owner_user_id=identity.acting_subject_id,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)

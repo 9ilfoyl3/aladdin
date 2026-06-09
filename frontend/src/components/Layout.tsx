@@ -10,6 +10,7 @@ import {
   ScanText,
   Layers,
   Bot,
+  Sparkles,
   SquarePen,
   Trash2,
   PanelLeft,
@@ -39,6 +40,7 @@ import SettingsDialog from '@/components/SettingsDialog'
 const navItems = [
   { to: '/knowledge-bases', label: '知识库', icon: Database, group: 'content' },
   { to: '/agent-config', label: '智能体', icon: Bot, group: 'content' },
+  { to: '/skills', label: '技能', icon: Sparkles, group: 'content' },
   { to: '/retrieval', label: '检索测试', icon: Search, group: 'capability' },
   { to: '/models', label: '模型管理', icon: Cpu, group: 'capability' },
   { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'capability' },

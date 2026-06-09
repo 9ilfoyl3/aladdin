@@ -566,6 +566,39 @@ export const agentPresetApi = {
     request<void>(`/agent-presets/${id}`, { method: 'DELETE' }),
 }
 
+// 自定义技能（Agent Skills）接口。每个用户维护自己的技能（per-user），
+// 对话时与平台预置技能合并，Agent 按需通过 read_skill 加载。
+export interface CustomSkillItem {
+  id: string
+  name: string
+  description: string
+  instructions: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const skillsApi = {
+  list: () => request<CustomSkillItem[]>('/skills'),
+  generate: (data: { instruction: string }) =>
+    request<{ name: string; description: string; instructions: string }>('/skills/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  create: (data: { name: string; description: string; instructions: string; enabled?: boolean }) =>
+    request<CustomSkillItem>('/skills', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: { name?: string; description?: string; instructions?: string; enabled?: boolean }) =>
+    request<CustomSkillItem>(`/skills/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/skills/${id}`, { method: 'DELETE' }),
+}
+
 // 会话相关接口类型
 export interface SessionItem {
   id: string

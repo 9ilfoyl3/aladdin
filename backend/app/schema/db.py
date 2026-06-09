@@ -283,6 +283,32 @@ class AgentPreset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class CustomSkill(Base, TenantScopedMixin):
+    """用户自定义技能表（Agent Skills 的 Progressive Disclosure 扩展）。
+
+    归属与可见性（对齐 ChatSession 的 per-user 模式）：
+    - tenant_id：所属租户（方案 B loader criteria 自动注入兜底过滤）。
+    - owner_user_id：创建者（acting_subject_id）。技能是个人资产，仅本人可见可改可用，
+      故在 tenant_id 之外再按 owner 收敛——否则同租户用户会互相看到对方的技能。
+    管理权（改/删/启停）仅创建者本人。预置技能（preloaded/*/SKILL.md）走文件、全局只读，
+    不入此表，与自定义技能在 SkillManager 层合并。
+
+    name 为技能标识（read_skill 工具按 name 加载）。同一 owner 下 name 唯一由 API 层保证
+    （避免与方案 B 的可空 tenant 过滤在 DB 唯一约束上纠缠）。建表经 init_db 的
+    create_all 自动创建，无需迁移脚本。
+    """
+    __tablename__ = "custom_skills"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class ChatSession(Base, TenantScopedMixin):
     """对话会话表"""
     __tablename__ = "chat_sessions"

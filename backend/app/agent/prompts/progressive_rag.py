@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
     "knowledge_base_names": "当前绑定的知识库名称列表",
     "available_tools": "当前 Agent 可用的工具列表",
+    "available_skills": "当前可按需加载的技能列表（name + description）",
     "web_search_status": "网络搜索是否启用（Enabled / Disabled）",
     "current_time": "当前系统时间（格式：YYYY-MM-DD HH:MM:SS）",
     "current_date": "当前日期（格式：YYYY-MM-DD）",
@@ -129,6 +130,18 @@ tool call as text (e.g. do not type `{"answer": "..."}` into your reply).
 ### Available Tools
 
 {available_tools}
+
+### Available Skills (load on demand)
+
+{available_skills}
+
+A "skill" is a packaged set of expert instructions for handling a specific kind of task. \
+The list above shows ONLY each skill's name and short description — NOT its full \
+instructions. When the user's request clearly matches a skill's description, call the \
+`read_skill` tool with that skill's name to load its complete step-by-step instructions, \
+then follow them. Do NOT guess a skill's content from its description alone; always load it \
+via `read_skill` before applying it. If no skill is relevant, just proceed with your normal \
+workflow.
 
 ### Workflow: The "Assess-Reconnaissance-Plan-Execute" Cycle
 
@@ -391,6 +404,7 @@ def render_system_prompt(
     kb_names: list[str] | None = None,
     available_tools: list[str] | None = None,
     web_search_enabled: bool | None = None,
+    skills: list[tuple[str, str]] | None = None,
 ) -> str:
     """渲染系统提示词，替换占位符为实际值。
 
@@ -403,6 +417,8 @@ def render_system_prompt(
         kb_names: 可用知识库名称列表。
         available_tools: 可用工具名称列表。
         web_search_enabled: 网络搜索是否启用；None 时回退到 config.web_search_enabled。
+        skills: 可按需加载的技能 (name, description) 列表（Level 1 元数据）。
+            为空/None 时占位符渲染为"无可用技能"。
 
     Returns:
         渲染后的完整系统提示词字符串。
@@ -421,12 +437,21 @@ def render_system_prompt(
     else:
         tools_section = "\n".join(f"- `{tool}`" for tool in config.allowed_tools)
 
+    # 格式化技能清单（Level 1：仅 name + description）
+    if skills:
+        skills_section = "\n".join(
+            f"- **{name}**: {description}" for name, description in skills
+        )
+    else:
+        skills_section = "- （无可用技能）"
+
     web_on = config.web_search_enabled if web_search_enabled is None else web_search_enabled
     now = datetime.now()
 
     values = {
         "knowledge_base_names": kb_section,
         "available_tools": tools_section,
+        "available_skills": skills_section,
         "web_search_status": "Enabled" if web_on else "Disabled",
         "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
         "current_date": now.strftime("%Y-%m-%d"),

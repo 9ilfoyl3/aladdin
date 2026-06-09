@@ -10,6 +10,7 @@ import Models from './pages/Models'
 import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
 import AgentConfig from './pages/AgentConfig'
+import Skills from './pages/Skills'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import ChangePassword from './pages/ChangePassword'
@@ -67,6 +68,7 @@ function App() {
         <Route path="retrieval" element={<Retrieval />} />
         <Route path="models" element={<Models />} />
         <Route path="agent-config" element={<AgentConfig />} />
+        <Route path="skills" element={<Skills />} />
         <Route path="embed-config" element={<EmbedConfig />} />
         <Route path="ocr-services" element={<OcrServices />} />
         <Route path="api-keys" element={<ApiKeys />} />
