@@ -903,7 +903,7 @@ def _build_agent_runtime(
     llm: LLMProvider,
     preset_cfg: dict,
     max_context_tokens: int | None,
-    thinking_enabled: bool,
+    thinking_enabled: bool,  # noqa: ARG001 - Agent 链路已不使用；思考由预设独占控制（见下方 AgentConfig）。保留形参仅为与调用方签名兼容。
     tenant_id: str | None,
     session_id: str | None,
     include_session_source: bool = False,
@@ -1038,7 +1038,13 @@ def _build_agent_runtime(
         max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
         temperature=preset_cfg.get("temperature", AgentConfig.temperature),
         web_search_enabled=web_search_on,
-        thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
+        # 深度思考（模型原生思维链）在 Agent 链路只由智能体预设独占控制，不再 fallback 到
+        # 模型配置的 thinking_enabled。原因：① 预设是开放给普通用户的、模型配置仅超管可改，
+        # 二者叠加会让"超管的模型开关"暗中覆盖用户的预设选择，语义混乱；② 模型原生思维链会
+        # 抑制工具调用（DeepSeek 等在 thinking 模式下倾向跳过 final_answer / 检索，甚至禁止
+        # tool_choice），与 ReAct + 强制工具调用的 Agent 架构冲突。预设未显式开启时默认关闭，
+        # 模型推理改走 thinking 工具（显式工具调用通道），既保留推理又不抢占输出段。
+        thinking_enabled=preset_cfg.get("thinking_enabled", False),
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
     )
