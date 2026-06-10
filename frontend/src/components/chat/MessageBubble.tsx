@@ -10,6 +10,15 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { isImageFilename } from '@/components/chat/SessionFileList'
 import type { MessageAttachment } from '@/lib/api'
 
+// 流式渲染动画配置：模糊渐入、按字符、放慢节奏
+const STREAM_ANIMATION = {
+  animation: 'blurIn',
+  sep: 'word',
+  duration: 300,
+  stagger: 20,
+  easing: 'ease-out',
+} as const
+
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
   type: 'thought' | 'answer' | 'tool_call' | 'tool_result'
@@ -180,6 +189,7 @@ function MessageBubble({
                   <Streamdown
                     plugins={{ cjk: cjk }}
                     isAnimating={isStreaming && isLast}
+                    animated={STREAM_ANIMATION}
                   >
                     {msg.content}
                   </Streamdown>
@@ -395,7 +405,7 @@ function AgentStreamContent({
         return (
           <div key={`ans-${i}`} className="text-sm leading-relaxed">
             <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment}>
+              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment} animated={STREAM_ANIMATION}>
                 {seg.content}
               </Streamdown>
             </div>
@@ -632,7 +642,7 @@ function StepRow({
               </p>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
-                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating}>
+                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating} animated={STREAM_ANIMATION}>
                   {seg.content}
                 </Streamdown>
               </div>
