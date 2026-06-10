@@ -299,19 +299,25 @@ class PipelineWorker:
     async def _run_pipeline_guarded(
         self, message_id: str, msg: TaskMessage, queue: "TaskQueue"
     ) -> None:
-        """在文档准入信号量内执行 pipeline，处理成功/超时/失败。"""
+        """在文档准入信号量内执行 pipeline，处理成功/超时/失败。
+
+        源文件权威存储在 MinIO（object_key）。处理前下载到临时文件，处理完毕
+        （成功/失败/超时）删除临时文件。object_key 为空时回退用 msg.file_path
+        （兼容历史消息与对象存储不可用的降级路径）。
+        """
         # 通过 semaphore 控制并发
         async with self.semaphore:
             try:
-                # 单个文档处理总超时
-                await asyncio.wait_for(
-                    self._pipeline.process(
-                        file_path=msg.file_path,
-                        doc_id=msg.doc_id,
-                        kb_id=msg.kb_id,
-                    ),
-                    timeout=self._task_timeout,
-                )
+                async with self._resolve_file(msg) as file_path:
+                    # 单个文档处理总超时
+                    await asyncio.wait_for(
+                        self._pipeline.process(
+                            file_path=file_path,
+                            doc_id=msg.doc_id,
+                            kb_id=msg.kb_id,
+                        ),
+                        timeout=self._task_timeout,
+                    )
                 # 处理成功，ACK 消息，重置熔断计数
                 await queue.ack(message_id)
                 self._consecutive_failures = 0
@@ -339,6 +345,28 @@ class PipelineWorker:
                 )
                 self._record_failure()
                 await self._handle_failure(message_id, msg, e, queue=queue)
+
+    def _resolve_file(self, msg: TaskMessage):
+        """返回一个 async context manager，产出可供 pipeline 处理的本地文件路径。
+
+        - object_key 存在：从 MinIO 下载到临时文件，退出时删除（权威路径）。
+        - object_key 为空：回退使用 msg.file_path（历史消息 / 降级路径），不做清理。
+        """
+        import contextlib
+        import os
+
+        object_key = msg.object_key
+        if object_key:
+            from app.storage.object_store import materialized_file
+
+            suffix = os.path.splitext(object_key)[1]
+            return materialized_file(object_key, suffix)
+
+        @contextlib.asynccontextmanager
+        async def _local_path():
+            yield msg.file_path
+
+        return _local_path()
 
     def _record_failure(self) -> None:
         """记录失败次数，触发熔断"""
@@ -418,6 +446,7 @@ class PipelineWorker:
                 created_at=msg.created_at,
                 trace_id=msg.trace_id,
                 tenant_id=msg.tenant_id,
+                object_key=msg.object_key,
             )
             await queue.enqueue(retry_msg)
         else:

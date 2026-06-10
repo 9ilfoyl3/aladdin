@@ -720,24 +720,27 @@ async def set_visibility(
 
 
 async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
-    """后台清理 Milvus collection + 物理文件 + 缓存（按 kb_id，不写受隔离资源）。"""
-    import os
-    from pathlib import Path
-
-    upload_dir = Path("data/uploads")
+    """后台清理 Milvus collection + MinIO 源文件 + 缓存（按 kb_id，不写受隔离资源）。"""
     try:
         milvus = _get_milvus()
         await milvus.drop_collection(kb_id)
     except Exception as e:
         logger.warning("知识库删除 - 删除 Milvus collection 失败（可忽略）: %s", e)
 
-    for info in doc_info_list:
-        file_path = upload_dir / f"{info['id']}.{info['file_type']}"
-        if file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning("知识库删除 - 删除文件失败 %s: %s", file_path, e)
+    # 删除 MinIO 中的源文件 + 缩略图
+    from app.storage.object_store import (
+        document_object_key,
+        get_object_store,
+        thumbnail_object_key,
+    )
+
+    store = get_object_store()
+    if store is not None and doc_info_list:
+        keys: list[str] = []
+        for info in doc_info_list:
+            keys.append(document_object_key(info["id"], info["file_type"]))
+            keys.append(thumbnail_object_key(info["id"]))
+        await store.remove_many(keys)
 
     try:
         from app.retrieval.cache import get_retrieval_cache

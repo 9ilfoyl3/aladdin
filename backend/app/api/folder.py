@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import os
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -24,9 +22,6 @@ from app.storage.milvus import get_milvus_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Folder"])
-
-# 上传文件存储目录
-_UPLOAD_DIR = Path("data/uploads")
 
 
 async def _authorize_kb(
@@ -435,14 +430,21 @@ async def _folder_cleanup_background(
         except Exception as e:
             logger.warning("文件夹删除 - Milvus 向量清理失败: %s", e)
 
-    # 删除物理文件
-    for info in doc_info_list:
-        file_path = _UPLOAD_DIR / f"{info['id']}.{info['file_type']}"
-        if file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning("文件夹删除 - 删除文件失败 %s: %s", file_path, e)
+    # 删除 MinIO 中的源文件 + 缩略图
+    from app.storage.object_store import (
+        document_object_key,
+        get_object_store,
+        thumbnail_object_key,
+    )
+
+    store = get_object_store()
+    if store is not None and doc_info_list:
+        keys: list[str] = []
+        for info in doc_info_list:
+            keys.append(document_object_key(info["id"], info["file_type"]))
+            keys.append(thumbnail_object_key(info["id"]))
+        await store.remove_many(keys)
+        logger.info("文件夹删除 - MinIO 源文件清理完成，共 %d 个文档", len(doc_info_list))
 
     # 清除检索缓存
     try:

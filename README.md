@@ -41,7 +41,8 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 - **Evidence-First 检索纪律** —— 内置 Progressive RAG 系统提示词（Assess-Reconnaissance-Plan-Execute 工作流），强制"先检索、深读 chunk、再作答"，杜绝凭记忆臆造。
 - **三路混合检索** —— Dense + Sparse + BM25 并行召回，RRF 融合 + Rerank 精排 + 复合评分 + MMR 去冗余 + 父块扩展。
 - **三层递进式上下文管理** —— BPE Token 估算 + API Usage 增量追踪 + LLM 摘要合并 + 分组截断兜底，长对话不超窗。
-- **可扩展工具生态** —— 内置知识检索、关键词匹配、深度阅读、网页搜索、思考、技能加载等工具，并支持接入远程 MCP Server。
+- **可扩展工具生态** —— 内置知识检索、关键词匹配、深度阅读、附件阅读、网页搜索、思考、技能加载等工具，并支持接入远程 MCP Server。
+- **多租户与权限治理** —— 固定角色（admin / member）+ 归属轴的 RBAC 模型，知识库私有 / 组织可见 + 点对点共享，超级管理员、邀请注册与审计日志，三类 API Key 凭据模型。
 - **全程可视化** —— Agent 思考、工具调用、引用溯源、Token 占用通过 SSE 实时推送，前端逐 token 渲染。
 
 ## 🏗️ 架构设计
@@ -58,7 +59,8 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 ├─────────────────────────────────────────────────────────────┤
 │                         工具层                               │
 │  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
-│  thinking │ web_search │ final_answer │ MCP Tools            │
+│  read_attachment │ read_skill │ thinking │ web_search        │
+│  final_answer │ MCP Tools                                    │
 ├─────────────────────────────────────────────────────────────┤
 │                        检索工具层                            │
 │   Dense + Sparse + BM25 → RRF 融合 → Rerank → MMR → 父块扩展 │
@@ -84,9 +86,10 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 | 能力 | 详情 |
 |------|------|
 | ReAct 推理 | 大模型在 Think → Act → Observe 循环中自主决策，调用工具、分析结果、决定停止时机 |
-| 工具调用 | 内置知识检索、关键词匹配、深度阅读、网页搜索、思考、技能加载，支持远程 MCP 工具 |
+| 工具调用 | 内置知识检索、关键词匹配、深度阅读、附件阅读、网页搜索、思考、技能加载，支持远程 MCP 工具 |
 | Evidence-First | Progressive RAG 提示词强制"先检索、深读 chunk、再作答"，引用溯源、拒绝臆造 |
 | Agent 预设 | 内置「快速问答」（hybrid 单轮）与「智能推理」（agent 多步），系统提示词可在线 AI 改写 |
+| 会话附件 | 对话中上传文件即时入库为会话级检索源，Agent 通过 `read_attachment` 确定性整篇读取，不与正式知识库竞争排序 |
 | 上下文管理 | 三层递进式压缩（Token 估算 + Usage 追踪 + LLM 摘要 + 分组截断），长对话不超窗 |
 | 流式可视化 | 思考、工具调用、引用、Token 占用通过 SSE 实时推送，逐 token 渲染 |
 
@@ -95,6 +98,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 | 能力 | 详情 |
 |------|------|
 | 文档格式 | PDF / Word / Excel / PPT / TXT / Markdown / 图片 |
+| 文档组织 | 文件夹层级管理、重命名、缩略图预览（鉴权拉取） |
 | 图文混排 | 自动提取嵌入图片并并发 OCR，按页位置插入识别文本，内容 hash 去重 |
 | 结构感知切片 | 按文档逻辑结构切分，表格整块保护，父块（上下文）/ 子块（精检）映射 |
 | 三路混合检索 | Dense 语义 + Sparse 稀疏 + BM25 全文，RRF 融合 + Rerank + MMR + 父块扩展 |
@@ -118,8 +122,10 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 |------|------|
 | 部署 | 本地 / Docker / 内网离线部署（ARM64 + AMD64 镜像打包） |
 | 界面 | Web UI / RESTful API / OpenAI 兼容 API / MCP Server |
+| 多租户 | 固定角色（admin / member）+ 归属轴 RBAC，知识库私有 / 组织可见 + 点对点读写共享，超级管理员跨租户治理 |
+| 用户与注册 | 邀请注册（默认）/ 自助注册两种模式，首登强制改密，个人资料 / 头像，审计日志 |
 | 多模型管理 | 数据库持久化多 LLM 配置，前端创建 / 编辑 / 设默认 / 连通性测试，对话动态切换 |
-| 安全 | API Key 认证（SHA256 哈希存储，仅 `/v1/` 路径鉴权），MCP 外部工具输出标记为不可信 |
+| 安全 | JWT 登录 + 三类 API Key 凭据（租户级 / 用户级 / 外部代理，SHA256 哈希存储，仅 `/v1/` 路径鉴权），超管业务内容可见边界可控，MCP 外部工具输出标记为不可信 |
 | 容错降级 | Agent 异常 → hybrid → 纯检索；LLM 不可用 → 返回检索原文；Reranker 异常 → RRF 结果 |
 | 可观测性 | Agent 思考 / 工具 / Token 用量 SSE 事件，会话历史持久化 agent_steps |
 
@@ -141,7 +147,9 @@ cd artoo
 
 # 配置环境变量（本地开发读 backend/.env）
 cp backend/.env.example backend/.env
-# 编辑 backend/.env：至少填 JWT_SECRET（必填）；LLM / Embedding 可启动后在前端配
+# 编辑 backend/.env：至少填 JWT_SECRET（必填，缺失则 fail-fast）；
+# 初始超管 SUPER_ADMIN_USERNAME / PASSWORD 首启自动创建并强制改密；
+# LLM / Embedding 可启动后在前端配
 ```
 
 <details open>
@@ -203,10 +211,11 @@ cd frontend; npm run dev
 
 ### 🧭 使用流程
 
-1. **Embedding 配置** → 添加远程 Embedding 服务地址 → 连通性测试 → 启用
-2. **模型管理** → 添加 LLM 配置 → 连通性测试 → 设为默认
-3. **知识库** → 创建 → 上传文档 → 等待 Worker 处理完成
-4. **对话** → 选择知识库与 Agent 预设 → 提问
+1. **登录** → 使用初始超管账号（`SUPER_ADMIN_*`）登录，首次强制改密
+2. **Embedding 配置** → 添加远程 Embedding 服务地址 → 连通性测试 → 启用
+3. **模型管理** → 添加 LLM 配置 → 连通性测试 → 设为默认
+4. **知识库** → 创建 → 上传文档 → 等待 Worker 处理完成
+5. **对话** → 选择知识库与 Agent 预设 → 提问
 
 ## 🐳 部署打包（生产 / 内网离线）
 
@@ -289,11 +298,12 @@ artoo/
 │   │   ├── main.py              # FastAPI 入口
 │   │   ├── worker_main.py       # Worker 入口
 │   │   ├── config.py            # 配置
-│   │   ├── api/                 # API 路由（chat / kb / document / *config …）
+│   │   ├── api/                 # API 路由（chat / kb / document / auth / 邀请 / *config …）
+│   │   ├── auth/                # 多租户认证与 RBAC（JWT / API Key / 知识库授权 / 审计）
 │   │   ├── agent/               # ReAct Agent 引擎
 │   │   │   ├── engine.py        #   核心 ReAct 循环
 │   │   │   ├── events.py        #   EventBus 事件总线
-│   │   │   ├── tools/           #   工具层（检索 / 深读 / 网搜 / MCP …）
+│   │   │   ├── tools/           #   工具层（检索 / 深读 / 附件 / 网搜 / 技能 / MCP …）
 │   │   │   ├── memory/          #   三层递进式上下文管理
 │   │   │   ├── skills/          #   技能（Progressive Disclosure）
 │   │   │   └── prompts/         #   Progressive RAG 系统提示词

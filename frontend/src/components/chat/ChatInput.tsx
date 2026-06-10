@@ -64,6 +64,8 @@ interface ChatInputProps {
   onDismissPendingSessionFile?: (localId: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片缩略图/放大预览） */
   sessionImagePreviewUrls?: Record<string, string>
+  /** 当前会话 ID（用于 Artifact 面板按会话拉取附件原件预览） */
+  sessionId?: string | null
 }
 
 function ChatInput({
@@ -91,6 +93,7 @@ function ChatInput({
   onCancelPendingSessionFile,
   onDismissPendingSessionFile,
   sessionImagePreviewUrls = {},
+  sessionId = null,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -176,6 +179,7 @@ function ChatInput({
         onCancelPending={(id) => onCancelPendingSessionFile?.(id)}
         onDismissPending={(id) => onDismissPendingSessionFile?.(id)}
         imagePreviewUrls={sessionImagePreviewUrls}
+        sessionId={sessionId}
       />
     </>
   )

@@ -41,7 +41,8 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 - **Evidence-First discipline** — a built-in Progressive RAG system prompt (Assess-Reconnaissance-Plan-Execute workflow) enforces "search first, deep-read chunks, then answer" — no fabrication from parametric memory.
 - **Three-way hybrid retrieval** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion.
 - **Three-tier progressive context management** — BPE token estimation + API usage delta tracking + LLM summary consolidation + group-based truncation fallback keep long conversations within the window.
-- **Extensible tool ecosystem** — built-in knowledge search, keyword matching, deep reading, web search, thinking, and skill loading tools, plus remote MCP Server integration.
+- **Extensible tool ecosystem** — built-in knowledge search, keyword matching, deep reading, attachment reading, web search, thinking, and skill loading tools, plus remote MCP Server integration.
+- **Multi-tenancy & access governance** — RBAC with fixed roles (admin / member) + ownership axis, private / organization-visible knowledge bases plus point-to-point sharing, super admin, invite-based registration, audit logs, and three API-key credential models.
 - **Fully observable** — agent thoughts, tool calls, citation tracing, and token usage are streamed via SSE and rendered token-by-token in the UI.
 
 ## 🏗️ Architecture
@@ -58,7 +59,8 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 ├─────────────────────────────────────────────────────────────┤
 │                          Tool Layer                          │
 │  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
-│  thinking │ web_search │ final_answer │ MCP Tools            │
+│  read_attachment │ read_skill │ thinking │ web_search        │
+│  final_answer │ MCP Tools                                    │
 ├─────────────────────────────────────────────────────────────┤
 │                      Retrieval Tool Layer                    │
 │   Dense + Sparse + BM25 → RRF → Rerank → MMR → parent expand │
@@ -84,9 +86,10 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Capability | Details |
 |------------|---------|
 | ReAct Reasoning | The LLM decides autonomously within a Think → Act → Observe loop: call tools, analyze results, decide when to stop |
-| Tool Calling | Built-in knowledge search, keyword matching, deep reading, web search, thinking, skill loading; remote MCP tools |
+| Tool Calling | Built-in knowledge search, keyword matching, deep reading, attachment reading, web search, thinking, skill loading; remote MCP tools |
 | Evidence-First | Progressive RAG prompt enforces "search, deep-read chunks, then answer" with inline citations and no fabrication |
 | Agent Presets | Built-in "Quick Q&A" (single-pass hybrid) and "Smart Reasoning" (multi-step agent); prompts editable via AI rewrite |
+| Session Attachments | Files uploaded mid-conversation are indexed instantly as session-level retrieval sources; the agent reads them whole and deterministically via `read_attachment`, without competing for ranking against the formal KB |
 | Context Management | Three-tier progressive compression (token estimation + usage tracking + LLM summary + group truncation) |
 | Streaming Visibility | Thoughts, tool calls, citations, and token usage streamed via SSE and rendered token-by-token |
 
@@ -95,6 +98,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Capability | Details |
 |------------|---------|
 | Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images |
+| Document Organization | Folder hierarchy management, rename, thumbnail preview (authenticated fetch) |
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
 | Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
 | Three-Way Hybrid Retrieval | Dense + Sparse + BM25, RRF fusion + Rerank + MMR + parent-chunk expansion |
@@ -118,8 +122,10 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 |------------|---------|
 | Deployment | Local / Docker / offline intranet (ARM64 + AMD64 image packaging) |
 | Interfaces | Web UI / RESTful API / OpenAI-compatible API / MCP Server |
+| Multi-Tenancy | RBAC with fixed roles (admin / member) + ownership axis; private / organization-visible KBs plus point-to-point read/write sharing; super-admin cross-tenant governance |
+| Users & Registration | Invite-based (default) and self-serve registration modes, forced password change on first login, profiles / avatars, audit logs |
 | Multi-Model Management | DB-persisted multiple LLM configs; create / edit / set-default / connectivity-test; dynamic switching |
-| Security | API Key auth (SHA256 hashed, only `/v1/` paths); external MCP tool output marked untrusted |
+| Security | JWT login + three API-key credential models (tenant / user / external-agent, SHA256 hashed, only `/v1/` paths); configurable super-admin content-visibility boundary; external MCP tool output marked untrusted |
 | Graceful Degradation | Agent error → hybrid → pure retrieval; LLM down → raw retrieved text; Reranker error → RRF results |
 | Observability | Agent thought / tool / token-usage SSE events; session history persists agent_steps |
 
@@ -144,7 +150,9 @@ cd artoo
 
 # Configure environment (local dev reads backend/.env)
 cp backend/.env.example backend/.env
-# Edit backend/.env: at minimum set JWT_SECRET (required); LLM / Embedding can be set later in the UI
+# Edit backend/.env: at minimum set JWT_SECRET (required, fail-fast if missing);
+# the initial super admin SUPER_ADMIN_USERNAME / PASSWORD is auto-created on first
+# startup and forced to change on first login; LLM / Embedding can be set later in the UI
 ```
 
 <details open>
@@ -201,10 +209,11 @@ Once started, visit **http://localhost:3000**.
 
 ### 🧭 Usage Flow
 
-1. **Embedding Config** → add remote Embedding service URL → test connectivity → enable
-2. **Model Management** → add LLM config → test connectivity → set as default
-3. **Knowledge Base** → create → upload documents → wait for the Worker to finish processing
-4. **Chat** → select a knowledge base and an Agent preset → ask questions
+1. **Login** → sign in with the initial super-admin account (`SUPER_ADMIN_*`); a password change is forced on first login
+2. **Embedding Config** → add remote Embedding service URL → test connectivity → enable
+3. **Model Management** → add LLM config → test connectivity → set as default
+4. **Knowledge Base** → create → upload documents → wait for the Worker to finish processing
+5. **Chat** → select a knowledge base and an Agent preset → ask questions
 
 ## 🐳 Packaging & Deployment (Production / Offline Intranet)
 
@@ -288,11 +297,12 @@ artoo/
 │   │   ├── main.py              # FastAPI entry point
 │   │   ├── worker_main.py       # Worker entry point
 │   │   ├── config.py            # Configuration
-│   │   ├── api/                 # API routes (chat / kb / document / *config …)
+│   │   ├── api/                 # API routes (chat / kb / document / auth / invitation / *config …)
+│   │   ├── auth/                # Multi-tenant auth & RBAC (JWT / API Key / KB authz / audit)
 │   │   ├── agent/               # ReAct Agent engine
 │   │   │   ├── engine.py        #   Core ReAct loop
 │   │   │   ├── events.py        #   EventBus
-│   │   │   ├── tools/           #   Tool layer (search / deep read / web / MCP …)
+│   │   │   ├── tools/           #   Tool layer (search / deep read / attachment / web / skills / MCP …)
 │   │   │   ├── memory/          #   Three-tier context management
 │   │   │   ├── skills/          #   Skills (Progressive Disclosure)
 │   │   │   └── prompts/         #   Progressive RAG system prompt

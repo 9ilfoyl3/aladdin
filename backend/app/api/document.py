@@ -4,11 +4,10 @@ import asyncio
 import logging
 import os
 import uuid
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +27,11 @@ from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseG
 from app.session_upload.limits import get_upload_limit_resolver
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, get_milvus_client
+from app.storage.object_store import (
+    document_object_key,
+    get_object_store,
+    thumbnail_object_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +43,36 @@ _FALLBACK_MAX_CONCURRENT = 2
 _fallback_semaphore = asyncio.Semaphore(_FALLBACK_MAX_CONCURRENT)
 
 
-async def _run_pipeline_fallback(file_path: str, doc_id: str, kb_id: str) -> None:
+async def _run_pipeline_fallback(
+    file_path: str, doc_id: str, kb_id: str, object_key: str | None = None
+) -> None:
     """进程内回退执行（受 _fallback_semaphore 限流）。
 
     仅在 Redis 不可用时使用。受限流保护：同一时刻最多 _FALLBACK_MAX_CONCURRENT 个
     文档在 API 进程内处理，其余排队，避免降级时压垮 API。pipeline 内部 load/clean/
     chunk 已用 to_thread 卸载，embedding 为 async I/O，故不会独占事件循环。
+
+    object_key 存在时从 MinIO 下载到临时文件处理；否则回退用 file_path。
     """
     async with _fallback_semaphore:
-        await _run_pipeline_safe(file_path, doc_id, kb_id)
+        if object_key:
+            from app.storage.object_store import materialized_file
+
+            suffix = os.path.splitext(object_key)[1]
+            async with materialized_file(object_key, suffix) as local_path:
+                await _run_pipeline_safe(local_path, doc_id, kb_id)
+        else:
+            await _run_pipeline_safe(file_path, doc_id, kb_id)
+
+
+async def _safe_remove_objects(keys: list[str]) -> None:
+    """删除 MinIO 对象（幂等，失败仅记 WARNING）。用于上传失败的一致性补偿。"""
+    try:
+        store = get_object_store()
+        if store is not None and keys:
+            await store.remove_many(keys)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("一致性补偿删除对象失败 keys=%s: %s", keys, e)
 
 
 async def _authorize_kb_access(
@@ -116,52 +141,41 @@ router = APIRouter(tags=["Document"])
 # 支持的文件类型
 _ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png"}
 
-# 上传文件存储目录
-_UPLOAD_DIR = Path("data/uploads")
+async def _generate_and_store_thumbnail(doc_id: str, file_type: str, content: bytes) -> None:
+    """从上传字节生成缩略图并存入 MinIO（仅 PDF 渲染首页；图片预览直接返回原件）。
 
-# 缩略图缓存目录
-_THUMBNAIL_DIR = _UPLOAD_DIR / "thumbnails"
-
-
-def _generate_thumbnail(doc_id: str, file_type: str) -> None:
-    """为文档生成缩略图（同步，适合在后台任务中调用）。
-    支持 PDF（渲染首页）和图片（直接复制/缩放）。
+    在事件循环外渲染（to_thread），失败不影响上传主流程。
     """
-    if file_type not in ("pdf", "jpg", "jpeg", "png"):
+    if file_type != "pdf":
+        return
+    store = get_object_store()
+    if store is None:
         return
 
-    _THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
-    thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
-    if thumb_path.exists():
-        return
+    def _render() -> bytes | None:
+        import fitz
 
-    file_path = _UPLOAD_DIR / f"{doc_id}.{file_type}"
-    if not file_path.exists():
-        return
-
-    try:
-        if file_type == "pdf":
-            import fitz
-            pdf_doc = fitz.open(str(file_path))
+        try:
+            pdf_doc = fitz.open(stream=content, filetype="pdf")
             page = pdf_doc[0]
             zoom = 200.0 / page.rect.width
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat)
-            pix.save(str(thumb_path))
+            data = pix.tobytes("png")
             pdf_doc.close()
-        # 图片类型不需要生成缩略图，preview 接口直接返回原文件
-    except Exception as e:
-        logger.warning("生成缩略图失败 doc_id=%s: %s", doc_id, e)
+            return data
+        except Exception as e:  # noqa: BLE001
+            logger.warning("生成缩略图失败 doc_id=%s: %s", doc_id, e)
+            return None
 
-
-def _delete_thumbnail(doc_id: str) -> None:
-    """删除文档对应的缩略图缓存"""
-    thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
-    if thumb_path.exists():
-        try:
-            os.remove(thumb_path)
-        except OSError:
-            pass
+    try:
+        png_bytes = await asyncio.to_thread(_render)
+        if png_bytes:
+            await store.put_bytes(
+                thumbnail_object_key(doc_id), png_bytes, content_type="image/png"
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("存储缩略图失败 doc_id=%s: %s", doc_id, e)
 
 
 # ============================================================
@@ -289,12 +303,16 @@ def _select_queue(
 async def _enqueue_or_fallback(
     request: Request, file_path: str, doc_id: str, kb_id: str,
     file_size: int | None = None, tenant_id: str | None = None,
+    object_key: str | None = None,
 ) -> None:
     """尝试将任务入队 Redis Stream（按大小选择快/慢道），失败时降级为 asyncio.create_task"""
     queue = _select_queue(request, file_size)
     if queue is not None:
         try:
-            msg = TaskMessage(doc_id=doc_id, kb_id=kb_id, file_path=file_path, tenant_id=tenant_id)
+            msg = TaskMessage(
+                doc_id=doc_id, kb_id=kb_id, file_path=file_path,
+                tenant_id=tenant_id, object_key=object_key,
+            )
             msg_id = await queue.enqueue(msg)
             print(f"[Queue] 文档 {doc_id} 已入队 Redis Stream (msg_id={msg_id})")
             return
@@ -307,7 +325,7 @@ async def _enqueue_or_fallback(
         print(f"[Queue] ⚠️ Redis 不可用，降级为 create_task (doc_id={doc_id})")
         logger.warning("Redis unavailable, falling back to in-process task")
     # 降级：进程内执行（受 _fallback_semaphore 限流，防止压垮 API）
-    asyncio.create_task(_run_pipeline_fallback(file_path, doc_id, kb_id))
+    asyncio.create_task(_run_pipeline_fallback(file_path, doc_id, kb_id, object_key))
 
 
 # ============================================================
@@ -421,11 +439,12 @@ async def upload_document(
             detail=f"不支持的文件类型: {ext}，支持: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
         )
 
-    # 保存文件到 data/uploads 目录
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # 源文件权威存储在 MinIO，对象 key = {doc_id}.{ext}
+    store = get_object_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="对象存储不可用，无法上传文件")
     doc_id = str(uuid.uuid4())
-    save_filename = f"{doc_id}.{ext}"
-    file_path = _UPLOAD_DIR / save_filename
+    object_key = document_object_key(doc_id, ext)
 
     content = await file.read()
     file_size = len(content)
@@ -460,35 +479,44 @@ async def upload_document(
             created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
         )
 
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # 写入 MinIO（权威存储）
+    await store.put_bytes(object_key, content, content_type=file.content_type or "application/octet-stream")
 
-    # 创建文档记录（盖章 tenant_id = 所属 KB 的 tenant_id）
-    doc = Document(
-        id=doc_id,
-        kb_id=kb_id,
-        folder_id=folder_id,
-        filename=filename,
-        file_type=ext,
-        file_size=file_size,
-        file_hash=file_hash,
-        status="pending",
-        tenant_id=kb.tenant_id,
-    )
-    db.add(doc)
+    # 创建文档记录（盖章 tenant_id = 所属 KB 的 tenant_id）。
+    # 一致性补偿：MinIO 已写入但 DB 写失败时，删除刚上传的对象，避免留孤儿对象
+    # （与会话上传路径对称；兜底另有启动期 reconcile 对账，见 main._reconcile_orphan_objects）。
+    try:
+        doc = Document(
+            id=doc_id,
+            kb_id=kb_id,
+            folder_id=folder_id,
+            filename=filename,
+            file_type=ext,
+            file_size=file_size,
+            file_hash=file_hash,
+            status="pending",
+            tenant_id=kb.tenant_id,
+        )
+        db.add(doc)
 
-    # 更新知识库文档计数
-    kb.doc_count = (kb.doc_count or 0) + 1
+        # 更新知识库文档计数
+        kb.doc_count = (kb.doc_count or 0) + 1
 
-    await db.flush()
-    await db.refresh(doc)
-    await db.commit()
+        await db.flush()
+        await db.refresh(doc)
+        await db.commit()
+    except Exception:
+        await _safe_remove_objects([object_key])
+        raise
 
-    # 生成缩略图（PDF 首页渲染）
-    _generate_thumbnail(doc_id, ext)
+    # 生成缩略图（PDF 首页渲染）并存入 MinIO
+    await _generate_and_store_thumbnail(doc_id, ext, content)
 
     # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
-    await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size, tenant_id=kb.tenant_id)
+    await _enqueue_or_fallback(
+        request, object_key, doc_id, kb_id,
+        file_size=file_size, tenant_id=kb.tenant_id, object_key=object_key,
+    )
 
     return DocumentResponse(
         id=doc.id,
@@ -567,9 +595,10 @@ async def retry_document(
     doc.progress_message = None
     await db.flush()
 
-    # 重新触发管道（优先入队 Redis Stream）
-    file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
-    if not file_path.exists():
+    # 重新触发管道（优先入队 Redis Stream）。源文件权威存储在 MinIO。
+    object_key = document_object_key(doc_id, doc.file_type)
+    store = get_object_store()
+    if store is None or not await store.exists(object_key):
         doc.status = "failed"
         doc.error_message = "原始文件已丢失，无法重新识别"
         await db.flush()
@@ -579,13 +608,16 @@ async def retry_document(
     queue = _select_queue(request, doc.file_size)
     if queue is not None:
         try:
-            msg = TaskMessage(doc_id=doc_id, kb_id=doc.kb_id, file_path=str(file_path), tenant_id=doc.tenant_id)
+            msg = TaskMessage(
+                doc_id=doc_id, kb_id=doc.kb_id, file_path=object_key,
+                tenant_id=doc.tenant_id, object_key=object_key,
+            )
             await queue.enqueue(msg)
         except Exception as e:
             logger.warning("Redis 入队失败，降级为 create_task: %s", e)
-            asyncio.create_task(_run_pipeline_fallback(str(file_path), doc_id, doc.kb_id))
+            asyncio.create_task(_run_pipeline_fallback(object_key, doc_id, doc.kb_id, object_key))
     else:
-        asyncio.create_task(_run_pipeline_fallback(str(file_path), doc_id, doc.kb_id))
+        asyncio.create_task(_run_pipeline_fallback(object_key, doc_id, doc.kb_id, object_key))
 
     await db.commit()
     return DocumentResponse(
@@ -639,7 +671,7 @@ async def delete_document(
 
 
 async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> None:
-    """单文档删除后台清理：Milvus 向量、物理文件、缩略图、缓存"""
+    """单文档删除后台清理：Milvus 向量、MinIO 源文件与缩略图、缓存"""
     # 删除 Milvus 中的向量
     try:
         milvus = _get_milvus()
@@ -648,16 +680,13 @@ async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> No
     except Exception as e:
         logger.warning("删除 Milvus 向量失败（可忽略）: %s", e)
 
-    # 删除本地文件
-    file_path = _UPLOAD_DIR / f"{doc_id}.{file_type}"
-    if file_path.exists():
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
-
-    # 删除缩略图缓存
-    _delete_thumbnail(doc_id)
+    # 删除 MinIO 中的源文件 + 缩略图
+    store = get_object_store()
+    if store is not None:
+        await store.remove_many([
+            document_object_key(doc_id, file_type),
+            thumbnail_object_key(doc_id),
+        ])
 
     # 清除该知识库的检索缓存
     from app.retrieval.cache import get_retrieval_cache
@@ -727,10 +756,11 @@ async def batch_retry_documents(
         except Exception as e:
             logger.warning("批量重试 - 清除旧向量失败: %s", e)
 
-    # 批量入队（按文件大小选择快/慢道）
+    # 批量入队（按文件大小选择快/慢道）。源文件权威存储在 MinIO。
+    store = get_object_store()
     for doc in retried:
-        file_path = _UPLOAD_DIR / f"{doc.id}.{doc.file_type}"
-        if not file_path.exists():
+        object_key = document_object_key(doc.id, doc.file_type)
+        if store is None or not await store.exists(object_key):
             doc.status = "failed"
             doc.error_message = "原始文件已丢失"
             continue
@@ -738,12 +768,15 @@ async def batch_retry_documents(
         queue = _select_queue(request, doc.file_size)
         if queue is not None:
             try:
-                msg = TaskMessage(doc_id=doc.id, kb_id=doc.kb_id, file_path=str(file_path), tenant_id=doc.tenant_id)
+                msg = TaskMessage(
+                    doc_id=doc.id, kb_id=doc.kb_id, file_path=object_key,
+                    tenant_id=doc.tenant_id, object_key=object_key,
+                )
                 await queue.enqueue(msg)
             except Exception:
-                asyncio.create_task(_run_pipeline_fallback(str(file_path), doc.id, doc.kb_id))
+                asyncio.create_task(_run_pipeline_fallback(object_key, doc.id, doc.kb_id, object_key))
         else:
-            asyncio.create_task(_run_pipeline_fallback(str(file_path), doc.id, doc.kb_id))
+            asyncio.create_task(_run_pipeline_fallback(object_key, doc.id, doc.kb_id, object_key))
 
     await db.commit()
     return {"retried_count": len(retried), "skipped_count": len(skipped), "total_requested": len(body.doc_ids)}
@@ -846,16 +879,14 @@ async def _batch_cleanup_background(
         except Exception as e:
             logger.warning("批量删除后台清理 - 删除 Milvus 向量失败: %s", e)
 
-    # 删除本地文件
-    for info in cleanup_info:
-        file_path = _UPLOAD_DIR / f"{info['id']}.{info['file_type']}"
-        if file_path.exists():
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
-        # 删除缩略图缓存
-        _delete_thumbnail(info['id'])
+    # 删除 MinIO 中的源文件 + 缩略图
+    store = get_object_store()
+    if store is not None:
+        keys: list[str] = []
+        for info in cleanup_info:
+            keys.append(document_object_key(info["id"], info["file_type"]))
+            keys.append(thumbnail_object_key(info["id"]))
+        await store.remove_many(keys)
 
     # 清除检索缓存
     from app.retrieval.cache import get_retrieval_cache
@@ -1070,8 +1101,6 @@ async def upload_folder(
     uploaded_count = 0
     skipped_count = 0
 
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
     for file, rel_path in zip(files, path_list):
         parts = rel_path.replace("\\", "/").split("/")
         filename = parts[-1]
@@ -1108,16 +1137,21 @@ async def upload_folder(
         else:
             target_folder_id = parent_folder_id
 
+        object_key: str | None = None
         try:
-            # 保存文件
+            # 保存文件到 MinIO（权威存储）
             doc_id = str(uuid.uuid4())
-            save_filename = f"{doc_id}.{ext}"
-            file_path = _UPLOAD_DIR / save_filename
+            object_key = document_object_key(doc_id, ext)
 
             content = await file.read()
             file_size = len(content)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            store = get_object_store()
+            if store is None:
+                raise RuntimeError("对象存储不可用")
+            await store.put_bytes(
+                object_key, content,
+                content_type=file.content_type or "application/octet-stream",
+            )
 
             # 创建文档记录（盖章 tenant_id = 所属 KB 的 tenant_id）
             doc = Document(
@@ -1137,11 +1171,14 @@ async def upload_folder(
             await db.flush()
             await db.commit()
 
-            # 生成缩略图（PDF 首页渲染）
-            _generate_thumbnail(doc_id, ext)
+            # 生成缩略图（PDF 首页渲染）并存入 MinIO
+            await _generate_and_store_thumbnail(doc_id, ext, content)
 
             # 后台触发管道处理（按文件大小路由快/慢道，优先入队 Redis Stream，降级为 asyncio.create_task）
-            await _enqueue_or_fallback(request, str(file_path), doc_id, kb_id, file_size=file_size, tenant_id=kb.tenant_id)
+            await _enqueue_or_fallback(
+                request, object_key, doc_id, kb_id,
+                file_size=file_size, tenant_id=kb.tenant_id, object_key=object_key,
+            )
 
             uploaded_count += 1
             results.append(FolderUploadResultItem(
@@ -1153,6 +1190,9 @@ async def upload_folder(
             ))
         except Exception as e:
             logger.error("文件 %s 上传失败: %s", rel_path, e)
+            # 一致性补偿：MinIO 已写入但后续失败时删除孤儿对象（put 之后才失败的情况）
+            if object_key is not None:
+                await _safe_remove_objects([object_key])
             results.append(FolderUploadResultItem(
                 relative_path=rel_path,
                 filename=filename,
@@ -1178,43 +1218,82 @@ async def preview_document_file(
     identity: IdentityContext = Depends(require_authenticated()),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """预览文档文件缩略图（支持图片和 PDF 首页）"""
+    """预览文档缩略图（图片返回原件，PDF 返回首页缩略图）。源文件存于 MinIO。"""
     _ensure_not_super_admin_content(identity)  # 内容边界：超管默认不可查看正文/预览
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
         raise CrossTenantError()
 
+    store = get_object_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="对象存储不可用")
+
     # 图片类型：直接返回原文件
     if doc.file_type in ("jpg", "jpeg", "png"):
-        file_path = _UPLOAD_DIR / f"{doc_id}.{doc.file_type}"
-        if not file_path.exists():
+        key = document_object_key(doc_id, doc.file_type)
+        if not await store.exists(key):
             raise HTTPException(status_code=404, detail="文件不存在")
         media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
-        return FileResponse(
-            path=str(file_path),
+        data = await store.get_bytes(key)
+        return Response(
+            content=data,
             media_type=media_type_map.get(doc.file_type, "application/octet-stream"),
-            filename=doc.filename,
         )
 
-    # PDF 类型：返回缩略图（上传时已预生成，此处兜底）
+    # PDF 类型：返回缩略图（上传时已预生成）
     if doc.file_type == "pdf":
-        thumb_path = _THUMBNAIL_DIR / f"{doc_id}.png"
-
-        # 兜底：如果缩略图不存在则现场生成
-        if not thumb_path.exists():
-            _generate_thumbnail(doc_id, "pdf")
-
-        if not thumb_path.exists():
+        thumb_key = thumbnail_object_key(doc_id)
+        if not await store.exists(thumb_key):
             raise HTTPException(status_code=404, detail="缩略图不可用")
-
-        return FileResponse(
-            path=str(thumb_path),
-            media_type="image/png",
-            filename=f"{doc_id}_thumb.png",
-        )
+        data = await store.get_bytes(thumb_key)
+        return Response(content=data, media_type="image/png")
 
     raise HTTPException(status_code=400, detail="该文件类型不支持预览")
+
+
+@router.get("/api/documents/{doc_id}/raw")
+async def get_document_raw_file(
+    doc_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """返回文档原始文件（用于原件在线预览/下载）。源文件存于 MinIO，流式透传。"""
+    _ensure_not_super_admin_content(identity)  # 内容边界：超管默认不可查看正文
+    result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise CrossTenantError()
+
+    store = get_object_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="对象存储不可用")
+
+    key = document_object_key(doc_id, doc.file_type)
+    if not await store.exists(key):
+        raise HTTPException(status_code=404, detail="原始文件不存在")
+
+    media_type_map = {
+        "pdf": "application/pdf",
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+        "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8",
+        "csv": "text/csv; charset=utf-8",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    media_type = media_type_map.get(doc.file_type, "application/octet-stream")
+    data = await store.get_bytes(key)
+
+    from urllib.parse import quote
+
+    # filename* 用 RFC 5987 编码，兼容中文文件名；inline 让浏览器尽量内嵌预览。
+    disposition = f"inline; filename*=UTF-8''{quote(doc.filename)}"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.get("/api/documents/{doc_id}/chunks", response_model=PageResult[ChunkResponse])
