@@ -54,10 +54,13 @@ async def lifespan(app: FastAPI):
     # 自动迁移：添加可能缺失的新列
     await _auto_migrate_columns()
 
+    # 初始化对象存储 bucket（知识库源文件权威存储）
+    await _init_object_store()
+
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await load_embed_configs()
 
-    # 启动时补偿清理：删除孤儿上传文件（DB 记录已删除但文件残留的情况）
+    # 启动时补偿清理 + 对账：清本地遗留文件 + 删 MinIO 无 DB 记录的孤儿对象
     asyncio.create_task(_cleanup_orphan_files())
 
     # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
@@ -199,12 +202,41 @@ async def _close_task_queue(app: FastAPI) -> None:
                 pass
 
 
-async def _cleanup_orphan_files() -> None:
-    """启动时补偿清理：删除 DB 中已无记录但磁盘上残留的上传文件
+async def _init_object_store() -> None:
+    """初始化对象存储 bucket（知识库源文件权威存储）。不可用时记 WARNING 不阻塞启动。"""
+    from app.storage.object_store import get_object_store
 
-    场景：批量删除时 DB 记录已删除，但后台异步清理本地文件时服务重启了。
-    此函数扫描 uploads 目录，对比 DB 中的文档记录，删除孤儿文件。
-    注意：不删除 pending/processing 状态文档的文件（Worker 可能正在处理）。
+    store = get_object_store()
+    if store is None:
+        print("[API] ⚠️ MinIO 未配置或不可用，文件上传将不可用")
+        logger.warning("Object store unavailable; file upload disabled")
+        return
+    try:
+        await store.ensure_bucket()
+        print(f"[API] 对象存储就绪 (bucket={store.bucket})")
+        logger.info("Object store ready (bucket=%s)", store.bucket)
+    except Exception as e:  # noqa: BLE001
+        print(f"[API] ⚠️ 初始化 MinIO bucket 失败: {e}")
+        logger.warning("Failed to init MinIO bucket: %s", e)
+
+
+async def _cleanup_orphan_files() -> None:
+    """启动时补偿清理 + 对账：
+
+    1. 本地遗留文件清理：删 DB 无记录但磁盘残留的旧上传文件（历史 / 降级路径产物）。
+    2. MinIO ↔ DB 对账：删 MinIO 中无对应 DB 记录的孤儿对象（上传补偿没删干净、
+       或硬崩溃留下的残留）。仅删 last_modified 早于宽限期的对象，避免误删正在
+       上传/建索引中（DB 行尚未提交）的新对象。
+
+    两者相辅相成：上传路径已做即时失败补偿（删刚上传的对象），本对账是兜底。
+    """
+    await _cleanup_local_orphan_files()
+    await _reconcile_minio_orphans()
+
+
+async def _cleanup_local_orphan_files() -> None:
+    """删 DB 无记录但本地磁盘残留的旧上传文件（历史 / 降级路径产物）。
+    不删 pending/processing 状态文档的文件（Worker 可能正在处理）。
     """
     upload_dir = Path("data/uploads")
     if not upload_dir.exists():
@@ -242,10 +274,114 @@ async def _cleanup_orphan_files() -> None:
                     pass
 
         if orphan_count > 0:
-            print(f"[Cleanup] 启动清理：删除了 {orphan_count} 个孤儿上传文件")
-            logger.info("Startup cleanup: removed %d orphan upload files", orphan_count)
+            print(f"[Cleanup] 启动清理：删除了 {orphan_count} 个本地孤儿上传文件")
+            logger.info("Startup cleanup: removed %d local orphan upload files", orphan_count)
     except Exception as e:
-        logger.warning("Startup orphan file cleanup failed (non-critical): %s", e)
+        logger.warning("Startup local orphan cleanup failed (non-critical): %s", e)
+
+
+async def _reconcile_minio_orphans() -> None:
+    """对账 MinIO 与 DB，删除无对应 DB 记录的孤儿对象（KB 源文件 / 缩略图 / 会话附件）。
+
+    对象布局：
+    - KB 源文件：根级 ``{doc_id}.{ext}`` —— 比对 ``Document.id``
+    - 缩略图：``thumbnails/{doc_id}.png`` —— 比对 ``Document.id``
+    - 会话附件：``sessions/{session_id}/{file_id}.{ext}`` —— 比对 ``SessionFile.id``
+
+    仅删 last_modified 早于 now - grace 的对象，避免误删正在上传/建索引的新对象。
+    """
+    import time
+
+    from app.storage.object_store import get_object_store
+
+    store = get_object_store()
+    if store is None:
+        return
+
+    settings = get_settings()
+    cutoff = time.time() - settings.minio_orphan_grace_seconds
+
+    try:
+        objects = await store.list_objects_with_mtime("")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MinIO 对账列举对象失败（跳过）: %s", e)
+        return
+
+    if not objects:
+        return
+
+    # 收集候选 id（只看超过宽限期的对象）
+    doc_ids: set[str] = set()           # KB 源文件 / 缩略图的 doc_id
+    session_file_ids: set[str] = set()  # 会话附件 file_id
+    # key -> 归属类型，便于后续判定删除
+    candidates: list[tuple[str, str, str]] = []  # (key, kind, id)
+
+    for key, mtime in objects:
+        if mtime > cutoff:
+            continue  # 宽限期内的新对象，跳过
+        if key.startswith("thumbnails/"):
+            stem = key[len("thumbnails/"):].rsplit(".", 1)[0]
+            doc_ids.add(stem)
+            candidates.append((key, "doc", stem))
+        elif key.startswith("sessions/"):
+            # sessions/{session_id}/{file_id}.{ext}
+            rest = key[len("sessions/"):]
+            parts = rest.split("/", 1)
+            if len(parts) == 2:
+                file_id = parts[1].rsplit(".", 1)[0]
+                session_file_ids.add(file_id)
+                candidates.append((key, "session", file_id))
+        else:
+            stem = key.rsplit(".", 1)[0]
+            if "/" in stem:
+                continue  # 未知层级，保守跳过
+            doc_ids.add(stem)
+            candidates.append((key, "doc", stem))
+
+    if not candidates:
+        return
+
+    # 批量查 DB 中实际存在的 id
+    existing_doc_ids: set[str] = set()
+    existing_session_file_ids: set[str] = set()
+    try:
+        async with async_session() as session:
+            if doc_ids:
+                result = await session.execute(
+                    select(Document.id).where(Document.id.in_(list(doc_ids)))
+                )
+                existing_doc_ids = {row[0] for row in result.all()}
+            if session_file_ids:
+                from app.schema.db import SessionFile
+
+                result = await session.execute(
+                    select(SessionFile.id).where(
+                        SessionFile.id.in_(list(session_file_ids))
+                    )
+                )
+                existing_session_file_ids = {row[0] for row in result.all()}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MinIO 对账查询 DB 失败（跳过删除）: %s", e)
+        return
+
+    # 找出孤儿对象 key
+    orphan_keys: list[str] = []
+    for key, kind, ident in candidates:
+        if kind == "doc" and ident not in existing_doc_ids:
+            orphan_keys.append(key)
+        elif kind == "session" and ident not in existing_session_file_ids:
+            orphan_keys.append(key)
+
+    if not orphan_keys:
+        return
+
+    try:
+        await store.remove_many(orphan_keys)
+        print(f"[Reconcile] MinIO 对账：删除了 {len(orphan_keys)} 个孤儿对象")
+        logger.info("MinIO reconcile: removed %d orphan objects", len(orphan_keys))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MinIO 对账删除孤儿对象失败（非致命）: %s", e)
+
 
 
 app = FastAPI(

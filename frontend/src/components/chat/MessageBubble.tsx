@@ -4,11 +4,21 @@ import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, 
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { isImageFilename } from '@/components/chat/SessionFileList'
 import type { MessageAttachment } from '@/lib/api'
+import { useArtifactStore, isPreviewable } from '@/stores/artifactStore'
+
+// 流式渲染动画配置：模糊渐入、按字符、放慢节奏
+const STREAM_ANIMATION = {
+  animation: 'blurIn',
+  sep: 'word',
+  duration: 300,
+  stagger: 20,
+  easing: 'ease-out',
+} as const
 
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
@@ -84,6 +94,8 @@ interface MessageBubbleProps {
   onToggleRefDetail: (key: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片，用于附件 chip 缩略图/放大预览） */
   imagePreviewUrls?: Record<string, string>
+  /** 当前会话 ID（用于附件在 Artifact 面板按会话拉取原件预览） */
+  sessionId?: string | null
   /** 设置/取消反馈（点赞/踩）。仅 assistant 且已落库（有 id）时可用。 */
   onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
   /** 重试本轮对话。仅最新一条 assistant 消息可用。 */
@@ -102,6 +114,7 @@ function MessageBubble({
   onToggleRef,
   onToggleRefDetail,
   imagePreviewUrls = {},
+  sessionId = null,
   onFeedback,
   onRetry,
   isLastAssistant = false,
@@ -128,7 +141,7 @@ function MessageBubble({
     return (
       <div className="flex flex-col items-end gap-1.5 animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
         {msg.attachments && msg.attachments.length > 0 && (
-          <MessageAttachments attachments={msg.attachments} imagePreviewUrls={imagePreviewUrls} />
+          <MessageAttachments attachments={msg.attachments} imagePreviewUrls={imagePreviewUrls} sessionId={sessionId} />
         )}
         <div className="max-w-[75%]">
           <div className="rounded-2xl rounded-br-md bg-primary text-primary-foreground px-4 py-3 text-sm leading-relaxed shadow-sm">
@@ -180,6 +193,7 @@ function MessageBubble({
                   <Streamdown
                     plugins={{ cjk: cjk }}
                     isAnimating={isStreaming && isLast}
+                    animated={STREAM_ANIMATION}
                   >
                     {msg.content}
                   </Streamdown>
@@ -395,7 +409,7 @@ function AgentStreamContent({
         return (
           <div key={`ans-${i}`} className="text-sm leading-relaxed">
             <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment}>
+              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment} animated={STREAM_ANIMATION}>
                 {seg.content}
               </Streamdown>
             </div>
@@ -632,7 +646,7 @@ function StepRow({
               </p>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
-                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating}>
+                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating} animated={STREAM_ANIMATION}>
                   {seg.content}
                 </Streamdown>
               </div>
@@ -890,22 +904,29 @@ function ReferencesBlock({
 }
 
 // 用户消息附件 chip 行（发送时绑定的会话文件）。展示在用户气泡上方、右对齐。
-// 图片附件若本会话内有预览 URL（客户端 blob）则内联缩略图 + 点击放大；
-// 历史回放（刷新后）无 blob，退化为文件图标 + 文件名，悬浮看全称。
+// 可预览类型（pdf/图片/txt/md/csv）点击 chip 在右侧 Artifact 面板预览（对历史会话同样有效，
+// 原件从 MinIO 按会话+文件 ID 拉取）。图片附件若本会话内有客户端 blob 则内联缩略图。
 function MessageAttachments({
   attachments,
   imagePreviewUrls,
+  sessionId,
 }: {
   attachments: MessageAttachment[]
   imagePreviewUrls: Record<string, string>
+  sessionId?: string | null
 }) {
-  const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
 
   function formatSize(bytes?: number | null): string {
     if (!bytes || bytes <= 0) return ''
     if (bytes < 1024) return `${bytes}B`
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
     return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+  }
+
+  function attachmentExt(a: MessageAttachment): string {
+    if (a.file_type) return a.file_type.toLowerCase()
+    return a.filename.includes('.') ? a.filename.split('.').pop()!.toLowerCase() : ''
   }
 
   return (
@@ -915,19 +936,33 @@ function MessageAttachments({
           const isImg = isImageFilename(a.filename)
           const previewUrl = isImg ? imagePreviewUrls[a.filename] : undefined
           const sz = formatSize(a.file_size)
+          const ext = attachmentExt(a)
+          // 有会话上下文 + 支持的类型 → 点击 chip 在 Artifact 面板预览（历史会话亦可）
+          const canArtifact = !!sessionId && isPreviewable(ext)
+          const onPreview = canArtifact
+            ? () =>
+                openArtifact({
+                  id: a.file_id,
+                  filename: a.filename,
+                  fileType: ext,
+                  source: 'session-file',
+                  sessionId: sessionId!,
+                })
+            : undefined
           return (
             <Tooltip key={a.file_id}>
               <TooltipTrigger asChild>
-                <div className="inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2 rounded-xl border border-border bg-card text-xs text-foreground max-w-[15em] transition-colors hover:border-primary/40">
+                <div
+                  className={cn(
+                    'inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2 rounded-xl border border-border bg-card text-xs text-foreground max-w-[15em] transition-colors hover:border-primary/40',
+                    onPreview && 'cursor-pointer'
+                  )}
+                  onClick={() => onPreview?.()}
+                >
                   {previewUrl ? (
-                    <button
-                      type="button"
-                      onClick={() => setPreview({ url: previewUrl, name: a.filename })}
-                      className="h-6 w-6 shrink-0 rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
-                      aria-label={`预览图片 ${a.filename}`}
-                    >
+                    <span className="h-6 w-6 shrink-0 rounded-md overflow-hidden ring-1 ring-border">
                       <img src={previewUrl} alt="" className="h-full w-full object-cover" />
-                    </button>
+                    </span>
                   ) : (
                     <span className="h-6 w-6 shrink-0 flex items-center justify-center">
                       {isImg ? (
@@ -946,23 +981,12 @@ function MessageAttachments({
                 )}
                 <div className="font-medium break-all leading-snug">{a.filename}</div>
                 {sz && <div className="mt-0.5 text-xs text-muted-foreground">{sz}</div>}
+                {onPreview && <div className="mt-0.5 text-xs text-muted-foreground">点击预览</div>}
               </TooltipContent>
             </Tooltip>
           )
         })}
       </div>
-
-      <Dialog open={!!preview} onOpenChange={(open) => !open && setPreview(null)}>
-        <DialogContent className="max-w-3xl p-3 bg-background">
-          <DialogTitle className="sr-only">{preview?.name ?? '图片预览'}</DialogTitle>
-          {preview && (
-            <div className="flex flex-col gap-2">
-              <img src={preview.url} alt={preview.name} className="w-full max-h-[78vh] rounded-md object-contain" />
-              <p className="text-center text-xs text-muted-foreground break-all">{preview.name}</p>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </TooltipProvider>
   )
 }

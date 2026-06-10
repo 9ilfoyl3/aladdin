@@ -917,6 +917,7 @@ function Chat() {
     onCancelPendingSessionFile: handleCancelPendingSessionFile,
     onDismissPendingSessionFile: handleDismissPendingSessionFile,
     sessionImagePreviewUrls: imagePreviewUrls,
+    sessionId: currentSessionId,
   }
 
   // 空态：标题 + 提问示例气泡 + 居中输入框
@@ -970,6 +971,7 @@ function Chat() {
                   onToggleRef={toggleRef}
                   onToggleRefDetail={toggleRefDetail}
                   imagePreviewUrls={imagePreviewUrls}
+                  sessionId={currentSessionId}
                   onFeedback={handleFeedback}
                   onRetry={handleRetry}
                 />

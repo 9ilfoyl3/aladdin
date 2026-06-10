@@ -5,6 +5,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/comp
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import type { SessionFileResponse } from '@/lib/api'
+import { useArtifactStore, isPreviewable } from '@/stores/artifactStore'
 
 /** 同步上传中的本地占位条目（POST 在飞、尚无服务端 ID）。 */
 export interface PendingSessionFile {
@@ -30,6 +31,8 @@ interface SessionFileListProps {
   onDismissPending: (localId: string) => void
   /** 文件名 → 图片预览 URL（仅本会话内上传的图片可用：服务端临时文件处理后即删） */
   imagePreviewUrls?: Record<string, string>
+  /** 当前会话 ID：用于 Artifact 面板按会话拉取附件原件预览 */
+  sessionId?: string | null
 }
 
 /** 归一化后的 chip 渲染模型，服务端文件与本地占位共用一套展示逻辑。 */
@@ -44,6 +47,8 @@ interface ChipModel {
   onCancel: () => void
   /** 取消按钮的无障碍文案（上传中=取消上传 / 其余=移除） */
   cancelLabel: string
+  /** 可在 Artifact 面板预览（已完成的服务端文件 + 支持的类型）；点击 chip 主体打开 */
+  onPreview?: () => void
 }
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'])
@@ -93,29 +98,51 @@ function SessionFileList({
   onCancelPending,
   onDismissPending,
   imagePreviewUrls = {},
+  sessionId = null,
 }: SessionFileListProps) {
   // 放大预览的图片（点击图片 chip 缩略图时打开）。
   const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
   // 当前悬浮的 chip key：悬浮时把状态图标替换为取消图标（取消按钮不常驻）。
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
 
   if (files.length === 0 && pending.length === 0) return null
 
+  // 文件类型扩展名（小写，无点）
+  function fileExt(filename: string): string {
+    return filename.includes('.') ? filename.split('.').pop()!.toLowerCase() : ''
+  }
+
   // 服务端文件 -> 归一化模型（全状态可取消：处理中=取消，其余=移除）
-  const serverChips: ChipModel[] = files.map((f) => ({
-    key: f.id,
-    filename: f.filename,
-    sizeBytes: f.file_size,
-    status:
-      f.status === 'processing'
-        ? 'processing'
-        : f.status === 'failed'
-          ? 'failed'
-          : 'completed',
-    chunkCount: f.chunk_count,
-    onCancel: () => onRemove(f.id),
-    cancelLabel: f.status === 'processing' ? `取消上传 ${f.filename}` : `移除 ${f.filename}`,
-  }))
+  const serverChips: ChipModel[] = files.map((f) => {
+    const ext = (f.file_type || fileExt(f.filename)).toLowerCase()
+    // 已完成 + 有会话上下文 + 支持的类型（含图片）→ 点击 chip 在 Artifact 面板预览。
+    const previewable = f.status === 'completed' && !!sessionId && isPreviewable(ext)
+    return {
+      key: f.id,
+      filename: f.filename,
+      sizeBytes: f.file_size,
+      status:
+        f.status === 'processing'
+          ? 'processing'
+          : f.status === 'failed'
+            ? 'failed'
+            : 'completed',
+      chunkCount: f.chunk_count,
+      onCancel: () => onRemove(f.id),
+      cancelLabel: f.status === 'processing' ? `取消上传 ${f.filename}` : `移除 ${f.filename}`,
+      onPreview: previewable
+        ? () =>
+            openArtifact({
+              id: f.id,
+              filename: f.filename,
+              fileType: ext,
+              source: 'session-file',
+              sessionId: sessionId!,
+            })
+        : undefined,
+    }
+  })
 
   // 本地占位 -> 归一化模型（上传中=中止 POST；失败=本地关闭）
   const pendingChips: ChipModel[] = pending.map((p) => ({
@@ -185,12 +212,14 @@ function SessionFileList({
                 <div
                   className={cn(
                     'group inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2 rounded-xl border text-xs transition-colors max-w-[15em]',
-                    STATUS_CHIP_CLASS[c.status]
+                    STATUS_CHIP_CLASS[c.status],
+                    c.onPreview && 'cursor-pointer'
                   )}
                   onMouseEnter={() => setHoveredKey(c.key)}
                   onMouseLeave={() => setHoveredKey((k) => (k === c.key ? null : k))}
                   onFocus={() => setHoveredKey(c.key)}
                   onBlur={() => setHoveredKey((k) => (k === c.key ? null : k))}
+                  onClick={() => c.onPreview?.()}
                 >
                   {/* 前导槽：图片缩略图（可点开大图）；非图片时为状态图标，悬浮替换为取消按钮 */}
                   {canPreview ? (
@@ -200,7 +229,13 @@ function SessionFileList({
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setPreview({ url: previewUrl!, name: c.filename })}
+                          onClick={(e) => {
+                            // 有 Artifact 能力（已落库的服务端图片）→ 交给 chip 的 onPreview
+                            // 在右侧面板打开；否则退回本地放大弹窗（仅本次上传的客户端 blob）。
+                            if (c.onPreview) return
+                            e.stopPropagation()
+                            setPreview({ url: previewUrl!, name: c.filename })
+                          }}
                           className="h-full w-full rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
                           aria-label={`预览图片 ${c.filename}`}
                         >

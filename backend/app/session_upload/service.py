@@ -20,8 +20,10 @@
 ``retrieval-pipeline-hardening`` 的失效广播基础设施），避免其他 API 进程在
 ``load_cache_ttl`` 内仍读到已删向量。
 
-embedding 走 ``DocumentPipeline`` 的全局信号量；上传文件落盘到
-``data/uploads/sessions/`` 仅供同步处理使用，处理完毕（成功 / 失败）后删除。
+embedding 走 ``DocumentPipeline`` 的全局信号量；上传文件同时落盘到
+``data/uploads/sessions/`` 临时区（仅供同步建索引使用，处理完即删）并持久化到 MinIO
+（``sessions/{session_id}/{file_id}.{ext}``）以支持后续原件预览/下载。删单文件 / 删会话
+时同步清理 MinIO 对象。
 """
 
 from __future__ import annotations
@@ -42,6 +44,11 @@ from app.schema.db import SessionChunk, SessionFile
 from app.storage.database import async_session
 from app.storage.invalidation import get_invalidation_bus
 from app.storage.milvus import SESSION_FILES_KB_ID, get_milvus_client
+from app.storage.object_store import (
+    get_object_store,
+    session_file_object_key,
+    session_prefix,
+)
 
 if TYPE_CHECKING:
     from app.session_upload.limits import UploadLimits
@@ -172,6 +179,35 @@ class SessionUploadService:
             )
             return [_row_to_vo(row) for row in result.scalars().all()]
 
+    async def get_file_raw(
+        self, *, session_id: str, file_id: str
+    ) -> tuple[bytes, str, str]:
+        """读取会话文件原件（供预览/下载）。
+
+        Returns:
+            (内容字节, 文件名, 文件类型扩展名)。
+
+        Raises:
+            ValueError: 文件不存在 / 不属于该会话。
+            RuntimeError: 对象存储不可用。
+            FileNotFoundError: 对象已丢失（DB 有行但 MinIO 无对象）。
+        """
+        async with self._db_session_factory() as session:
+            row = await session.get(SessionFile, file_id)
+            if row is None or row.session_id != session_id:
+                raise ValueError("文件不存在或不属于该会话")
+            filename = row.filename
+            ext = (row.file_type or "").lower()
+
+        store = get_object_store()
+        if store is None:
+            raise RuntimeError("对象存储不可用")
+        key = session_file_object_key(session_id, file_id, ext)
+        if not await store.exists(key):
+            raise FileNotFoundError("原始文件不存在")
+        data = await store.get_bytes(key)
+        return data, filename, ext
+
     # ------------------------------------------------------------------
     # 写路径
     # ------------------------------------------------------------------
@@ -208,12 +244,21 @@ class SessionUploadService:
         if file_size > limits.upload_max_file_bytes:
             raise FileTooLargeError.from_limit(limits.upload_max_file_bytes)
 
-        # 2) 落盘到临时区（处理完毕 finally 中删除）
+        # 2) 落盘到临时区（处理完毕 finally 中删除）+ 持久化到 MinIO（保留原件）
         ext = Path(filename).suffix.lstrip(".").lower()
         file_id = str(uuid.uuid4())
         _SESSION_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         save_path = _SESSION_UPLOAD_DIR / f"{file_id}.{ext}"
         save_path.write_bytes(content)
+
+        # 持久化原件到 MinIO（权威长期存储，供后续预览/下载）。失败则整体失败：
+        # 会话附件需保留，存不进对象存储应让用户知晓而非静默丢原件。
+        object_key = session_file_object_key(session_id, file_id, ext)
+        store = get_object_store()
+        if store is None:
+            self._cleanup_temp_file(save_path)
+            raise RuntimeError("对象存储不可用，无法保存会话附件")
+        await store.put_bytes(object_key, content)
 
         try:
             # 4) Pipeline 不依赖 Document 表的同步处理单元（Load→OCR→Clean→Chunk→
@@ -361,8 +406,12 @@ class SessionUploadService:
             # 回读最新 SessionFile（取 server_default 时间字段填充 VO）
             return await self._fetch_one(file_id)
 
+        except Exception:
+            # 建索引 / 写库失败：原件对象不应残留（DB 无对应 SessionFile 行）。
+            await self._safe_remove_object(object_key)
+            raise
         finally:
-            # 临时文件无论成败均清理（向量与 chunk 文本已落库，原文件不再需要）
+            # 临时文件无论成败均清理（向量与 chunk 文本已落库，原文件已存 MinIO）
             self._cleanup_temp_file(save_path)
 
     async def remove_file(
@@ -404,6 +453,11 @@ class SessionUploadService:
             await session.delete(row)
             await session.commit()
 
+        # 删 MinIO 原件（按 session_id/file_id/ext 拼 key）。失败仅记 WARNING。
+        await self._safe_remove_object(
+            session_file_object_key(session_id, file_id, (row.file_type or "").lower())
+        )
+
         # 失效广播（与上传路径同款 kb_data 信号，main.py 的 _handle_kb_data 处理）
         await self._publish_invalidation()
 
@@ -423,6 +477,14 @@ class SessionUploadService:
             await self.milvus.delete_session(session_id)
         except Exception as e:
             logger.warning("会话 %s 向量清理失败（非致命）: %s", session_id, e)
+
+        # 删该会话在 MinIO 的全部原件（按前缀）。失败仅记 WARNING。
+        try:
+            store = get_object_store()
+            if store is not None:
+                await store.remove_prefix(session_prefix(session_id))
+        except Exception as e:
+            logger.warning("会话 %s MinIO 原件清理失败（非致命）: %s", session_id, e)
 
         try:
             async with self._db_session_factory() as session:
@@ -452,6 +514,16 @@ class SessionUploadService:
             logger.warning(
                 "会话文件 %s 失败清理向量异常（可能本无残留）: %s", file_id, e
             )
+
+    @staticmethod
+    async def _safe_remove_object(object_key: str) -> None:
+        """删除 MinIO 对象（幂等，失败仅记 WARNING）。"""
+        try:
+            store = get_object_store()
+            if store is not None:
+                await store.remove(object_key)
+        except Exception as e:
+            logger.warning("会话附件对象 %s 删除异常（可能本无残留）: %s", object_key, e)
 
     async def _publish_invalidation(self) -> None:
         """publish ``kb_session_files`` 的 ``_loaded_at`` 失效信号。
