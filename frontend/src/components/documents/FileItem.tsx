@@ -37,6 +37,7 @@ export interface UploadingFile {
 export interface MergedFile {
   id: string
   filename: string
+  file_type?: string
   file_size: number
   status: string
   error_message: string | null

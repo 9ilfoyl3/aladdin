@@ -29,6 +29,7 @@ import { useConfirm } from '@/lib/confirm-context'
 import { useAuth } from '@/lib/auth-context'
 import ProfileDialog from '@/components/ProfileDialog'
 import SettingsDialog from '@/components/SettingsDialog'
+import ArtifactPanel from '@/components/artifact/ArtifactPanel'
 
 // 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
 // - content：内容菜单，member/admin 均可见；
@@ -369,9 +370,12 @@ function Layout() {
         </div>
       </aside>
 
-      {/* 主内容区 */}
-      <main className={cn('flex-1 overflow-auto bg-background', !isChat && 'p-6')}>
-        <Outlet />
+      {/* 主内容区 + Artifact 预览面板（flex 行：面板占用空间、从右滑入推挤内容） */}
+      <main className="flex-1 min-w-0 flex overflow-hidden">
+        <div className={cn('flex-1 min-w-0 overflow-auto bg-background', !isChat && 'p-6')}>
+          <Outlet />
+        </div>
+        <ArtifactPanel />
       </main>
 
       {/* 个人资料弹窗 */}

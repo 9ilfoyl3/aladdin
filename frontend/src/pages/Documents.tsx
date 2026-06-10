@@ -3,11 +3,13 @@ import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
+import { useArtifactStore, isPreviewable } from '@/stores/artifactStore'
 import {
   Upload,
   FileText,
   ArrowLeft,
   Eye,
+  FileSearch,
   Trash2,
   Copy,
   FolderPlus,
@@ -77,6 +79,7 @@ function Documents() {
   const confirm = useConfirm()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
 
   // 导航状态
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null)
@@ -323,6 +326,18 @@ function Documents() {
     if (ok) deleteMutation.mutate(doc.id)
   }
 
+  // 在 Artifact 面板预览文档原件（仅支持可预览类型，如 PDF）
+  function handlePreviewDocument(doc: MergedFile) {
+    if (doc.isLocal) return
+    const fileType = (doc.file_type || doc.filename.split('.').pop() || '').toLowerCase()
+    openArtifact({
+      id: doc.id,
+      filename: doc.filename,
+      fileType,
+      source: 'document',
+    })
+  }
+
   // 批量删除文档
   async function handleBatchDelete() {
     if (selectedIds.size === 0) return
@@ -537,6 +552,7 @@ function Documents() {
     ...documents.map((doc) => ({
       id: doc.id,
       filename: doc.filename,
+      file_type: doc.file_type,
       file_size: doc.file_size,
       status: doc.status,
       error_message: doc.error_message,
@@ -775,7 +791,10 @@ function Documents() {
             )}
           </div>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 2xl:grid-cols-10 gap-2 p-2 animate-in fade-in-0 duration-500">
+          <div
+            className="grid gap-2 p-2 animate-in fade-in-0 duration-500"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(116px, 1fr))' }}
+          >
             {/* 文件夹列表 */}
             {folders.map((folder) => (
               <ContextMenu key={folder.id}>
@@ -863,6 +882,13 @@ function Documents() {
                     </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
+                    <ContextMenuItem
+                      disabled={!isPreviewable(doc.file_type)}
+                      onClick={() => handlePreviewDocument(doc)}
+                    >
+                      <FileSearch className="h-4 w-4 mr-2" />
+                      预览原件
+                    </ContextMenuItem>
                     <ContextMenuItem
                       disabled={doc.status !== 'completed'}
                       onClick={() => setViewingChunks(doc.id)}
@@ -1027,7 +1053,18 @@ function Documents() {
                               variant="ghost"
                               size="sm"
                               className="h-7 text-xs gap-1 cursor-pointer"
+                              disabled={!isPreviewable(doc.file_type)}
+                              title="预览原件"
+                              onClick={(e) => { e.stopPropagation(); handlePreviewDocument(doc) }}
+                            >
+                              <FileSearch className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs gap-1 cursor-pointer"
                               disabled={doc.status !== 'completed'}
+                              title="查看切片"
                               onClick={(e) => { e.stopPropagation(); setViewingChunks(doc.id) }}
                             >
                               <Eye className="h-3 w-3" />
