@@ -232,6 +232,19 @@ export const documentApi = {
     const blob = await response.blob()
     return URL.createObjectURL(blob)
   },
+  // 拉取文档原件（用于原件在线预览/下载）：同样需 Authorization 头，故用 fetch 取
+  // blob 生成 objectURL。调用方负责在不再使用时 URL.revokeObjectURL 释放。
+  rawFile: async (id: string): Promise<string> => {
+    const response = await fetch(`${BASE_URL}/documents/${id}/raw`, {
+      headers: authHeaders(),
+    })
+    if (!response.ok) {
+      if (response.status === 401) handleUnauthorized()
+      throw new Error(`加载原件失败: ${response.status}`)
+    }
+    const blob = await response.blob()
+    return URL.createObjectURL(blob)
+  },
 }
 
 // 文件夹相关接口

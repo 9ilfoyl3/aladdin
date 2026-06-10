@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -254,3 +255,52 @@ async def remove_session_file(
         # 404（存在性非泄露，与会话不存在同文案，复用 CrossTenantError 全局映射）。
         raise CrossTenantError()
     return None
+
+
+@router.get(
+    "/{file_id}/raw",
+    summary="获取会话文件原件",
+    description=(
+        "返回会话内某文件的原始内容（用于原件在线预览/下载）。源文件存于对象存储，"
+        "流式透传。仅本人可访问。"
+    ),
+)
+async def get_session_file_raw(
+    session_id: str,
+    file_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """返回会话文件原件（用于原件在线预览/下载）。"""
+    await _verify_session_owner(db, session_id, identity)
+    service = get_session_upload_service()
+    try:
+        data, filename, ext = await service.get_file_raw(
+            session_id=session_id, file_id=file_id
+        )
+    except ValueError:
+        # 不存在 / 不属于该会话 → 404（存在性非泄露）
+        raise CrossTenantError()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="原始文件不存在")
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="对象存储不可用")
+
+    from urllib.parse import quote
+
+    media_type_map = {
+        "pdf": "application/pdf",
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+        "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8",
+        "csv": "text/csv; charset=utf-8",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    media_type = media_type_map.get(ext, "application/octet-stream")
+    disposition = f"inline; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
+    )

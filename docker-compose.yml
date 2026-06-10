@@ -144,6 +144,12 @@ services:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - REDIS_URL=redis://redis:6379/0
+      # 对象存储（知识库源文件权威存储）：复用 Milvus 的 MinIO，独立 bucket 隔离
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_SECURE=false
+      - MINIO_BUCKET=aladdin-documents
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
@@ -153,6 +159,8 @@ services:
       milvus:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     restart: unless-stopped
 
@@ -169,6 +177,12 @@ services:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - REDIS_URL=redis://redis:6379/0
+      # 对象存储（知识库源文件权威存储）：复用 Milvus 的 MinIO，独立 bucket 隔离
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_SECURE=false
+      - MINIO_BUCKET=aladdin-documents
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
@@ -178,6 +192,8 @@ services:
       milvus:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     restart: unless-stopped
 

@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
+    # MinIO / 对象存储（知识库源文件权威存储）
+    # endpoint 形如 "localhost:9000"（不带 scheme）；secure=True 时走 https。
+    # 复用为 Milvus 部署的同一 MinIO，但用独立 bucket 隔离业务文件与 Milvus 内部数据。
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_secure: bool = False
+    minio_bucket: str = "aladdin-documents"
+    # 启动期对账孤儿对象的宽限期（秒）：仅删除 last_modified 早于 now-grace 的孤儿对象，
+    # 避免误删正在上传/建索引中（DB 行尚未提交）的新对象。
+    minio_orphan_grace_seconds: int = 3600
+
     # LLM
     llm_provider: str = "ollama"  # ollama | vllm
     llm_base_url: str = "http://localhost:11434"
