@@ -122,10 +122,7 @@ function MessageBubble({
   }
 
   return (
-    <div className="flex gap-3 items-start animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
-      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-1">
-        <Bot className="h-4 w-4 text-primary" />
-      </div>
+    <div className="animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
       <div className="flex-1 min-w-0 space-y-2">
         {/* 新格式：交错流式段落渲染 */}
         {msg.segments && msg.segments.length > 0 ? (
@@ -349,7 +346,7 @@ function StepSummaryPanel({
         className="w-full flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-muted/40 transition-colors cursor-pointer"
       >
         {running ? (
-          <Loader2 className="h-4 w-4 shrink-0 text-primary animate-spin" />
+          <Sparkles className="h-4 w-4 shrink-0 text-primary animate-twinkle" />
         ) : (
           <Sparkles className="h-4 w-4 shrink-0 text-primary" />
         )}

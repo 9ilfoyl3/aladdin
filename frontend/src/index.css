@@ -317,6 +317,26 @@
   }
 }
 
+/* 星星抽帧闪烁：离散关键帧 + steps 缓动，缩放 + 旋转，帧数偏少以呈现略带卡顿的逐帧定格感 */
+@keyframes twinkle {
+  0%    { opacity: 1;    transform: scale(1)    rotate(0deg);   }
+  9.09% { opacity: 0.9;  transform: scale(0.86) rotate(30deg);  }
+  18.18%{ opacity: 0.79; transform: scale(0.73) rotate(60deg);  }
+  27.27%{ opacity: 0.67; transform: scale(0.6)  rotate(90deg);  }
+  36.36%{ opacity: 0.54; transform: scale(0.47) rotate(120deg); }
+  45.45%{ opacity: 0.42; transform: scale(0.36) rotate(150deg); }
+  54.54%{ opacity: 0.42; transform: scale(0.36) rotate(180deg); }
+  63.63%{ opacity: 0.54; transform: scale(0.47) rotate(210deg); }
+  72.72%{ opacity: 0.67; transform: scale(0.6)  rotate(240deg); }
+  81.81%{ opacity: 0.79; transform: scale(0.73) rotate(270deg); }
+  90.9% { opacity: 0.9;  transform: scale(0.86) rotate(300deg); }
+  100%  { opacity: 1;    transform: scale(1)    rotate(330deg); }
+}
+
+.animate-twinkle {
+  animation: twinkle 2s steps(1, end) infinite;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
