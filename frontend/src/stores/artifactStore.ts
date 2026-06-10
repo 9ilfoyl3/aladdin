@@ -41,7 +41,7 @@ export const useArtifactStore = create<ArtifactState>((set) => ({
 }))
 
 /** 当前可被 artifact 预览的文件类型（随 previewer 增加而扩展）。 */
-const PREVIEWABLE_TYPES = new Set(['pdf'])
+const PREVIEWABLE_TYPES = new Set(['pdf', 'jpg', 'jpeg', 'png', 'txt', 'md', 'csv'])
 
 export function isPreviewable(fileType: string | undefined | null): boolean {
   if (!fileType) return false

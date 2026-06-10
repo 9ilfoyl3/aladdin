@@ -4,6 +4,10 @@ import { cn } from '@/lib/utils'
 import { documentApi, sessionFileApi } from '@/lib/api'
 import { useArtifactStore, type ArtifactTarget } from '@/stores/artifactStore'
 import PdfPreview from './previews/PdfPreview'
+import ImagePreview from './previews/ImagePreview'
+import TextPreview from './previews/TextPreview'
+import MarkdownPreview from './previews/MarkdownPreview'
+import CsvPreview from './previews/CsvPreview'
 
 /**
  * Artifact 公用预览面板。
@@ -11,13 +15,17 @@ import PdfPreview from './previews/PdfPreview'
  * 设计要点（满足需求）：
  * - 从右侧滑入，作为 flex 兄弟节点「占用空间」（非浮层）：宽度 0 ↔ 固定宽度过渡，
  *   主内容区被自然挤压，配合 transition 形成流畅推拉动画。
- * - 承载不同类型的预览器（registry 按 fileType 分发），当前支持 PDF，后续可扩展
- *   docx / xlsx / image 等，只需在 renderPreview 增加分支。
- * - 原件字节由本组件统一按来源（document / session-file）拉取为 blob objectURL，
- *   并在切换 / 卸载时 revoke，避免内存泄漏。数据流单向：store(target) → fetch → previewer。
+ * - 承载不同类型的预览器（registry 按 fileType 分发）：PDF / 图片走 blob objectURL，
+ *   txt / md / csv 走纯文本内容。office 暂不支持（需重依赖）。
+ * - 原件字节由本组件统一按来源（document / session-file）拉取为 blob，按类别派生
+ *   objectURL 或文本，并在切换 / 卸载时 revoke，避免内存泄漏。
+ *   数据流单向：store(target) → fetch → previewer。
  */
 
 const PANEL_WIDTH = 'w-[clamp(420px,42vw,860px)]'
+
+// 文本类预览（读取 blob.text()）与二进制类预览（用 objectURL）分流
+const TEXT_TYPES = new Set(['txt', 'md', 'csv'])
 
 function ArtifactPanel() {
   const { open, target, closeArtifact } = useArtifactStore()
@@ -25,6 +33,8 @@ function ArtifactPanel() {
   // 关闭动画期间保留内容，动画结束后再清空，避免内容在滑出过程中闪烁/塌缩。
   const [mountedTarget, setMountedTarget] = useState<ArtifactTarget | null>(target)
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // 同步 target：打开或切换文件时立即更新挂载内容
@@ -32,13 +42,17 @@ function ArtifactPanel() {
     if (target) setMountedTarget(target)
   }, [target])
 
-  // 拉取原件 blob，按来源选择接口；切换/卸载时 revoke 旧 URL
+  // 拉取原件，按来源选择接口、按类型派生 objectURL / 文本；切换/卸载时 revoke
   useEffect(() => {
     if (!open || !target) return
     let revoked = false
     let createdUrl: string | null = null
     setObjectUrl(null)
+    setTextContent(null)
     setError(null)
+    setLoading(true)
+
+    const isText = TEXT_TYPES.has(target.fileType.toLowerCase())
 
     const fetchRaw =
       target.source === 'session-file' && target.sessionId
@@ -46,16 +60,30 @@ function ArtifactPanel() {
         : documentApi.rawFile(target.id)
 
     fetchRaw
-      .then((url) => {
+      .then(async (url) => {
         if (revoked) {
           URL.revokeObjectURL(url)
           return
         }
-        createdUrl = url
-        setObjectUrl(url)
+        if (isText) {
+          // 文本类：读取内容后即可释放 objectURL（不需要长期持有）
+          try {
+            const resp = await fetch(url)
+            const txt = await resp.text()
+            if (!revoked) setTextContent(txt)
+          } finally {
+            URL.revokeObjectURL(url)
+          }
+        } else {
+          createdUrl = url
+          setObjectUrl(url)
+        }
       })
       .catch((e) => {
         if (!revoked) setError(e instanceof Error ? e.message : '加载失败')
+      })
+      .finally(() => {
+        if (!revoked) setLoading(false)
       })
 
     return () => {
@@ -69,6 +97,7 @@ function ArtifactPanel() {
     if (!open) {
       setMountedTarget(null)
       setObjectUrl(null)
+      setTextContent(null)
       setError(null)
     }
   }
@@ -79,6 +108,16 @@ function ArtifactPanel() {
     switch (type) {
       case 'pdf':
         return <PdfPreview objectUrl={objectUrl} error={error} />
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+        return <ImagePreview objectUrl={objectUrl} error={error} />
+      case 'txt':
+        return <TextPreview text={textContent} loading={loading} error={error} />
+      case 'md':
+        return <MarkdownPreview text={textContent} loading={loading} error={error} />
+      case 'csv':
+        return <CsvPreview text={textContent} loading={loading} error={error} />
       default:
         return (
           <div className="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -88,6 +127,10 @@ function ArtifactPanel() {
         )
     }
   }
+
+  // 下载链接：文本类在拉取后已 revoke objectURL，故用接口直链兜底（带鉴权由浏览器走代理）。
+  // 这里统一在有 objectUrl 时提供下载；文本类不展示 objectURL 下载按钮（避免失效链接）。
+  const canDownload = !!objectUrl && !!mountedTarget
 
   return (
     <div
@@ -107,10 +150,10 @@ function ArtifactPanel() {
           <span className="flex-1 truncate text-sm font-medium" title={mountedTarget?.filename}>
             {mountedTarget?.filename ?? '预览'}
           </span>
-          {objectUrl && mountedTarget && (
+          {canDownload && (
             <a
-              href={objectUrl}
-              download={mountedTarget.filename}
+              href={objectUrl!}
+              download={mountedTarget!.filename}
               className="h-7 w-7 rounded-md flex items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
               title="下载原件"
             >
