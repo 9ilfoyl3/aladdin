@@ -202,7 +202,7 @@ do_update() {
   local SERVICE="${2:-}"
   echo "=== 更新应用（加载新镜像 + 重建容器）==="
 
-  # 记录加载前的应用镜像 ID（确定性判断镜像是否真的更新了）
+  # 记录加载前的应用镜像 ID（仅用于打印变化提示，不作为终止依据）
   local before_backend before_frontend
   before_backend=$(docker images -q artoo-backend:latest 2>/dev/null)
   before_frontend=$(docker images -q artoo-frontend:latest 2>/dev/null)
@@ -222,28 +222,18 @@ do_update() {
     exit 1
   fi
 
-  # 对比加载后的镜像 ID：若未变化，说明加载的是旧包（或包没传对），终止更新
+  # 镜像 ID 变化仅作信息提示：手动 docker load 过镜像等场景下 ID 可能不变，
+  # 但 update 仍应照常重建容器，不再因“镜像未变化”终止。
   local after_backend after_frontend
   after_backend=$(docker images -q artoo-backend:latest 2>/dev/null)
   after_frontend=$(docker images -q artoo-frontend:latest 2>/dev/null)
-
   if [[ "$before_backend" == "$after_backend" && "$before_frontend" == "$after_frontend" ]]; then
-    echo ""
-    echo "  ❌ 镜像未发生变化，更新已终止。"
-    echo "     backend 镜像ID : ${after_backend:-（无）}"
-    echo "     frontend 镜像ID: ${after_frontend:-（无）}"
-    echo "     backend 构建于 : $(docker images artoo-backend:latest --format '{{.CreatedSince}}' 2>/dev/null || echo 未知)"
-    echo ""
-    echo "  可能原因：上传的 app-images.tar 不是最新包（传错目录 / 没覆盖旧文件）。"
-    echo "  请确认本地已重新打包，并把新的 app-images.tar 传到当前目录后重试。"
-    echo "  当前目录 tar 文件："
-    ls -lh *.tar 2>/dev/null | awk '{print "     " $9 "  " $5 "  " $6" "$7" "$8}'
-    exit 1
+    echo "  ℹ️ 镜像 ID 未变化（可能已手动 load 过），仍将继续重建容器。"
+  else
+    echo "  ✓ 镜像已更新："
+    [[ "$before_backend" != "$after_backend" ]] && echo "    backend : ${before_backend:-无} → $after_backend"
+    [[ "$before_frontend" != "$after_frontend" ]] && echo "    frontend: ${before_frontend:-无} → $after_frontend"
   fi
-
-  echo "  ✓ 镜像已更新："
-  [[ "$before_backend" != "$after_backend" ]] && echo "    backend : ${before_backend:-无} → $after_backend"
-  [[ "$before_frontend" != "$after_frontend" ]] && echo "    frontend: ${before_frontend:-无} → $after_frontend"
 
   echo "[2/3] 处理 compose 文件兼容性..."
   ensure_compose_compat

@@ -1,0 +1,13 @@
+# 统一换行符规范，避免跨平台 checkout/打包时 shell 脚本被转成 CRLF
+# 导致在 Linux 上 `set -euo pipefail` 报 "invalid option name" 等问题。
+
+# 默认按内容自动处理文本/二进制
+* text=auto
+
+# Shell 脚本必须始终为 LF（在 Linux 服务器上执行）
+*.sh text eol=lf
+
+# Windows 批处理 / PowerShell 保持各自平台换行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
