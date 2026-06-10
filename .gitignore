@@ -96,3 +96,6 @@ data/
 deploy-*/
 deploy-package/
 deploy-package.zip
+
+# 第三方集成文档（本地参考，不纳入版本管理）
+backend/docs/third-party-integration.md

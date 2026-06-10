@@ -80,6 +80,18 @@ def is_qwen_thinking_model(model: str) -> bool:
     )
 
 
-def is_deepseek_v3_model(model: str) -> bool:
-    """是否为 DeepSeek-V3.x 系列（thinking 可显式开关；R1 默认开启不需控制）。"""
-    return "deepseek-v3" in (model or "").lower()
+def is_deepseek_thinking_model(model: str) -> bool:
+    """是否为需显式开关 thinking 的 DeepSeek 模型（V3 及以后：V3 / V3.x / V4 / flash / pro…）。
+
+    R1（deepseek-reasoner）思考默认开启、不需也不应注入开关，故排除。其余 deepseek-*
+    一律按"支持显式 thinking 开关"处理——新版本命名（v4 / flash / pro）层出不穷，用
+    "是 deepseek 且非 R1"的宽松规则兜底，避免像旧的 ``"deepseek-v3" in model`` 那样
+    对新命名漏匹配，导致 thinking 开关不注入、思维链混入正文。
+    """
+    name = (model or "").lower()
+    if "deepseek" not in name:
+        return False
+    # R1 / reasoner：思考默认开启，不注入开关。
+    if "reasoner" in name or "-r1" in name or name.endswith("r1"):
+        return False
+    return True

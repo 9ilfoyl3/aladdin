@@ -532,6 +532,7 @@ export interface AgentPresetItem {
     temperature?: number
     thinking_enabled?: boolean
     allowed_tools?: string[]
+    custom_instructions?: string
   } | null
   is_default: boolean
   created_at: string
@@ -546,10 +547,6 @@ export interface AgentPresetItem {
 
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
-  placeholders: () => request<{
-    placeholders: { name: string; description: string }[]
-    default_prompt: string
-  }>('/agent-presets/placeholders'),
   rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
     request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
       method: 'POST',
@@ -567,6 +564,39 @@ export const agentPresetApi = {
     }),
   delete: (id: string) =>
     request<void>(`/agent-presets/${id}`, { method: 'DELETE' }),
+}
+
+// 自定义技能（Agent Skills）接口。每个用户维护自己的技能（per-user），
+// 对话时与平台预置技能合并，Agent 按需通过 read_skill 加载。
+export interface CustomSkillItem {
+  id: string
+  name: string
+  description: string
+  instructions: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const skillsApi = {
+  list: () => request<CustomSkillItem[]>('/skills'),
+  generate: (data: { instruction: string }) =>
+    request<{ name: string; description: string; instructions: string }>('/skills/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  create: (data: { name: string; description: string; instructions: string; enabled?: boolean }) =>
+    request<CustomSkillItem>('/skills', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: { name?: string; description?: string; instructions?: string; enabled?: boolean }) =>
+    request<CustomSkillItem>(`/skills/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/skills/${id}`, { method: 'DELETE' }),
 }
 
 // 会话相关接口类型
@@ -590,6 +620,7 @@ export interface SessionMessageItem {
     content: boolean
     tool_call_id: string
     tool_name: string
+    arguments?: Record<string, unknown>
     success: any
     duration_ms: number | undefined
     step: string
@@ -600,6 +631,7 @@ export interface SessionMessageItem {
   attachments: MessageAttachment[] | null
   kb_id: string | null
   kb_ids: string[] | null
+  feedback?: 'like' | 'dislike' | null
   created_at: string
 }
 
@@ -700,6 +732,16 @@ export const sessionApi = {
     request<SessionMessageItem[]>(`/sessions/${id}/messages`),
   clearMessages: (id: string) =>
     request<void>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+  setMessageFeedback: (sessionId: string, messageId: string, feedback: 'like' | 'dislike' | null) =>
+    request<{ detail: string; feedback: string | null }>(
+      `/sessions/${sessionId}/messages/${messageId}/feedback`,
+      { method: 'PUT', body: JSON.stringify({ feedback }) },
+    ),
+  retryLastRound: (sessionId: string) =>
+    request<{ content: string; attachments: MessageAttachment[] | null; kb_id: string | null; kb_ids: string[] | null }>(
+      `/sessions/${sessionId}/messages/retry`,
+      { method: 'POST' },
+    ),
 }
 
 

@@ -23,7 +23,7 @@ from typing import Callable
 from app.models.llm.provider_detect import (
     LLMProviderName,
     detect_provider,
-    is_deepseek_v3_model,
+    is_deepseek_thinking_model,
     is_qwen_thinking_model,
 )
 
@@ -50,11 +50,15 @@ def _generic_vllm(payload: dict, enable: bool, model: str) -> dict:
 
 
 def _aliyun_qwen(payload: dict, enable: bool, model: str) -> dict:
-    """阿里云 DashScope（Qwen 云）：顶层 enable_thinking。
+    """阿里云 DashScope / 百炼（compatible-mode）：顶层 enable_thinking。
 
-    仅对支持思维链的 Qwen 模型注入；其它阿里云模型保持原样。
+    百炼网关对 Qwen 与 DeepSeek（v3.x / v4 系列）统一用顶层 ``enable_thinking`` 参数
+    控制思考模式（见百炼 DeepSeek API 文档）。此前仅放行 Qwen，导致在百炼上跑
+    DeepSeek 时 thinking 开关不注入 → 思维链混入普通 content 被当正文展示。
+    R1（deepseek-reasoner）思考默认开启，由 is_deepseek_thinking_model 排除、不注入。
+    其它阿里云模型保持原样。
     """
-    if is_qwen_thinking_model(model):
+    if is_qwen_thinking_model(model) or is_deepseek_thinking_model(model):
         payload["enable_thinking"] = enable
     return payload
 
@@ -66,8 +70,8 @@ def _thinking_type(payload: dict, enable: bool, model: str) -> dict:
 
 
 def _lkeap(payload: dict, enable: bool, model: str) -> dict:
-    """腾讯云 LKEAP：仅 DeepSeek-V3.x 需显式开关；R1 默认开启不注入。"""
-    if is_deepseek_v3_model(model):
+    """腾讯云 LKEAP：DeepSeek-V3 及以后（V3/V3.x/V4…）需显式开关；R1 默认开启不注入。"""
+    if is_deepseek_thinking_model(model):
         payload["thinking"] = {"type": "enabled" if enable else "disabled"}
     return payload
 
@@ -78,6 +82,11 @@ _DIALECTS: dict[LLMProviderName, ThinkingCustomizer] = {
     LLMProviderName.NVIDIA: _generic_vllm,
     LLMProviderName.ALIYUN: _aliyun_qwen,
     LLMProviderName.VOLCENGINE: _thinking_type,
+    # DeepSeek 官方端点（api.deepseek.com）：思考开关协议与火山一致，均为
+    # thinking:{type: enabled|disabled}（见官方 thinking_mode 文档）。此前缺失此项
+    # → 走 _noop 不注入任何字段 → 模型把思维链写进普通 content（而非 reasoning_content
+    # 通道）→ 前端无法区分思考与正文，思维链被当作答案展示。
+    LLMProviderName.DEEPSEEK: _thinking_type,
     LLMProviderName.LKEAP: _lkeap,
 }
 

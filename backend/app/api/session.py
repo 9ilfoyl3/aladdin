@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func, delete
 
 from app.api.deps import require_authenticated
-from app.api.errors import CrossTenantError, PermissionDeniedError
+from app.api.errors import CrossTenantError, NotFoundError, PermissionDeniedError, ValidationInputError
 from app.auth.identity import IdentityContext
 from app.config import get_settings
 from app.schema.db import ChatSession, ChatMessageRecord
@@ -68,7 +68,21 @@ class MessageItem(BaseModel):
     attachments: list | None = None
     kb_id: str | None = None
     kb_ids: list | None = None
+    feedback: str | None = None
     created_at: datetime
+
+
+class FeedbackUpdate(BaseModel):
+    """消息反馈请求：点赞/踩/取消（取消传 null）。"""
+    feedback: str | None = Field(default=None, description="like | dislike | null（取消）")
+
+
+class RetryResult(BaseModel):
+    """重试结果：返回被移除的那一轮用户消息，供前端原样重发。"""
+    content: str
+    attachments: list | None = None
+    kb_id: str | None = None
+    kb_ids: list | None = None
 
 
 def _ensure_not_super_admin_content(identity: IdentityContext) -> None:
@@ -248,7 +262,8 @@ async def get_session_messages(
                 id=m.id, role=m.role, content=m.content,
                 references=m.references, agent_steps=m.agent_steps,
                 attachments=m.attachments,
-                kb_id=m.kb_id, kb_ids=m.kb_ids, created_at=m.created_at,
+                kb_id=m.kb_id, kb_ids=m.kb_ids, feedback=m.feedback,
+                created_at=m.created_at,
             )
             for m in messages
         ]
@@ -268,3 +283,72 @@ async def clear_session_messages(
         )
         await session.commit()
     return {"detail": "已清空"}
+
+
+@router.put("/{session_id}/messages/{message_id}/feedback")
+async def set_message_feedback(
+    session_id: str,
+    message_id: str,
+    req: FeedbackUpdate,
+    identity: IdentityContext = Depends(require_authenticated()),
+):
+    """设置/取消某条 AI 回答的反馈（点赞 like / 踩 dislike / null 取消）。
+
+    反馈仅先落库保留，供后续 agent 优化与质量评估，不参与当前对话逻辑。
+    """
+    if req.feedback not in (None, "like", "dislike"):
+        raise ValidationInputError("反馈取值非法（仅支持 like / dislike / null）")
+    async with async_session() as session:
+        await _get_owned_session(session, session_id, identity)
+        msg = await session.get(ChatMessageRecord, message_id)
+        if msg is None or msg.session_id != session_id:
+            raise NotFoundError("消息不存在")
+        if msg.role != "assistant":
+            raise ValidationInputError("仅能对 AI 回答进行反馈")
+        msg.feedback = req.feedback
+        await session.commit()
+    return {"detail": "已记录", "feedback": req.feedback}
+
+
+@router.post("/{session_id}/messages/retry", response_model=RetryResult)
+async def retry_last_round(
+    session_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+) -> RetryResult:
+    """重试最新一轮对话：删除最后一条 user 消息及其之后的所有消息（即最新一轮的
+    user + assistant），返回该 user 消息内容供前端原样重新发起。
+
+    仅允许重试**最新一轮**：按 created_at 找到最后一条 user 消息，删除它及之后的消息。
+    这样无论上一轮 AI 是否回答成功（报错轮可能没有 assistant 消息），都能正确回退，
+    且不会破坏更早的历史消息结构。
+    """
+    async with async_session() as session:
+        await _get_owned_session(session, session_id, identity)
+        result = await session.execute(
+            select(ChatMessageRecord)
+            .where(ChatMessageRecord.session_id == session_id)
+            .order_by(ChatMessageRecord.created_at)
+        )
+        messages = list(result.scalars().all())
+        # 找到最后一条 user 消息的下标
+        last_user_idx = next(
+            (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
+            None,
+        )
+        if last_user_idx is None:
+            raise NotFoundError("没有可重试的对话")
+
+        last_user = messages[last_user_idx]
+        retry = RetryResult(
+            content=last_user.content,
+            attachments=last_user.attachments,
+            kb_id=last_user.kb_id,
+            kb_ids=last_user.kb_ids,
+        )
+        # 删除该 user 消息及其之后的所有消息（最新一轮）
+        to_delete = [m.id for m in messages[last_user_idx:]]
+        await session.execute(
+            delete(ChatMessageRecord).where(ChatMessageRecord.id.in_(to_delete))
+        )
+        await session.commit()
+    return retry

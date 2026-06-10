@@ -1,16 +1,15 @@
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Sparkles, Eraser, Wand2, Loader2, Share2, Lock, Globe } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Wand2, Loader2, Share2, Lock, Globe } from 'lucide-react'
 import { agentPresetApi } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
-import PromptEditor, { type PromptEditorHandle } from '@/components/agent/PromptEditor'
 import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 import { toast } from 'sonner'
 
@@ -24,7 +23,7 @@ interface AgentPresetItem {
     temperature?: number
     thinking_enabled?: boolean
     allowed_tools?: string[]
-    system_prompt?: string
+    custom_instructions?: string
   } | null
   is_default: boolean
   created_at: string
@@ -45,7 +44,7 @@ interface FormData {
   temperature: string
   thinking_enabled: boolean
   allowed_tools: string[]
-  system_prompt: string
+  custom_instructions: string
   is_shared: boolean
 }
 
@@ -57,9 +56,11 @@ const emptyForm: FormData = {
   temperature: '0.7',
   thinking_enabled: true,
   allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'final_answer'],
-  system_prompt: '',
+  custom_instructions: '',
   is_shared: false,
 }
+
+const CUSTOM_INSTRUCTIONS_MAX = 2000
 
 const ALL_TOOLS = [
   { value: 'knowledge_search', label: '语义检索' },
@@ -76,7 +77,6 @@ function AgentConfig() {
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<AgentPresetItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
-  const promptRef = useRef<PromptEditorHandle>(null)
   const [showRewrite, setShowRewrite] = useState(false)
   const [rewriteInput, setRewriteInput] = useState('')
 
@@ -84,13 +84,6 @@ function AgentConfig() {
     queryKey: ['agent-presets'],
     queryFn: () => agentPresetApi.list() as Promise<AgentPresetItem[]>,
   })
-
-  const { data: placeholderData } = useQuery({
-    queryKey: ['agent-preset-placeholders'],
-    queryFn: () => agentPresetApi.placeholders(),
-  })
-  const placeholders = placeholderData?.placeholders ?? []
-  const defaultPrompt = placeholderData?.default_prompt ?? ''
 
   const createMutation = useMutation({
     mutationFn: (data: FormData) => agentPresetApi.create({
@@ -103,7 +96,7 @@ function AgentConfig() {
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
         allowed_tools: data.allowed_tools,
-        system_prompt: data.system_prompt || undefined,
+        custom_instructions: data.custom_instructions.trim() || undefined,
       },
     }),
     onSuccess: () => {
@@ -123,7 +116,7 @@ function AgentConfig() {
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
         allowed_tools: data.allowed_tools,
-        system_prompt: data.system_prompt || undefined,
+        custom_instructions: data.custom_instructions.trim() || undefined,
       },
     }),
     onSuccess: () => {
@@ -163,10 +156,10 @@ function AgentConfig() {
     mutationFn: (instruction: string) =>
       agentPresetApi.rewritePrompt({
         instruction,
-        current_prompt: form.system_prompt || undefined,
+        current_prompt: form.custom_instructions.trim() || undefined,
       }),
     onSuccess: (res) => {
-      promptRef.current?.replaceAll(res.prompt)
+      setForm((prev) => ({ ...prev, custom_instructions: res.prompt }))
       setShowRewrite(false)
       setRewriteInput('')
     },
@@ -188,7 +181,7 @@ function AgentConfig() {
       temperature: String(item.config_json?.temperature ?? 0.7),
       thinking_enabled: item.config_json?.thinking_enabled ?? true,
       allowed_tools: item.config_json?.allowed_tools ?? emptyForm.allowed_tools,
-      system_prompt: item.config_json?.system_prompt ?? '',
+      custom_instructions: item.config_json?.custom_instructions ?? '',
       is_shared: item.is_shared,
     })
     setShowDialog(true)
@@ -474,84 +467,38 @@ function AgentConfig() {
                 ))}
               </div>
             </div>
-            {/* 系统提示词：仅「智能推理」模式生效，快速问答模式下隐藏 */}
+            {/* 自定义指令：仅「智能推理」模式生效，快速问答模式下隐藏。
+                不覆盖核心系统提示词，只追加角色 / 语气 / 工作流 / 边界等设定。 */}
             {form.agent_mode === 'agent' && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <Label>系统提示词</Label>
-                <div className="flex items-center gap-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs gap-1 text-primary cursor-pointer"
-                    onClick={() => setShowRewrite((v) => !v)}
-                  >
-                    <Wand2 className="h-3.5 w-3.5" />
-                    AI 改写
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs gap-1 cursor-pointer"
-                    onClick={() => promptRef.current?.replaceAll(defaultPrompt)}
-                    disabled={!defaultPrompt}
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    插入默认模板
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs gap-1 text-muted-foreground cursor-pointer"
-                    onClick={() => promptRef.current?.replaceAll('')}
-                    disabled={!form.system_prompt}
-                  >
-                    <Eraser className="h-3.5 w-3.5" />
-                    清空
-                  </Button>
-                </div>
+                <Label>自定义指令</Label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs gap-1 text-primary cursor-pointer"
+                  onClick={() => setShowRewrite((v) => !v)}
+                >
+                  <Wand2 className="h-3.5 w-3.5" />
+                  AI 润色
+                </Button>
               </div>
 
-              {/* 可插入变量标签 */}
-              {placeholders.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 mb-2">
-                  <span className="text-xs text-muted-foreground">可插入变量：</span>
-                  <TooltipProvider>
-                    {placeholders.map((ph) => (
-                      <Tooltip key={ph.name}>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            onClick={() => promptRef.current?.insertAtCursor(`{${ph.name}}`)}
-                            className="px-2 py-0.5 rounded-md text-xs font-mono bg-primary/8 border border-primary/20 text-primary hover:bg-primary/15 cursor-pointer transition-colors"
-                          >
-                            {`{${ph.name}}`}
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>{ph.description}（点击插入）</TooltipContent>
-                      </Tooltip>
-                    ))}
-                  </TooltipProvider>
-                </div>
-              )}
-
-              {/* AI 改写面板 */}
+              {/* AI 润色面板 */}
               {showRewrite && (
                 <div className="mb-2 rounded-lg border border-primary/20 bg-primary/5 p-3">
                   <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-primary">
                     <Wand2 className="h-3.5 w-3.5" />
-                    用 AI 生成提示词
+                    用 AI 生成自定义指令
                   </div>
                   <p className="text-xs text-muted-foreground mb-2">
-                    用自然语言描述你想要的角色与特性，AI 会基于 Progressive RAG 结构生成完整提示词（使用默认模型）。
+                    用自然语言描述你想要的角色、语气与工作风格，AI 会帮你整理成一段规范的自定义指令（使用默认模型）。
                   </p>
                   <Input
                     value={rewriteInput}
                     onChange={(e) => setRewriteInput(e.target.value)}
-                    placeholder="例如：一个严谨的法律顾问，回答时引用条款编号，语气正式"
+                    placeholder="例如：一个严谨的法律顾问，语气正式，回答时分点说明并提示风险"
                     className="mb-2 text-xs"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && rewriteInput.trim() && !rewriteMutation.isPending) {
@@ -562,7 +509,7 @@ function AgentConfig() {
                   />
                   {rewriteMutation.isError && (
                     <p className="text-xs text-destructive mb-2">
-                      改写失败，请检查默认模型配置后重试
+                      生成失败，请检查默认模型配置后重试
                     </p>
                   )}
                   <div className="flex items-center gap-2">
@@ -578,7 +525,7 @@ function AgentConfig() {
                       ) : (
                         <Wand2 className="h-3.5 w-3.5" />
                       )}
-                      {rewriteMutation.isPending ? '生成中...' : '生成并替换'}
+                      {rewriteMutation.isPending ? '生成中...' : (form.custom_instructions.trim() ? '生成并替换' : '生成')}
                     </Button>
                     <Button
                       type="button"
@@ -589,28 +536,28 @@ function AgentConfig() {
                     >
                       取消
                     </Button>
-                    {form.system_prompt && (
-                      <span className="text-xs text-muted-foreground">将基于当前提示词改写</span>
+                    {form.custom_instructions.trim() && (
+                      <span className="text-xs text-muted-foreground">将基于当前指令润色</span>
                     )}
                   </div>
                 </div>
               )}
 
-              <PromptEditor
-                ref={promptRef}
-                value={form.system_prompt}
-                onChange={(v) => setForm({ ...form, system_prompt: v })}
-                variables={placeholders.map((p) => p.name)}
-                placeholder="留空则使用默认 Progressive RAG 提示词；填写后将整体覆盖该智能体的系统提示词。可点击上方变量插入到光标处。"
-                rows={14}
-                className="max-h-[480px]"
+              <Textarea
+                value={form.custom_instructions}
+                onChange={(e) =>
+                  setForm({ ...form, custom_instructions: e.target.value.slice(0, CUSTOM_INSTRUCTIONS_MAX) })
+                }
+                placeholder="留空则使用默认行为。可在此描述助手的角色设定、语气风格、回答方法与边界约束，例如：以资深产品经理的身份回答，语气专业友好，回答先给结论再展开；不讨论与产品无关的话题。"
+                rows={10}
+                className="font-mono text-xs leading-relaxed max-h-[360px]"
               />
               <div className="flex items-center justify-between mt-1.5">
                 <p className="text-xs text-muted-foreground">
-                  自定义该智能体的人设与行为指令。仅在「智能推理」模式下生效
+                  仅在「智能推理」模式下生效，会在系统内置提示词基础上追加，不影响核心检索能力
                 </p>
                 <span className="text-xs text-muted-foreground tabular-nums">
-                  {form.system_prompt.length} 字符
+                  {form.custom_instructions.length} / {CUSTOM_INSTRUCTIONS_MAX}
                 </span>
               </div>
             </div>

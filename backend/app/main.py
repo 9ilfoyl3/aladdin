@@ -31,6 +31,7 @@ from app.api.ocr_config import router as ocr_config_router
 from app.api.retrieval import router as retrieval_router
 from app.api.session import router as session_router
 from app.api.session_upload import router as session_upload_router
+from app.api.skills import router as skills_router
 from app.api.system import router as system_router
 from app.config import get_settings
 from app.pipeline.queue import TaskQueue
@@ -280,6 +281,7 @@ app.include_router(ocr_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
 app.include_router(session_upload_router)
+app.include_router(skills_router)
 app.include_router(mcp_router)
 # tenant-auth：认证与管理路由
 app.include_router(auth_router)

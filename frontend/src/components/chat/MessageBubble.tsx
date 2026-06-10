@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
+import { copyToClipboard } from '@/lib/clipboard'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
@@ -14,6 +16,8 @@ export interface ContentSegment {
   content: string  // thought/answer: 文本内容; tool_call/tool_result: 工具名
   toolCallId?: string
   toolName?: string
+  // 工具调用参数（如 read_skill 的 skill_name、检索的 query），用于在步骤行展示更具体的信息
+  toolArgs?: Record<string, unknown>
   success?: boolean
   durationMs?: number
 }
@@ -22,6 +26,13 @@ export interface ContentSegment {
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  // 已落库消息的 DB ID（assistant 消息流式结束后由 message_saved 事件回填；历史消息加载时带上）。
+  // 用于反馈（点赞/踩）定位；为空表示尚未落库（如流式进行中或保存失败）。
+  id?: string
+  // 用户对本条 AI 回答的反馈：'like' | 'dislike' | null
+  feedback?: 'like' | 'dislike' | null
+  // 标记本条 assistant 消息为错误结果（请求异常）：动作栏仅显示重试
+  isError?: boolean
   references?: Reference[]
   agentSteps?: AgentStep[]
   // 用户消息绑定的会话文件附件（发送时从已上传文件中选取，随消息进入历史）
@@ -73,6 +84,12 @@ interface MessageBubbleProps {
   onToggleRefDetail: (key: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片，用于附件 chip 缩略图/放大预览） */
   imagePreviewUrls?: Record<string, string>
+  /** 设置/取消反馈（点赞/踩）。仅 assistant 且已落库（有 id）时可用。 */
+  onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
+  /** 重试本轮对话。仅最新一条 assistant 消息可用。 */
+  onRetry?: () => void
+  /** 本条是否为最新一条 assistant 消息（决定是否显示重试按钮）。 */
+  isLastAssistant?: boolean
 }
 
 function MessageBubble({
@@ -85,6 +102,9 @@ function MessageBubble({
   onToggleRef,
   onToggleRefDetail,
   imagePreviewUrls = {},
+  onFeedback,
+  onRetry,
+  isLastAssistant = false,
 }: MessageBubbleProps) {
   // 在父块内容中高亮子块命中部分
   function highlightChild(parentContent: string, childContent: string) {
@@ -120,10 +140,7 @@ function MessageBubble({
   }
 
   return (
-    <div className="flex gap-3 items-start animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
-      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-1">
-        <Bot className="h-4 w-4 text-primary" />
-      </div>
+    <div className="group animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
       <div className="flex-1 min-w-0 space-y-2">
         {/* 新格式：交错流式段落渲染 */}
         {msg.segments && msg.segments.length > 0 ? (
@@ -209,8 +226,134 @@ function MessageBubble({
             highlightChild={highlightChild}
           />
         )}
+
+        {/* 动作栏：复制 / 赞 / 踩 / 重试。流式进行中不显示；错误消息仅显示重试。 */}
+        {!(isStreaming && isLast) && (msg.content || msg.isError) && (
+          <MessageActions
+            message={msg}
+            isLastAssistant={isLastAssistant}
+            onFeedback={onFeedback}
+            onRetry={onRetry}
+          />
+        )}
       </div>
     </div>
+  )
+}
+
+// 消息动作栏：复制 / 点赞 / 踩 / 重试。
+// - 复制：始终可用；
+// - 点赞/踩：仅 assistant 且已落库（有 id）且非错误消息时可用，互斥可取消；
+// - 重试：仅最新一条 assistant 消息显示；错误消息仅显示重试。
+function MessageActions({
+  message,
+  isLastAssistant,
+  onFeedback,
+  onRetry,
+}: {
+  message: Message
+  isLastAssistant: boolean
+  onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
+  onRetry?: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+  // 触发图标弹跳动画的计数键：变化即重播动画（复制成功 / 点赞 / 点踩 各自独立）
+  const [popKey, setPopKey] = useState({ copy: 0, like: 0, dislike: 0 })
+  const isError = !!message.isError
+  const canFeedback = !isError && !!message.id && !!onFeedback
+  const showRetry = isLastAssistant && !!onRetry
+
+  async function handleCopy() {
+    const ok = await copyToClipboard(message.content)
+    if (ok) {
+      setCopied(true)
+      setPopKey((p) => ({ ...p, copy: p.copy + 1 }))
+      setTimeout(() => setCopied(false), 1500)
+    }
+  }
+
+  function toggleFeedback(next: 'like' | 'dislike') {
+    if (!canFeedback) return
+    // 仅在「激活」（非取消）时弹跳，取消则不弹
+    if (message.feedback !== next) {
+      setPopKey((p) => ({ ...p, [next]: p[next] + 1 }))
+    }
+    onFeedback?.(message, message.feedback === next ? null : next)
+  }
+
+  return (
+    <div className="flex items-center gap-1 px-1 pt-0.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+      {/* 错误消息不展示复制/反馈，仅重试 */}
+      {!isError && (
+        <>
+          <ActionButton label={copied ? '已复制' : '复制'} onClick={handleCopy}>
+            {copied ? (
+              <Check key={`copy-${popKey.copy}`} className="h-3.5 w-3.5 text-green-500 animate-icon-pop" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </ActionButton>
+          {canFeedback && (
+            <>
+              <ActionButton
+                label="赞"
+                active={message.feedback === 'like'}
+                onClick={() => toggleFeedback('like')}
+              >
+                <ThumbsUp
+                  key={`like-${popKey.like}`}
+                  className={`h-3.5 w-3.5 ${message.feedback === 'like' ? 'text-primary fill-primary/20 animate-icon-pop' : ''}`}
+                />
+              </ActionButton>
+              <ActionButton
+                label="踩"
+                active={message.feedback === 'dislike'}
+                onClick={() => toggleFeedback('dislike')}
+              >
+                <ThumbsDown
+                  key={`dislike-${popKey.dislike}`}
+                  className={`h-3.5 w-3.5 ${message.feedback === 'dislike' ? 'text-destructive fill-destructive/20 animate-icon-pop' : ''}`}
+                />
+              </ActionButton>
+            </>
+          )}
+        </>
+      )}
+      {showRetry && (
+        <ActionButton label="重试" onClick={onRetry}>
+          <RotateCcw className="h-3.5 w-3.5 transition-transform duration-300 group-active/btn:-rotate-180" />
+        </ActionButton>
+      )}
+    </div>
+  )
+}
+
+// 动作栏单个图标按钮（带 tooltip + 选中态高亮 + 按下回弹）
+function ActionButton({
+  label,
+  active,
+  onClick,
+  children,
+}: {
+  label: string
+  active?: boolean
+  onClick?: () => void
+  children: ReactNode
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={onClick}
+            className={`group/btn p-1.5 rounded-md transition-all duration-150 cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted/60 active:scale-90 ${active ? 'text-foreground' : ''}`}
+          >
+            {children}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -347,7 +490,7 @@ function StepSummaryPanel({
         className="w-full flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-muted/40 transition-colors cursor-pointer"
       >
         {running ? (
-          <Loader2 className="h-4 w-4 shrink-0 text-primary animate-spin" />
+          <Sparkles className="h-4 w-4 shrink-0 text-primary animate-twinkle" />
         ) : (
           <Sparkles className="h-4 w-4 shrink-0 text-primary" />
         )}
@@ -401,6 +544,32 @@ function StepSummaryPanel({
   )
 }
 
+// 工具名 → 中文标签映射（步骤行展示用，与 AgentConfig 的 ALL_TOOLS 保持一致）
+const TOOL_LABELS: Record<string, string> = {
+  knowledge_search: '语义检索',
+  grep_chunks: '关键词检索',
+  list_knowledge_chunks: '分页浏览',
+  web_search: '网页搜索',
+  thinking: '内部思考',
+  read_attachment: '阅读附件',
+  read_skill: '加载技能',
+  final_answer: '生成答案',
+}
+
+// 从工具调用参数中提取一段简短描述，用于在步骤标题后展示「调用了什么」的具体信息
+function toolArgSummary(toolName?: string, args?: Record<string, unknown>): string | null {
+  if (!args) return null
+  if (toolName === 'read_skill') {
+    const name = args.skill_name
+    return typeof name === 'string' && name ? name : null
+  }
+  if (toolName === 'read_attachment') {
+    const fn = args.filename
+    return typeof fn === 'string' && fn ? fn : null
+  }
+  return null
+}
+
 // 单个步骤行：思考显示文本摘要，工具调用显示「调用 xxx」前缀，均可折叠
 function StepRow({
   seg,
@@ -414,6 +583,9 @@ function StepRow({
   animating: boolean
 }) {
   const isTool = seg.type === 'tool_call'
+  const isSkill = isTool && seg.toolName === 'read_skill'
+  const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content
+  const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
 
   return (
     <div className="rounded-lg border border-border/40 bg-background/40 overflow-hidden">
@@ -421,14 +593,19 @@ function StepRow({
         onClick={onToggle}
         className="w-full flex items-center gap-2 px-2.5 py-2 text-xs hover:bg-muted/40 transition-colors cursor-pointer text-left"
       >
-        {isTool ? (
+        {isSkill ? (
+          <BookOpen className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        ) : isTool ? (
           <Monitor className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         ) : (
           <Lightbulb className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         )}
         {isTool ? (
           <span className="truncate text-foreground/80">
-            调用 <span className="font-mono">{seg.toolName || seg.content}</span>
+            {toolLabel}
+            {argSummary && (
+              <span className="font-mono text-primary/80 ml-1">{argSummary}</span>
+            )}
           </span>
         ) : (
           <span className="truncate text-muted-foreground">{seg.content}</span>
@@ -450,7 +627,8 @@ function StepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <p className="text-xs text-muted-foreground">
-                调用工具 <span className="font-mono">{seg.toolName || seg.content}</span>
+                {isSkill ? '加载技能' : '调用工具'}{' '}
+                <span className="font-mono">{argSummary || toolLabel}</span>
               </p>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">

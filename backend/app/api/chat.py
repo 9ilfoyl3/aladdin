@@ -30,8 +30,13 @@ from app.agent.tools.final_answer import FinalAnswerTool
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.read_attachment import ReadAttachmentTool
+from app.agent.tools.read_skill import ReadSkillTool
+from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
+from app.agent.skills import SkillManager, default_skill_dirs
+from app.api.skills import load_user_custom_skills
 from app.agent.prompts.progressive_rag import render_system_prompt
 from app.config import get_settings
 from app.models.manager import get_model_manager
@@ -316,8 +321,8 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
     return msgs
 
 
-async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> None:
-    """保存一条消息到会话。
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> str:
+    """保存一条消息到会话，返回新消息的 ID。
 
     tenant_id 由调用方在请求处理期间从 IdentityContext 取好后传入（后台任务在响应返回后
     执行，届时请求级 contextvar 已失效，故必须显式透传，不在此重新解析身份）。
@@ -325,8 +330,9 @@ async def _save_message(session_id: str, role: str, content: str, references: li
     attachments 仅 user 消息可能非空：发送时绑定的会话文件快照（file_id/filename/...），
     用于历史回放在对应用户气泡上方渲染附件 chip。
     """
+    msg_id = str(uuid.uuid4())
     msg = ChatMessageRecord(
-        id=str(uuid.uuid4()),
+        id=msg_id,
         session_id=session_id,
         role=role,
         content=content,
@@ -340,6 +346,7 @@ async def _save_message(session_id: str, role: str, content: str, references: li
     async with async_session() as session:
         session.add(msg)
         await session.commit()
+    return msg_id
 
 
 def _truncate_title(user_query: str) -> str:
@@ -901,10 +908,12 @@ def _build_agent_runtime(
     llm: LLMProvider,
     preset_cfg: dict,
     max_context_tokens: int | None,
-    thinking_enabled: bool,
+    thinking_enabled: bool,  # noqa: ARG001 - Agent 链路已不使用；思考由预设独占控制（见下方 AgentConfig）。保留形参仅为与调用方签名兼容。
     tenant_id: str | None,
     session_id: str | None,
     include_session_source: bool = False,
+    attachments: list[dict] | None = None,
+    custom_skills: list | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -925,6 +934,9 @@ def _build_agent_runtime(
         kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
         include_session_source: 是否把会话文件源加入 knowledge_search 检索（由装配层据
             session_has_files 决定，不暴露给 LLM；Property 5）。
+        attachments: 本条消息绑定的附件快照列表（来自 request.attachments，每项含
+            file_id / filename）。非空时注册 read_attachment 工具，让 Agent 能确定性地
+            整篇直读本次附件，而非靠 knowledge_search 语义检索去和知识库文档竞争召回。
 
     Returns:
         (engine, state, event_bus)。其中 ``state`` 是传给工具的 AgentState，
@@ -949,11 +961,20 @@ def _build_agent_runtime(
             SearchTarget(kb_id=SESSION_FILES_KB_ID, expr=build_session_id_expr(session_id))
         )
 
-    # 按预设 allowed_tools 过滤；final_answer 始终注册以保证 Agent 能终止
+    # 按预设 allowed_tools 过滤；基础设施工具始终豁免白名单：
+    # - final_answer：Agent 终止信号，缺失则无法收尾。
+    # - thinking：模型推理的"正确去处"。提示词多处引导"use the thinking tool"，若不注册，
+    #   模型想推理时无处可去 → 把 verbalized CoT 写进普通 content → natural_stop 时整段
+    #   （CoT+答案）被当正文展示（参考 WeKnora：推理走 thinking 工具，与正文物理隔离）。
+    # - read_attachment：本条消息附件的确定性直读能力，由"是否带附件"决定是否注册
+    #   （见下方注册处），与业务预设的检索工具白名单无关。若受白名单管控，老预设
+    #   不含此新工具名 → 工具不注册，但 prompt 仍提示"用 read_attachment 读取附件"，
+    #   会让模型陷入"系统说有、工具列表没有"的矛盾而空转。
+    _INFRA_TOOLS = {"final_answer", "thinking", "read_attachment", "read_skill"}
     preset_allowed = preset_cfg.get("allowed_tools")
 
     def _tool_enabled(tool_name: str) -> bool:
-        if tool_name == "final_answer":
+        if tool_name in _INFRA_TOOLS:
             return True
         if not preset_allowed:
             return True
@@ -968,6 +989,20 @@ def _build_agent_runtime(
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool())
+    # thinking：注册为基础设施工具，给模型推理一个"正确去处"。推理内容经 execute
+    # 记录到 step.thought 并发 THOUGHT 事件 → 进思考面板，与 final_answer 正文隔离，
+    # 从源头减少 verbalized CoT 漏进正文（E）。
+    if _tool_enabled("thinking"):
+        tool_registry.register(ThinkingTool(state, event_bus, session_id or ""))
+    # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
+    # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
+    # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
+    anchored_attachments = [a for a in (attachments or []) if a.get("file_id")]
+    read_attachment_on = bool(
+        _tool_enabled("read_attachment") and anchored_attachments and session_id
+    )
+    if read_attachment_on:
+        tool_registry.register(ReadAttachmentTool(session_id, anchored_attachments))
     tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
 
     # 可选工具：web_search（需配置 searxng_url 且预设允许）
@@ -976,26 +1011,63 @@ def _build_agent_runtime(
     if web_search_on:
         tool_registry.register(WebSearchTool(searxng_url=settings.searxng_url))
 
-    # system_prompt：预设自定义优先，否则用默认 Progressive RAG 模板。
-    # 两者都经 render_system_prompt 做占位符替换（{knowledge_base_names} / {available_tools}）。
+    # Skills（Progressive Disclosure）：扫描内置技能目录拿到 Level 1 元数据
+    # （name+description），注入 system prompt 供模型判断是否需要某个技能；模型按需
+    # 调用 read_skill 工具加载 Level 2 完整指令。预设可用 allowed_skills 收敛白名单
+    # （None=全部允许）。无任何技能时不注册 read_skill，避免提示与工具列表矛盾。
+    preset_allowed_skills = preset_cfg.get("allowed_skills")
+    skill_manager = SkillManager(
+        skill_dirs=default_skill_dirs(),
+        allowed_skills=preset_allowed_skills,
+        extra_skills=custom_skills or None,
+    )
+    skill_metadata = skill_manager.get_all_metadata() if _tool_enabled("read_skill") else []
+    if skill_metadata:
+        tool_registry.register(ReadSkillTool(skill_manager))
+
+    # 诊断日志：确认实际注册的工具列表与预设白名单，定位 thinking/read_attachment 是否生效。
+    logger.info(
+        "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | thinking_in_list=%s | attachments=%d",
+        tool_registry.list_tools(),
+        preset_allowed,
+        "thinking" in tool_registry.list_tools(),
+        len(anchored_attachments),
+    )
+
+    # system_prompt：核心 Progressive RAG 模板恒定，预设仅追加用户自定义指令
+    # （角色 / 语气 / 工作流 / 边界）。render_system_prompt 同时做占位符替换
+    # （{knowledge_base_names} / {available_tools}）。
     # kb_names 用 kb_ids 渲染；含会话源时追加固定显示名，让 LLM 知道有"本会话上传的文件"可检索。
     kb_names = list(kb_ids)
     if include_session_source and session_id:
         kb_names.append("本会话上传的文件")
-    preset_system_prompt = (preset_cfg.get("system_prompt") or "").strip()
+    # 本条消息附件：仅当 read_attachment 工具确实注册时，才在 prompt 里提示"用
+    # read_attachment 直接读取"，避免"提示说有、工具列表没有"的矛盾让模型空转。
+    if read_attachment_on:
+        att_names = "、".join(a.get("filename", "") for a in anchored_attachments)
+        kb_names.append(f"本条消息附件（用 read_attachment 直接读取）：{att_names}")
+    custom_instructions = (preset_cfg.get("custom_instructions") or "").strip()
     system_prompt = render_system_prompt(
-        AgentConfig(system_prompt=preset_system_prompt),
+        AgentConfig(custom_instructions=custom_instructions),
         kb_names=kb_names,
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
+        skills=[(m.name, m.description) for m in skill_metadata],
     )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
         max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
         temperature=preset_cfg.get("temperature", AgentConfig.temperature),
         web_search_enabled=web_search_on,
-        thinking_enabled=preset_cfg.get("thinking_enabled", thinking_enabled),
+        # 深度思考（模型原生思维链）在 Agent 链路只由智能体预设独占控制，不再 fallback 到
+        # 模型配置的 thinking_enabled。原因：① 预设是开放给普通用户的、模型配置仅超管可改，
+        # 二者叠加会让"超管的模型开关"暗中覆盖用户的预设选择，语义混乱；② 模型原生思维链会
+        # 抑制工具调用（DeepSeek 等在 thinking 模式下倾向跳过 final_answer / 检索，甚至禁止
+        # tool_choice），与 ReAct + 强制工具调用的 Agent 架构冲突。预设未显式开启时默认关闭，
+        # 模型推理改走 thinking 工具（显式工具调用通道），既保留推理又不抢占输出段。
+        thinking_enabled=preset_cfg.get("thinking_enabled", False),
         system_prompt=system_prompt,
+        custom_instructions=custom_instructions,
     )
     engine = AgentEngine(config, llm, tool_registry, event_bus)
     return engine, state, event_bus
@@ -1012,6 +1084,8 @@ async def _run_agent_nonstream(
     session_id: str | None,
     history: list[dict] | None,
     include_session_source: bool = False,
+    attachments: list[dict] | None = None,
+    owner_user_id: str | None = None,
 ) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
@@ -1021,6 +1095,8 @@ async def _run_agent_nonstream(
     Args:
         kb_ids: 全部所选知识库 ID（取代旧的单个 kb_id）。
         include_session_source: 是否把会话文件源加入 agent 检索（由路由层据 session_has_files 决定）。
+        attachments: 本条消息绑定的附件快照列表（来自 request.attachments），透传给
+            _build_agent_runtime 注册 read_attachment 工具，供 Agent 确定性整篇直读本次附件。
 
     Returns:
         (final_answer, knowledge_refs, degraded, agent_steps, failed_source_ids)
@@ -1028,6 +1104,8 @@ async def _run_agent_nonstream(
     engine, state, event_bus = _build_agent_runtime(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
         include_session_source=include_session_source,
+        attachments=attachments,
+        custom_skills=await load_user_custom_skills(owner_user_id),
     )
 
     steps_collected: list[dict] = []
@@ -1089,6 +1167,7 @@ async def _stream_response(
     requested_kb_ids: list[str] | None = None,
     session_has_files: bool = False,
     multi_kb_requested: bool = False,
+    owner_user_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件
 
@@ -1145,6 +1224,8 @@ async def _stream_response(
         engine, state, event_bus = _build_agent_runtime(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
             tenant_id, session_id, include_session_source=session_has_files,
+            attachments=attachments,
+            custom_skills=await load_user_custom_skills(owner_user_id),
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1256,7 +1337,9 @@ async def _stream_response(
             try:
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
-                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+                saved_id = await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+                # 回传已落库的 assistant 消息 ID，供前端做反馈（点赞/踩）与重试定位。
+                yield json.dumps({"type": "message_saved", "message_id": saved_id}, ensure_ascii=False)
                 # 标题精炼放到后台，不阻塞 SSE 关闭（仅首轮精炼，已有问题标题兜底）
                 if is_first_round:
                     asyncio.create_task(_refine_session_title(session_id, query, full_response))
@@ -1377,7 +1460,8 @@ async def _stream_response(
         try:
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
-            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+            saved_id = await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+            yield json.dumps({"type": "message_saved", "message_id": saved_id}, ensure_ascii=False)
             if is_first_round:
                 asyncio.create_task(_refine_session_title(session_id, query, full_response))
         except Exception as e:
@@ -1495,7 +1579,7 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids)),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id),
             media_type="text/event-stream",
         )
 
@@ -1529,6 +1613,8 @@ async def chat_completions(
             user_query, list(requested_kb_ids), llm, preset_cfg,
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
             include_session_source=session_has_files,
+            attachments=nonstream_attachments,
+            owner_user_id=identity.acting_subject_id,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)
