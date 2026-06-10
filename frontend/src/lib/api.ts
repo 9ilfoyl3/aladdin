@@ -620,6 +620,7 @@ export interface SessionMessageItem {
     content: boolean
     tool_call_id: string
     tool_name: string
+    arguments?: Record<string, unknown>
     success: any
     duration_ms: number | undefined
     step: string

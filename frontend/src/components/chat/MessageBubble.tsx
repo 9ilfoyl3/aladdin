@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { Badge } from '@/components/ui/badge'
@@ -14,6 +14,8 @@ export interface ContentSegment {
   content: string  // thought/answer: 文本内容; tool_call/tool_result: 工具名
   toolCallId?: string
   toolName?: string
+  // 工具调用参数（如 read_skill 的 skill_name、检索的 query），用于在步骤行展示更具体的信息
+  toolArgs?: Record<string, unknown>
   success?: boolean
   durationMs?: number
 }
@@ -401,6 +403,32 @@ function StepSummaryPanel({
   )
 }
 
+// 工具名 → 中文标签映射（步骤行展示用，与 AgentConfig 的 ALL_TOOLS 保持一致）
+const TOOL_LABELS: Record<string, string> = {
+  knowledge_search: '语义检索',
+  grep_chunks: '关键词检索',
+  list_knowledge_chunks: '分页浏览',
+  web_search: '网页搜索',
+  thinking: '内部思考',
+  read_attachment: '阅读附件',
+  read_skill: '加载技能',
+  final_answer: '生成答案',
+}
+
+// 从工具调用参数中提取一段简短描述，用于在步骤标题后展示「调用了什么」的具体信息
+function toolArgSummary(toolName?: string, args?: Record<string, unknown>): string | null {
+  if (!args) return null
+  if (toolName === 'read_skill') {
+    const name = args.skill_name
+    return typeof name === 'string' && name ? name : null
+  }
+  if (toolName === 'read_attachment') {
+    const fn = args.filename
+    return typeof fn === 'string' && fn ? fn : null
+  }
+  return null
+}
+
 // 单个步骤行：思考显示文本摘要，工具调用显示「调用 xxx」前缀，均可折叠
 function StepRow({
   seg,
@@ -414,6 +442,9 @@ function StepRow({
   animating: boolean
 }) {
   const isTool = seg.type === 'tool_call'
+  const isSkill = isTool && seg.toolName === 'read_skill'
+  const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content
+  const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
 
   return (
     <div className="rounded-lg border border-border/40 bg-background/40 overflow-hidden">
@@ -421,14 +452,19 @@ function StepRow({
         onClick={onToggle}
         className="w-full flex items-center gap-2 px-2.5 py-2 text-xs hover:bg-muted/40 transition-colors cursor-pointer text-left"
       >
-        {isTool ? (
+        {isSkill ? (
+          <BookOpen className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        ) : isTool ? (
           <Monitor className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         ) : (
           <Lightbulb className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         )}
         {isTool ? (
           <span className="truncate text-foreground/80">
-            调用 <span className="font-mono">{seg.toolName || seg.content}</span>
+            {toolLabel}
+            {argSummary && (
+              <span className="font-mono text-primary/80 ml-1">{argSummary}</span>
+            )}
           </span>
         ) : (
           <span className="truncate text-muted-foreground">{seg.content}</span>
@@ -450,7 +486,8 @@ function StepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <p className="text-xs text-muted-foreground">
-                调用工具 <span className="font-mono">{seg.toolName || seg.content}</span>
+                {isSkill ? '加载技能' : '调用工具'}{' '}
+                <span className="font-mono">{argSummary || toolLabel}</span>
               </p>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">

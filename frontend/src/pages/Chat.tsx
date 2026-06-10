@@ -186,6 +186,7 @@ function Chat() {
                     content: String(step.tool_name || ''),
                     toolCallId: String(step.tool_call_id || ''),
                     toolName: String(step.tool_name || ''),
+                    toolArgs: (step.arguments as Record<string, unknown>) || undefined,
                     success: undefined,
                   })
                 } else if (step.type === 'tool_result') {
@@ -432,6 +433,7 @@ function Chat() {
                       content: parsed.tool_name || '',
                       toolCallId: parsed.tool_call_id,
                       toolName: parsed.tool_name,
+                      toolArgs: parsed.arguments,
                     }]
                     setMessages((prev) => {
                       const updated = [...prev]
