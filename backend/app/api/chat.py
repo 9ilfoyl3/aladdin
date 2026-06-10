@@ -321,8 +321,8 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
     return msgs
 
 
-async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> None:
-    """保存一条消息到会话。
+async def _save_message(session_id: str, role: str, content: str, references: list | None = None, agent_steps: list | None = None, kb_id: str | None = None, kb_ids: list | None = None, tenant_id: str | None = None, attachments: list | None = None) -> str:
+    """保存一条消息到会话，返回新消息的 ID。
 
     tenant_id 由调用方在请求处理期间从 IdentityContext 取好后传入（后台任务在响应返回后
     执行，届时请求级 contextvar 已失效，故必须显式透传，不在此重新解析身份）。
@@ -330,8 +330,9 @@ async def _save_message(session_id: str, role: str, content: str, references: li
     attachments 仅 user 消息可能非空：发送时绑定的会话文件快照（file_id/filename/...），
     用于历史回放在对应用户气泡上方渲染附件 chip。
     """
+    msg_id = str(uuid.uuid4())
     msg = ChatMessageRecord(
-        id=str(uuid.uuid4()),
+        id=msg_id,
         session_id=session_id,
         role=role,
         content=content,
@@ -345,6 +346,7 @@ async def _save_message(session_id: str, role: str, content: str, references: li
     async with async_session() as session:
         session.add(msg)
         await session.commit()
+    return msg_id
 
 
 def _truncate_title(user_query: str) -> str:
@@ -1335,7 +1337,9 @@ async def _stream_response(
             try:
                 refs_data = [ref.model_dump() for ref in references] if references else None
                 steps_data = agent_steps_collected if agent_steps_collected else None
-                await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+                saved_id = await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+                # 回传已落库的 assistant 消息 ID，供前端做反馈（点赞/踩）与重试定位。
+                yield json.dumps({"type": "message_saved", "message_id": saved_id}, ensure_ascii=False)
                 # 标题精炼放到后台，不阻塞 SSE 关闭（仅首轮精炼，已有问题标题兜底）
                 if is_first_round:
                     asyncio.create_task(_refine_session_title(session_id, query, full_response))
@@ -1456,7 +1460,8 @@ async def _stream_response(
         try:
             refs_data = [ref.model_dump() for ref in references] if references else None
             steps_data = agent_steps_collected if agent_steps_collected else None
-            await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+            saved_id = await _save_message(session_id, "assistant", full_response, references=refs_data, agent_steps=steps_data, kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id)
+            yield json.dumps({"type": "message_saved", "message_id": saved_id}, ensure_ascii=False)
             if is_first_round:
                 asyncio.create_task(_refine_session_title(session_id, query, full_response))
         except Exception as e:

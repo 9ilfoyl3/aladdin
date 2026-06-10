@@ -631,6 +631,7 @@ export interface SessionMessageItem {
   attachments: MessageAttachment[] | null
   kb_id: string | null
   kb_ids: string[] | null
+  feedback?: 'like' | 'dislike' | null
   created_at: string
 }
 
@@ -731,6 +732,16 @@ export const sessionApi = {
     request<SessionMessageItem[]>(`/sessions/${id}/messages`),
   clearMessages: (id: string) =>
     request<void>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+  setMessageFeedback: (sessionId: string, messageId: string, feedback: 'like' | 'dislike' | null) =>
+    request<{ detail: string; feedback: string | null }>(
+      `/sessions/${sessionId}/messages/${messageId}/feedback`,
+      { method: 'PUT', body: JSON.stringify({ feedback }) },
+    ),
+  retryLastRound: (sessionId: string) =>
+    request<{ content: string; attachments: MessageAttachment[] | null; kb_id: string | null; kb_ids: string[] | null }>(
+      `/sessions/${sessionId}/messages/retry`,
+      { method: 'POST' },
+    ),
 }
 
 

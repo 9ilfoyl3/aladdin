@@ -337,6 +337,18 @@
   animation: twinkle 2s steps(1, end) infinite;
 }
 
+/* 动作按钮点击反馈：图标弹一下（缩放回弹），用于复制成功 / 点赞 / 点踩 */
+@keyframes icon-pop {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.45); }
+  60%  { transform: scale(0.9); }
+  100% { transform: scale(1); }
+}
+
+.animate-icon-pop {
+  animation: icon-pop 0.4s ease-out;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

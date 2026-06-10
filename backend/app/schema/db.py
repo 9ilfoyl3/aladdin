@@ -347,6 +347,9 @@ class ChatMessageRecord(Base, TenantScopedMixin):
     attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 本条消息使用的主知识库 ID
     kb_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # 多知识库联合检索时的知识库 ID 列表
+    # 用户对 AI 回答的反馈：'like' | 'dislike' | None（仅 assistant 消息可能非空）。
+    # 先落库保留，后续用于 agent 优化/质量评估。
+    feedback: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # 关联

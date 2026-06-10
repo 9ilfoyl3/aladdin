@@ -64,6 +64,8 @@ async def _migrate_db() -> None:
         "ALTER TABLE chat_messages ADD COLUMN kb_ids JSON",
         # 对话消息表新增附件字段：用户消息发送时绑定的会话文件快照（session-file-upload）
         "ALTER TABLE chat_messages ADD COLUMN attachments JSON",
+        # 对话消息表新增反馈字段：用户对 AI 回答的点赞/踩（chat-message-actions，保留供 agent 优化）
+        "ALTER TABLE chat_messages ADD COLUMN feedback VARCHAR(10)",
         # 会话表新增归属用户列：会话/消息为个人对话历史，须按 owner 收敛（per-user 隔离）。
         # 已存在的历史会话 owner_user_id 留空（NULL），将不再出现在任何用户的列表中
         # （无主会话对所有人不可见），避免修复前的跨用户泄露在旧数据上残留。

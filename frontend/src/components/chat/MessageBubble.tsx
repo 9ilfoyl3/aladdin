@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
+import { copyToClipboard } from '@/lib/clipboard'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
@@ -24,6 +26,13 @@ export interface ContentSegment {
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  // 已落库消息的 DB ID（assistant 消息流式结束后由 message_saved 事件回填；历史消息加载时带上）。
+  // 用于反馈（点赞/踩）定位；为空表示尚未落库（如流式进行中或保存失败）。
+  id?: string
+  // 用户对本条 AI 回答的反馈：'like' | 'dislike' | null
+  feedback?: 'like' | 'dislike' | null
+  // 标记本条 assistant 消息为错误结果（请求异常）：动作栏仅显示重试
+  isError?: boolean
   references?: Reference[]
   agentSteps?: AgentStep[]
   // 用户消息绑定的会话文件附件（发送时从已上传文件中选取，随消息进入历史）
@@ -75,6 +84,12 @@ interface MessageBubbleProps {
   onToggleRefDetail: (key: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片，用于附件 chip 缩略图/放大预览） */
   imagePreviewUrls?: Record<string, string>
+  /** 设置/取消反馈（点赞/踩）。仅 assistant 且已落库（有 id）时可用。 */
+  onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
+  /** 重试本轮对话。仅最新一条 assistant 消息可用。 */
+  onRetry?: () => void
+  /** 本条是否为最新一条 assistant 消息（决定是否显示重试按钮）。 */
+  isLastAssistant?: boolean
 }
 
 function MessageBubble({
@@ -87,6 +102,9 @@ function MessageBubble({
   onToggleRef,
   onToggleRefDetail,
   imagePreviewUrls = {},
+  onFeedback,
+  onRetry,
+  isLastAssistant = false,
 }: MessageBubbleProps) {
   // 在父块内容中高亮子块命中部分
   function highlightChild(parentContent: string, childContent: string) {
@@ -122,7 +140,7 @@ function MessageBubble({
   }
 
   return (
-    <div className="animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
+    <div className="group animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
       <div className="flex-1 min-w-0 space-y-2">
         {/* 新格式：交错流式段落渲染 */}
         {msg.segments && msg.segments.length > 0 ? (
@@ -208,8 +226,134 @@ function MessageBubble({
             highlightChild={highlightChild}
           />
         )}
+
+        {/* 动作栏：复制 / 赞 / 踩 / 重试。流式进行中不显示；错误消息仅显示重试。 */}
+        {!(isStreaming && isLast) && (msg.content || msg.isError) && (
+          <MessageActions
+            message={msg}
+            isLastAssistant={isLastAssistant}
+            onFeedback={onFeedback}
+            onRetry={onRetry}
+          />
+        )}
       </div>
     </div>
+  )
+}
+
+// 消息动作栏：复制 / 点赞 / 踩 / 重试。
+// - 复制：始终可用；
+// - 点赞/踩：仅 assistant 且已落库（有 id）且非错误消息时可用，互斥可取消；
+// - 重试：仅最新一条 assistant 消息显示；错误消息仅显示重试。
+function MessageActions({
+  message,
+  isLastAssistant,
+  onFeedback,
+  onRetry,
+}: {
+  message: Message
+  isLastAssistant: boolean
+  onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
+  onRetry?: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+  // 触发图标弹跳动画的计数键：变化即重播动画（复制成功 / 点赞 / 点踩 各自独立）
+  const [popKey, setPopKey] = useState({ copy: 0, like: 0, dislike: 0 })
+  const isError = !!message.isError
+  const canFeedback = !isError && !!message.id && !!onFeedback
+  const showRetry = isLastAssistant && !!onRetry
+
+  async function handleCopy() {
+    const ok = await copyToClipboard(message.content)
+    if (ok) {
+      setCopied(true)
+      setPopKey((p) => ({ ...p, copy: p.copy + 1 }))
+      setTimeout(() => setCopied(false), 1500)
+    }
+  }
+
+  function toggleFeedback(next: 'like' | 'dislike') {
+    if (!canFeedback) return
+    // 仅在「激活」（非取消）时弹跳，取消则不弹
+    if (message.feedback !== next) {
+      setPopKey((p) => ({ ...p, [next]: p[next] + 1 }))
+    }
+    onFeedback?.(message, message.feedback === next ? null : next)
+  }
+
+  return (
+    <div className="flex items-center gap-1 px-1 pt-0.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+      {/* 错误消息不展示复制/反馈，仅重试 */}
+      {!isError && (
+        <>
+          <ActionButton label={copied ? '已复制' : '复制'} onClick={handleCopy}>
+            {copied ? (
+              <Check key={`copy-${popKey.copy}`} className="h-3.5 w-3.5 text-green-500 animate-icon-pop" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </ActionButton>
+          {canFeedback && (
+            <>
+              <ActionButton
+                label="赞"
+                active={message.feedback === 'like'}
+                onClick={() => toggleFeedback('like')}
+              >
+                <ThumbsUp
+                  key={`like-${popKey.like}`}
+                  className={`h-3.5 w-3.5 ${message.feedback === 'like' ? 'text-primary fill-primary/20 animate-icon-pop' : ''}`}
+                />
+              </ActionButton>
+              <ActionButton
+                label="踩"
+                active={message.feedback === 'dislike'}
+                onClick={() => toggleFeedback('dislike')}
+              >
+                <ThumbsDown
+                  key={`dislike-${popKey.dislike}`}
+                  className={`h-3.5 w-3.5 ${message.feedback === 'dislike' ? 'text-destructive fill-destructive/20 animate-icon-pop' : ''}`}
+                />
+              </ActionButton>
+            </>
+          )}
+        </>
+      )}
+      {showRetry && (
+        <ActionButton label="重试" onClick={onRetry}>
+          <RotateCcw className="h-3.5 w-3.5 transition-transform duration-300 group-active/btn:-rotate-180" />
+        </ActionButton>
+      )}
+    </div>
+  )
+}
+
+// 动作栏单个图标按钮（带 tooltip + 选中态高亮 + 按下回弹）
+function ActionButton({
+  label,
+  active,
+  onClick,
+  children,
+}: {
+  label: string
+  active?: boolean
+  onClick?: () => void
+  children: ReactNode
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={onClick}
+            className={`group/btn p-1.5 rounded-md transition-all duration-150 cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted/60 active:scale-90 ${active ? 'text-foreground' : ''}`}
+          >
+            {children}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 

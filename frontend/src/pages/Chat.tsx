@@ -162,6 +162,8 @@ function Chat() {
           const base: Message = {
             role: m.role as 'user' | 'assistant',
             content: m.content,
+            id: m.id,
+            feedback: m.feedback ?? null,
             references: (m.references as Reference[]) || undefined,
             attachments: m.attachments || undefined,
           }
@@ -355,6 +357,10 @@ function Chat() {
       // 检索降级标志（来自 meta 事件 metadata）：区分会话文件源 / 知识库源失败（Req 2.x）
       let sessionSourceFailed = false
       let kbSourceFailed = false
+      // 本轮 assistant 消息落库后的 DB ID（message_saved 事件回填），供反馈/重试定位
+      let savedMessageId: string | undefined = undefined
+      // 本轮是否为错误结果（error 事件或请求异常）：动作栏仅显示重试
+      let isError = false
       // 后端在生成回答前已入库用户消息并播种标题；首个流式分片到达时刷新侧栏，
       // 让新会话（及其问题标题）立即出现，无需等 AI 答完。
       let sidebarRefreshed = false
@@ -552,6 +558,7 @@ function Chat() {
 
                   // 错误事件
                   case 'error': {
+                    isError = true
                     fullContent = `⚠️ ${parsed.content || '执行出错'}`
                     segments = [...segments, { type: 'answer', content: fullContent }]
                     setMessages((prev) => {
@@ -564,6 +571,22 @@ function Chat() {
                       }
                       return updated
                     })
+                    break
+                  }
+
+                  // 助手消息已落库：回填 DB ID，供反馈/重试定位
+                  case 'message_saved': {
+                    if (parsed.message_id) {
+                      savedMessageId = parsed.message_id as string
+                      setMessages((prev) => {
+                        const updated = [...prev]
+                        const last = updated[updated.length - 1]
+                        if (last && last.role === 'assistant') {
+                          updated[updated.length - 1] = { ...last, id: savedMessageId }
+                        }
+                        return updated
+                      })
+                    }
                     break
                   }
                 }
@@ -630,6 +653,8 @@ function Chat() {
           updated[updated.length - 1] = {
             role: 'assistant',
             content: fullContent,
+            id: savedMessageId,
+            isError,
             references,
             segments,
             totalDurationMs,
@@ -641,7 +666,7 @@ function Chat() {
       } else {
         setMessages((prev) => {
           const updated = [...prev]
-          updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps, sessionSourceFailed, kbSourceFailed }
+          updated[updated.length - 1] = { role: 'assistant', content: fullContent, id: savedMessageId, isError, references, agentSteps, sessionSourceFailed, kbSourceFailed }
           return updated
         })
       }
@@ -649,7 +674,7 @@ function Chat() {
       const errMsg = error instanceof Error ? error.message : '请求失败'
       setMessages((prev) => {
         const updated = [...prev]
-        updated[updated.length - 1] = { role: 'assistant', content: `⚠️ ${errMsg}` }
+        updated[updated.length - 1] = { role: 'assistant', content: `⚠️ ${errMsg}`, isError: true }
         return updated
       })
     } finally {
@@ -657,6 +682,45 @@ function Chat() {
       refreshSessions()
       // 清除本地发送标记：之后再切回该会话时正常从服务端加载
       pendingSendSessionRef.current = null
+    }
+  }
+
+  // 设置/取消 AI 回答反馈（点赞/踩）。乐观更新本地状态，失败回滚。
+  async function handleFeedback(message: Message, feedback: 'like' | 'dislike' | null) {
+    if (!message.id || !currentSessionId) return
+    const prevFeedback = message.feedback ?? null
+    setMessages((prev) =>
+      prev.map((m) => (m.id === message.id ? { ...m, feedback } : m))
+    )
+    try {
+      await sessionApi.setMessageFeedback(currentSessionId, message.id, feedback)
+    } catch (e) {
+      // 回滚
+      setMessages((prev) =>
+        prev.map((m) => (m.id === message.id ? { ...m, feedback: prevFeedback } : m))
+      )
+      toast.error(e instanceof Error ? e.message : '操作失败')
+    }
+  }
+
+  // 重试最新一轮：先调后端删除该轮 user+assistant 消息，再用原问题与附件重新发起。
+  async function handleRetry() {
+    if (!currentSessionId || isStreaming) return
+    try {
+      const retry = await sessionApi.retryLastRound(currentSessionId)
+      // 本地移除最后一轮（最后一条 user 及其之后的所有消息）
+      pendingSendSessionRef.current = currentSessionId
+      setMessages((prev) => {
+        let lastUserIdx = -1
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i].role === 'user') { lastUserIdx = i; break }
+        }
+        return lastUserIdx >= 0 ? prev.slice(0, lastUserIdx) : prev
+      })
+      // 恢复该轮绑定的附件供重发（重新设为暂存文件由 sessionFiles 列表驱动，这里仅重发问题）
+      await handleSend(retry.content)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '重试失败')
     }
   }
 
@@ -882,25 +946,35 @@ function Chat() {
   return (
     <div className="h-full flex flex-col relative">
       {/* 消息列表 */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-36">
+      <div ref={scrollContainerRef} className="flex-1 overflow-auto pb-44">
         {isLoadingMessages ? (
           <ChatMessagesSkeleton />
         ) : (
           <div className="max-w-3xl mx-auto py-6 px-4 space-y-5 animate-in fade-in-0 duration-500">
-            {messages.map((msg, idx) => (
-              <MessageBubble
-                key={idx}
-                message={msg}
-                index={idx}
-                isStreaming={isStreaming}
-                isLast={idx === messages.length - 1}
-                expandedRefs={expandedRefs}
-                expandedRefDetails={expandedRefDetails}
-                onToggleRef={toggleRef}
-                onToggleRefDetail={toggleRefDetail}
-                imagePreviewUrls={imagePreviewUrls}
-              />
-            ))}
+            {(() => {
+              // 最新一条 assistant 消息的下标：仅它可重试（历史轮不可重试，避免破坏后续历史）
+              let lastAssistantIdx = -1
+              for (let i = messages.length - 1; i >= 0; i--) {
+                if (messages[i].role === 'assistant') { lastAssistantIdx = i; break }
+              }
+              return messages.map((msg, idx) => (
+                <MessageBubble
+                  key={idx}
+                  message={msg}
+                  index={idx}
+                  isStreaming={isStreaming}
+                  isLast={idx === messages.length - 1}
+                  isLastAssistant={idx === lastAssistantIdx && !isStreaming}
+                  expandedRefs={expandedRefs}
+                  expandedRefDetails={expandedRefDetails}
+                  onToggleRef={toggleRef}
+                  onToggleRefDetail={toggleRefDetail}
+                  imagePreviewUrls={imagePreviewUrls}
+                  onFeedback={handleFeedback}
+                  onRetry={handleRetry}
+                />
+              ))
+            })()}
           </div>
         )}
       </div>
