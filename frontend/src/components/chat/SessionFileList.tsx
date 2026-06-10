@@ -116,13 +116,8 @@ function SessionFileList({
   // 服务端文件 -> 归一化模型（全状态可取消：处理中=取消，其余=移除）
   const serverChips: ChipModel[] = files.map((f) => {
     const ext = (f.file_type || fileExt(f.filename)).toLowerCase()
-    // 图片已有内联缩略图 + 点击放大（客户端 blob，即时），不走 Artifact；
-    // 其余可预览类型（pdf/txt/md/csv）点击 chip 主体在 Artifact 面板预览。
-    const previewable =
-      f.status === 'completed' &&
-      !!sessionId &&
-      isPreviewable(ext) &&
-      !isImageFilename(f.filename)
+    // 已完成 + 有会话上下文 + 支持的类型（含图片）→ 点击 chip 在 Artifact 面板预览。
+    const previewable = f.status === 'completed' && !!sessionId && isPreviewable(ext)
     return {
       key: f.id,
       filename: f.filename,
@@ -234,7 +229,13 @@ function SessionFileList({
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setPreview({ url: previewUrl!, name: c.filename })}
+                          onClick={(e) => {
+                            // 有 Artifact 能力（已落库的服务端图片）→ 交给 chip 的 onPreview
+                            // 在右侧面板打开；否则退回本地放大弹窗（仅本次上传的客户端 blob）。
+                            if (c.onPreview) return
+                            e.stopPropagation()
+                            setPreview({ url: previewUrl!, name: c.filename })
+                          }}
                           className="h-full w-full rounded-md overflow-hidden ring-1 ring-border hover:ring-primary/50 transition-all cursor-zoom-in"
                           aria-label={`预览图片 ${c.filename}`}
                         >

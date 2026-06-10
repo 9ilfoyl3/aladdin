@@ -971,6 +971,7 @@ function Chat() {
                   onToggleRef={toggleRef}
                   onToggleRefDetail={toggleRefDetail}
                   imagePreviewUrls={imagePreviewUrls}
+                  sessionId={currentSessionId}
                   onFeedback={handleFeedback}
                   onRetry={handleRetry}
                 />
