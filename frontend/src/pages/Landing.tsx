@@ -15,7 +15,7 @@ import GradientText from '@/components/reactbits/GradientText'
 import MagicBento, { type BentoCardData } from '@/components/reactbits/MagicBento'
 
 // GitHub 仓库地址（按需替换为真实仓库）
-const GITHUB_URL = 'https://github.com/your-org/artoo'
+const GITHUB_URL = 'https://github.com/9ilfoyl3/artoo'
 
 // 能力 Magic Bento 卡片数据（DeerFlow 式错落布局，4列×3行铺满）
 const BENTO_CARDS: BentoCardData[] = [
