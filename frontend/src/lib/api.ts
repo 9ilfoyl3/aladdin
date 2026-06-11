@@ -740,6 +740,11 @@ export const sessionFileApi = {
 }
 
 // 会话管理接口
+// 用问题文本截断生成会话占位标题（≤30 字符，与后端 _truncate_title 对齐）。
+export function truncateSessionTitle(query: string): string {
+  return query.slice(0, 30) + (query.length > 30 ? '...' : '')
+}
+
 export const sessionApi = {
   list: () => request<SessionItem[]>('/sessions'),
   create: (data: { title?: string; kb_id?: string; model_config_id?: string }) =>

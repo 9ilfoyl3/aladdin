@@ -11,6 +11,7 @@ interface SessionContextValue {
   handleNewSession: () => void
   handleDeleteSession: (sessionId: string, e: React.MouseEvent) => void
   refreshSessions: () => void
+  addOptimisticSession: (session: SessionItem) => void
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null)
@@ -51,6 +52,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     queryClient.invalidateQueries({ queryKey: ['sessions'] })
   }, [queryClient])
 
+  // 新建会话时乐观插入侧栏：直接写入 react-query 缓存，让会话（以用户问题为标题）
+  // 立即出现，无需等后端入库用户消息 + 首个流式分片返回。后续 refreshSessions 会用
+  // 服务端真实数据（含 LLM 精炼后的标题）覆盖。已存在同 id 则跳过（避免重复）。
+  const addOptimisticSession = useCallback((session: SessionItem) => {
+    queryClient.setQueryData<SessionItem[]>(['sessions'], (prev) => {
+      const list = prev ?? []
+      if (list.some((s) => s.id === session.id)) return list
+      return [session, ...list]
+    })
+  }, [queryClient])
+
   return (
     <SessionContext.Provider value={{
       sessions,
@@ -59,6 +71,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       handleNewSession,
       handleDeleteSession,
       refreshSessions,
+      addOptimisticSession,
     }}>
       {children}
     </SessionContext.Provider>

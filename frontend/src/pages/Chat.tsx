@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi } from '@/lib/api'
+import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi, truncateSessionTitle } from '@/lib/api'
 import type { SessionFileResponse, MessageAttachment } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
@@ -57,7 +57,7 @@ function Chat() {
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
 
-  const { currentSessionId, setCurrentSessionId, refreshSessions } = useSession()
+  const { currentSessionId, setCurrentSessionId, refreshSessions, addOptimisticSession } = useSession()
   const confirm = useConfirm()
   const queryClient = useQueryClient()
 
@@ -290,8 +290,9 @@ function Chat() {
         // 标记该会话为本地发起发送，避免 setCurrentSessionId 触发的 loadMessages 覆盖本地消息
         pendingSendSessionRef.current = session.id
         setCurrentSessionId(session.id)
-        // 不在此刷新侧栏：此刻会话尚无消息（被空会话过滤隐藏）。
-        // 待首个流式分片到达（后端已入库用户消息+播种标题）时再刷新。
+        // 乐观插入侧栏：以用户问题作占位标题立即显示，无需等后端入库 + 首个流式分片。
+        // 后续 refreshSessions 会用服务端真实数据（含 LLM 精炼后的标题）覆盖。
+        addOptimisticSession({ ...session, title: truncateSessionTitle(query) })
       } catch (e) {
         console.error('自动创建会话失败', e)
       }
