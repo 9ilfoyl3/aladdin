@@ -441,7 +441,13 @@ class MilvusClient:
         for attempt in range(3):
             try:
                 result = collection.insert(data)
-                collection.flush()
+                # 注意：此处**不调用 flush()**。flush 会强制把增量数据封成 sealed
+                # segment 落盘，是重操作（实测单次可达十余秒），在 ARM64 / 高并发 /
+                # 资源受限环境下可能长时间阻塞甚至拖垮进程，导致上层 DB 事务挂成
+                # idle-in-transaction、上传永久卡住。Milvus 会按自身策略自动 flush；
+                # 检索可见性由 search 前的 collection.load()（见 _ensure_loaded +
+                # 下方 _loaded_at 失效）保证，growing segment 中的新数据 load 后即可被
+                # 搜索到，无需客户端逐批显式 flush。
                 # 写入后清除该 collection 的加载标记（Req 15.4），
                 # 使下次搜索强制重新 load，避免读到旧加载快照。
                 self._loaded_at.pop(name, None)
@@ -607,7 +613,8 @@ class MilvusClient:
         ids_str = ", ".join(f'"{cid}"' for cid in chunk_ids)
         expr = f"chunk_id in [{ids_str}]"
         collection.delete(expr)
-        collection.flush()
+        # 不 flush（同 _insert_sync 的理由，避免重操作阻塞）：delete 返回后即通过
+        # delete buffer 在查询中生效，下次 load（由 _loaded_at 失效强制触发）带上删除标记。
         # 删除后清除加载标记（Req 15.4），下次搜索强制重新 load。
         self._loaded_at.pop(name, None)
 
@@ -630,7 +637,8 @@ class MilvusClient:
 
         expr = f'doc_id == "{doc_id}"'
         collection.delete(expr)
-        collection.flush()
+        # 不 flush：此方法在上传写索引前的孤儿清理热路径上被调用（_cleanup_milvus_orphans），
+        # flush 阻塞会直接拖垮上传。delete 经 delete buffer 即时生效，可见性由 load 保证。
         # 删除后清除加载标记（Req 15.4），下次搜索强制重新 load。
         self._loaded_at.pop(name, None)
 
@@ -660,7 +668,7 @@ class MilvusClient:
             expr = f"doc_id in [{ids_str}]"
             collection.delete(expr)
 
-        collection.flush()
+        # 不 flush（同上）：delete 经 delete buffer 即时生效，可见性由下次 load 保证。
         # 删除后清除加载标记（Req 15.4），下次搜索强制重新 load。
         self._loaded_at.pop(name, None)
         logger.info("Collection %s 批量删除 %d 个文档的向量", name, len(doc_ids))
@@ -682,7 +690,7 @@ class MilvusClient:
 
         expr = build_session_id_expr(session_id)
         collection.delete(expr)
-        collection.flush()
+        # 不 flush（同上）：delete 经 delete buffer 即时生效，可见性由下次 load 保证。
         # 删除后清除加载标记（Req 15.4），下次搜索强制重新 load。
         self._loaded_at.pop(name, None)
 

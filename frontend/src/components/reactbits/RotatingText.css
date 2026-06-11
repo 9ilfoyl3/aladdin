@@ -1,0 +1,64 @@
+.rotating-text {
+  position: relative;
+  display: inline-block;
+  vertical-align: top;
+  overflow: hidden;
+  line-height: 1.1;
+}
+
+/* 占位元素：撑开容器尺寸但不可见 */
+.rotating-text-sizer {
+  display: inline-block;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.rotating-text-item {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+
+  /* 流动渐变填充 */
+  background-image: linear-gradient(to right, #65bd43, #3b82f6, #22c55e, #65bd43);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: rotate-gradient-flow 8s linear infinite;
+}
+
+/* 激活项：从上方淡入并下移到中间（fade in top → bottom） */
+.rotating-text-item.is-active {
+  animation:
+    rotate-gradient-flow 8s linear infinite,
+    rotate-fade-in 0.55s ease forwards;
+}
+
+@keyframes rotate-gradient-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes rotate-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-70%);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -11,6 +11,7 @@ import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
 import AgentConfig from './pages/AgentConfig'
 import Skills from './pages/Skills'
+import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import ChangePassword from './pages/ChangePassword'
@@ -45,23 +46,31 @@ function DefaultLanding() {
   return <Navigate to={isSuperAdmin ? '/tenants' : '/knowledge-bases'} replace />
 }
 
+// 根路径入口：未登录展示炫酷落地页；已登录则按身份跳转到对应首页。
+function RootEntry() {
+  const { isAuthenticated, ready } = useAuth()
+  if (!ready) return null
+  if (!isAuthenticated) return <Landing />
+  return <DefaultLanding />
+}
+
 // 应用根组件：路由配置
 function App() {
   return (
     <Routes>
+      <Route path="/" element={<RootEntry />} />
+      <Route path="/landing" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/change-password" element={<ChangePassword />} />
       <Route path="/invite/:token" element={<InviteAccept />} />
       <Route
-        path="/"
         element={
           <RequireAuth>
             <Layout />
           </RequireAuth>
         }
       >
-        <Route index element={<DefaultLanding />} />
         <Route path="knowledge-bases" element={<KnowledgeBase />} />
         <Route path="knowledge-bases/:id" element={<Documents />} />
         <Route path="chat" element={<Chat />} />
