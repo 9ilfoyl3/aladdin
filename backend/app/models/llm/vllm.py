@@ -425,8 +425,11 @@ class VllmLLM(LLMProvider):
                             response_type="content",
                         )
 
-                    # 处理 reasoning_content delta（DeepSeek/doubao 等模型的思考内容）
-                    reasoning = delta.get("reasoning_content") or ""
+                    # 处理思考内容 delta：
+                    # - reasoning_content：DeepSeek/doubao 及 vLLM 旧版 reasoning parser 的字段名
+                    # - reasoning：vLLM 0.21+ / 部分 Qwen3 部署使用的字段名
+                    # 两者择一即可，做双字段兼容，避免换 vLLM 版本/模型时思考通道丢数据。
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                     if reasoning:
                         yield StreamChunk(
                             content=reasoning,

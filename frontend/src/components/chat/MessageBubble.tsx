@@ -383,9 +383,11 @@ function AgentStreamContent({
   isLast: boolean
   totalDurationMs?: number
 }) {
-  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染
+  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染。
+  // 思考段需过滤纯空白内容（如模型只吐了 "\n" 的空思考）——按需思考型模型在直接调工具的
+  // 轮次常产出空 thought，渲染出来会是一个空步骤，无意义。tool_call 段的 content 是工具名，不过滤。
   const processSegments = segments.filter(
-    (s) => s.type === 'thought' || s.type === 'tool_call'
+    (s) => (s.type === 'thought' && s.content.trim() !== '') || s.type === 'tool_call'
   )
   const answerSegments = segments.filter((s) => s.type === 'answer')
 
