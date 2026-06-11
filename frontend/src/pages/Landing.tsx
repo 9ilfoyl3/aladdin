@@ -15,7 +15,7 @@ import GradientText from '@/components/reactbits/GradientText'
 import MagicBento, { type BentoCardData } from '@/components/reactbits/MagicBento'
 
 // GitHub 仓库地址（按需替换为真实仓库）
-const GITHUB_URL = 'https://github.com/your-org/artoo'
+const GITHUB_URL = 'https://github.com/9ilfoyl3/artoo'
 
 // 能力 Magic Bento 卡片数据（DeerFlow 式错落布局，4列×3行铺满）
 const BENTO_CARDS: BentoCardData[] = [
@@ -202,18 +202,18 @@ export default function Landing() {
         />
       </section>
 
-      {/* CTA */}
+      {/* CTA：加入社群 */}
       <section className="relative px-6 py-16">
         <div className="mx-auto max-w-3xl text-center">
           <h2 className="text-3xl font-semibold tracking-tight sm:text-5xl">
-            把分散文档沉淀为
-            <br />
             <GradientText animationSpeed={7} colors={['#65bd43', '#22c55e', '#3b82f6', '#65bd43']}>
-              可推理、可溯源的知识资产
+              和我们一起共建
             </GradientText>
           </h2>
           <p className="mx-auto mt-6 max-w-xl text-white/55">
-            所有 AI 推理通过 HTTP 调用外部服务，后端轻量、易于私有化离线部署，数据完全自主可控。
+            欢迎提交 Issue 与 Pull Request，分享你的想法，一起打磨更强的 Agentic RAG。每一次贡献，都在让
+            <span className="font-serif font-semibold"> Artoo </span>
+            变得更好。
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
             <StarBorder as="a" href={GITHUB_URL} target="_blank" rel="noreferrer" color="#65bd43" speed="5s">

@@ -368,3 +368,11 @@ Issues and Pull Requests are welcome.
 ## 📄 License
 
 Released under the [MIT License](./LICENSE). You are free to use, modify, and distribute the code with proper attribution.
+
+## 📈 Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date" />
+</picture>
