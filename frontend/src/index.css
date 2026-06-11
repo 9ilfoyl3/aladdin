@@ -529,3 +529,27 @@
     letter-spacing: var(--tracking-normal);
   }
 }
+
+/* Agent 演示气泡淡入 */
+@keyframes agentFade {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 工具调用入场：图标快速旋转一下 */
+@keyframes toolSpin {
+  0% {
+    transform: rotate(-180deg) scale(0.6);
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(0deg) scale(1);
+    opacity: 1;
+  }
+}
