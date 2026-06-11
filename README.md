@@ -369,3 +369,11 @@ make build-app          # 仅应用镜像的更新包（不含中间件）
 ## 📄 许可证
 
 本项目基于 [MIT](./LICENSE) 协议发布。你可以自由使用、修改和分发本项目代码，但需保留原始版权声明。
+
+## 📈 Star 趋势
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=9ilfoyl3/artoo&type=Date" />
+</picture>
