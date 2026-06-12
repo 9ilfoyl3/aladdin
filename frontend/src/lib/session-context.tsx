@@ -9,6 +9,8 @@ interface SessionContextValue {
   currentSessionId: string | null
   setCurrentSessionId: (id: string | null) => void
   handleNewSession: () => void
+  /** 「新对话」点击计数：每次点击自增，供页面强制重置本地状态（即使已处于空会话）。 */
+  newSessionNonce: number
   handleDeleteSession: (sessionId: string, e: React.MouseEvent) => void
   refreshSessions: () => void
   addOptimisticSession: (session: SessionItem) => void
@@ -20,6 +22,9 @@ const SessionContext = createContext<SessionContextValue | null>(null)
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  // 「新对话」点击计数：即使已处于空会话（currentSessionId 仍为 null），自增也能驱动
+  // 页面重置输入框/暂存文件等本地状态。
+  const [newSessionNonce, setNewSessionNonce] = useState(0)
   const queryClient = useQueryClient()
   // 仅在已登录、且非"必须改密"态时拉取会话列表。
   // 否则在公开页（如 /invite/:token、/login）会以无 token 调用受保护的 /sessions，
@@ -59,6 +64,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const handleNewSession = useCallback(() => {
     setCurrentSessionId(null)
+    setNewSessionNonce((n) => n + 1)
   }, [])
 
   const handleDeleteSession = useCallback(async (sessionId: string, e: React.MouseEvent) => {
@@ -111,6 +117,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       currentSessionId,
       setCurrentSessionId,
       handleNewSession,
+      newSessionNonce,
       handleDeleteSession,
       refreshSessions,
       addOptimisticSession,

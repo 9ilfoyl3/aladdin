@@ -14,6 +14,7 @@ import SideRays from '@/components/SideRays'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
+import { useArtifactStore } from '@/stores/artifactStore'
 
 interface KnowledgeBaseItem {
   id: string
@@ -57,9 +58,10 @@ function Chat() {
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
 
-  const { currentSessionId, setCurrentSessionId, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
+  const { currentSessionId, setCurrentSessionId, newSessionNonce, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
   const confirm = useConfirm()
   const queryClient = useQueryClient()
+  const closeArtifact = useArtifactStore((s) => s.closeArtifact)
 
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
@@ -139,8 +141,12 @@ function Chat() {
 
   // 会话切换时加载消息
   useEffect(() => {
+    // 切换/进入会话时关闭可能残留的 Artifact 预览（上一会话打开的附件预览不应带到新会话）
+    closeArtifact()
     if (currentSessionId === null) {
       setMessages([])
+      setInput('')
+      setPendingFiles([])
       setExpandedRefs(new Set())
       setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
@@ -276,6 +282,23 @@ function Chat() {
     }
     loadMessages()
   }, [currentSessionId])
+
+  // 点击「新对话」时强制清空当前页面所有本地状态（输入框、暂存文件、消息、引用展开态、
+  // 图片预览等）。用 nonce 触发：即使已处于空会话（currentSessionId 不变）也能重置。
+  useEffect(() => {
+    if (newSessionNonce === 0) return
+    closeArtifact()
+    setMessages([])
+    setInput('')
+    setPendingFiles([])
+    setExpandedRefs(new Set())
+    setExpandedRefDetails(new Set())
+    setContextUsage({ current: 0, max: 0 })
+    // 释放本会话内上传的图片预览 object URL，避免内存泄漏
+    Object.values(imagePreviewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url))
+    imagePreviewUrlsRef.current = {}
+    setImagePreviewUrls({})
+  }, [newSessionNonce])
 
   // 发送消息
   async function handleSend(overrideQuery?: string) {
@@ -989,6 +1012,7 @@ function Chat() {
                   onToggleRefDetail={toggleRefDetail}
                   imagePreviewUrls={imagePreviewUrls}
                   sessionId={currentSessionId}
+                  sessionFiles={sessionFiles}
                   onFeedback={handleFeedback}
                   onRetry={handleRetry}
                 />

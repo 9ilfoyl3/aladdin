@@ -8,8 +8,18 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { isImageFilename } from '@/components/chat/SessionFileList'
-import type { MessageAttachment } from '@/lib/api'
-import { useArtifactStore, isPreviewable } from '@/stores/artifactStore'
+import type { MessageAttachment, SessionFileResponse } from '@/lib/api'
+import { useArtifactStore, isPreviewable, type ArtifactTarget } from '@/stores/artifactStore'
+
+// 从文件名提取小写扩展名（无点），用于判断是否可预览
+function extOf(name: string): string {
+  return name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+}
+
+// 会话文件扩展名：优先 file_type，回退文件名后缀
+function sessionFileExt(f: SessionFileResponse): string {
+  return (f.file_type || extOf(f.filename)).toLowerCase()
+}
 
 // 流式渲染动画配置：模糊渐入、按字符、放慢节奏
 const STREAM_ANIMATION = {
@@ -96,6 +106,8 @@ interface MessageBubbleProps {
   imagePreviewUrls?: Record<string, string>
   /** 当前会话 ID（用于附件在 Artifact 面板按会话拉取原件预览） */
   sessionId?: string | null
+  /** 本会话已上传文件列表（用于 read_attachment 步骤按文件名解析原件、点击预览） */
+  sessionFiles?: SessionFileResponse[]
   /** 设置/取消反馈（点赞/踩）。仅 assistant 且已落库（有 id）时可用。 */
   onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
   /** 重试本轮对话。仅最新一条 assistant 消息可用。 */
@@ -115,6 +127,7 @@ function MessageBubble({
   onToggleRefDetail,
   imagePreviewUrls = {},
   sessionId = null,
+  sessionFiles = [],
   onFeedback,
   onRetry,
   isLastAssistant = false,
@@ -162,6 +175,8 @@ function MessageBubble({
             isStreaming={isStreaming}
             isLast={isLast}
             totalDurationMs={msg.totalDurationMs}
+            sessionId={sessionId}
+            sessionFiles={sessionFiles}
           />
         ) : (
           <>
@@ -377,11 +392,15 @@ function AgentStreamContent({
   isStreaming,
   isLast,
   totalDurationMs,
+  sessionId,
+  sessionFiles,
 }: {
   segments: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
   totalDurationMs?: number
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
   // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染。
   // 思考段需过滤纯空白内容（如模型只吐了 "\n" 的空思考）——按需思考型模型在直接调工具的
@@ -401,6 +420,8 @@ function AgentStreamContent({
           isLast={isLast}
           totalDurationMs={totalDurationMs}
           answerStarted={answerSegments.length > 0}
+          sessionId={sessionId}
+          sessionFiles={sessionFiles}
         />
       )}
 
@@ -474,12 +495,16 @@ function StepSummaryPanel({
   isLast,
   totalDurationMs,
   answerStarted,
+  sessionId,
+  sessionFiles,
 }: {
   steps: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
   totalDurationMs?: number
   answerStarted?: boolean
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
   const [open, setOpen] = useState(true)
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
@@ -550,6 +575,8 @@ function StepSummaryPanel({
                   expanded={expandedSteps.has(i) || isActive}
                   onToggle={() => toggleStep(i)}
                   animating={isActive}
+                  sessionId={sessionId}
+                  sessionFiles={sessionFiles}
                 />
               )
             })}
@@ -592,16 +619,35 @@ function StepRow({
   expanded,
   onToggle,
   animating,
+  sessionId,
+  sessionFiles,
 }: {
   seg: ContentSegment
   expanded: boolean
   onToggle: () => void
   animating: boolean
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
   const isTool = seg.type === 'tool_call'
   const isSkill = isTool && seg.toolName === 'read_skill'
   const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content
   const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
+
+  // read_attachment 步骤：尝试按文件名解析本会话已上传文件，命中可预览类型则可点击预览。
+  // filename 省略时（默认读第一个附件），回退到列表首个文件，与后端解析逻辑一致。
+  const attachmentTarget: ArtifactTarget | null = (() => {
+    if (seg.toolName !== 'read_attachment' || !sessionId || !sessionFiles?.length) return null
+    const wanted = typeof seg.toolArgs?.filename === 'string' ? seg.toolArgs.filename.trim().toLowerCase() : ''
+    const file = wanted
+      ? sessionFiles.find((f) => f.filename.trim().toLowerCase() === wanted)
+      : sessionFiles[0]
+    if (!file) return null
+    const ext = sessionFileExt(file)
+    if (!isPreviewable(ext)) return null
+    return { id: file.id, filename: file.filename, fileType: ext, source: 'session-file', sessionId }
+  })()
 
   return (
     <div className="rounded-lg border border-border/40 bg-background/40 overflow-hidden">
@@ -619,8 +665,30 @@ function StepRow({
         {isTool ? (
           <span className="truncate text-foreground/80">
             {toolLabel}
-            {argSummary && (
-              <span className="font-mono text-primary/80 ml-1">{argSummary}</span>
+            {attachmentTarget ? (
+              <span
+                role="link"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openArtifact(attachmentTarget)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    openArtifact(attachmentTarget)
+                  }
+                }}
+                className="font-mono text-primary underline-offset-2 hover:underline cursor-pointer ml-1"
+                title="点击预览原文"
+              >
+                {attachmentTarget.filename}
+              </span>
+            ) : (
+              argSummary && (
+                <span className="font-mono text-primary/80 ml-1">{argSummary}</span>
+              )
             )}
           </span>
         ) : (
@@ -643,8 +711,27 @@ function StepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <p className="text-xs text-muted-foreground">
-                {isSkill ? '加载技能' : '调用工具'}{' '}
-                <span className="font-mono">{argSummary || toolLabel}</span>
+                {attachmentTarget ? (
+                  <>
+                    已读取附件原文{' '}
+                    <button
+                      onClick={() => openArtifact(attachmentTarget)}
+                      className="font-medium text-primary underline-offset-2 hover:underline cursor-pointer"
+                      title="点击预览原文"
+                    >
+                      {attachmentTarget.filename}
+                    </button>
+                    ，点击文件名可查看原文。
+                  </>
+                ) : isSkill ? (
+                  <>
+                    已加载技能 <span className="font-mono">{argSummary || toolLabel}</span>
+                  </>
+                ) : (
+                  <>
+                    已调用 <span className="font-mono">{argSummary || toolLabel}</span>
+                  </>
+                )}
               </p>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
@@ -824,6 +911,7 @@ function ReferencesBlock({
   onToggleRefDetail: (key: string) => void
   highlightChild: (parent: string, child: string) => React.ReactNode
 }) {
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
   return (
     <div className="mt-3">
       <button
@@ -848,15 +936,31 @@ function ReferencesBlock({
             {references.map((ref, refIdx) => {
               const detailKey = `${index}-${refIdx}`
               const isDetailExpanded = expandedRefDetails.has(detailKey)
+              // 引用来自正式知识库文档：按 doc_id + 文件名扩展名解析可预览类型，命中则文件名可点击预览。
+              const refExt = ref.filename ? extOf(ref.filename) : ''
+              const refTarget: ArtifactTarget | null =
+                ref.doc_id && ref.filename && isPreviewable(refExt)
+                  ? { id: ref.doc_id, filename: ref.filename, fileType: refExt, source: 'document' }
+                  : null
               return (
                 <div
                   key={refIdx}
                   className="rounded-xl border border-border bg-card p-3.5 transition-all duration-200 hover:border-primary/20 hover:shadow-sm"
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <FileText className="h-3 w-3 shrink-0" />
-                      <span className="truncate max-w-[220px]">{ref.filename || ref.doc_id?.slice(0, 8)}</span>
+                      {refTarget ? (
+                        <button
+                          onClick={() => openArtifact(refTarget)}
+                          className="truncate max-w-[220px] text-primary underline-offset-2 hover:underline cursor-pointer"
+                          title="点击预览"
+                        >
+                          {ref.filename}
+                        </button>
+                      ) : (
+                        <span className="truncate max-w-[220px]">{ref.filename || ref.doc_id?.slice(0, 8)}</span>
+                      )}
                     </div>
                     <Badge variant="outline" className="text-[10px] font-mono tabular-nums px-1.5 py-0">
                       {ref.score?.toFixed(3)}
