@@ -37,6 +37,7 @@ router = APIRouter(
 class EmbedConfigCreate(BaseModel):
     name: str
     config_type: str  # embedding | rerank
+    vendor: Optional[str] = None  # 模型厂商（仅 UI 记忆，运行时仍走 URL 格式自动检测）
     model_name: str = "BAAI/bge-m3"
     # 远程服务字段
     base_url: str
@@ -50,6 +51,7 @@ class EmbedConfigCreate(BaseModel):
 
 class EmbedConfigUpdate(BaseModel):
     name: Optional[str] = None
+    vendor: Optional[str] = None
     model_name: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
@@ -64,6 +66,7 @@ class EmbedConfigResponse(BaseModel):
     name: str
     config_type: str
     provider: str
+    vendor: Optional[str] = None
     model_name: str
     base_url: Optional[str] = None
     api_key_set: bool
@@ -101,6 +104,7 @@ def _to_response(config: EmbedConfig) -> EmbedConfigResponse:
         name=config.name,
         config_type=config.config_type,
         provider=config.provider,
+        vendor=config.vendor,
         model_name=config.model_name,
         base_url=config.base_url,
         api_key_set=bool(config.api_key),
@@ -196,6 +200,7 @@ async def create_embed_config(body: EmbedConfigCreate, db: AsyncSession = Depend
         name=body.name,
         config_type=body.config_type,
         provider="remote",
+        vendor=body.vendor,
         model_name=body.model_name,
         base_url=body.base_url,
         api_key=body.api_key or None,

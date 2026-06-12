@@ -28,13 +28,14 @@ router = APIRouter(
 class LLMConfigCreate(BaseModel):
     name: str
     provider: str  # ollama | vllm
+    vendor: Optional[str] = None  # 模型厂商：openai/aliyun/zhipu/volcengine/... | None
     base_url: str
     model: str
     api_key: Optional[str] = None
     is_default: bool = False
     chat_visible: bool = True
     stream_enabled: bool = True
-    thinking_enabled: bool = False
+    thinking_control: Optional[str] = None  # none/chat_template_kwargs/enable_thinking/thinking_type
     max_context_tokens: Optional[int] = None
 
     @field_validator("max_context_tokens", mode="before")
@@ -48,13 +49,14 @@ class LLMConfigCreate(BaseModel):
 class LLMConfigUpdate(BaseModel):
     name: Optional[str] = None
     provider: Optional[str] = None
+    vendor: Optional[str] = None
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
     is_default: Optional[bool] = None
     chat_visible: Optional[bool] = None
     stream_enabled: Optional[bool] = None
-    thinking_enabled: Optional[bool] = None
+    thinking_control: Optional[str] = None
     max_context_tokens: Optional[int] = None
 
     @field_validator("max_context_tokens", mode="before")
@@ -70,15 +72,35 @@ class LLMConfigResponse(BaseModel):
     id: str
     name: str
     provider: str
+    vendor: Optional[str] = None
     base_url: str
     model: str
     api_key_set: bool  # 是否已设置 API Key（不返回明文）
     is_default: bool
     chat_visible: bool
     stream_enabled: bool
-    thinking_enabled: bool
+    thinking_control: Optional[str] = None
     max_context_tokens: Optional[int] = None
     created_at: str
+
+
+def _to_response(c: LLMConfig) -> "LLMConfigResponse":
+    """构造 LLMConfigResponse（不返回 api_key 明文）"""
+    return LLMConfigResponse(
+        id=c.id,
+        name=c.name,
+        provider=c.provider,
+        vendor=c.vendor,
+        base_url=c.base_url,
+        model=c.model,
+        api_key_set=bool(c.api_key),
+        is_default=c.is_default,
+        chat_visible=c.chat_visible,
+        stream_enabled=c.stream_enabled,
+        thinking_control=c.thinking_control,
+        max_context_tokens=c.max_context_tokens,
+        created_at=c.created_at.isoformat() if c.created_at else "",
+    )
 
 
 @router.get("", response_model=list[LLMConfigResponse])
@@ -93,23 +115,7 @@ async def list_llm_configs(
         query = query.where(LLMConfig.chat_visible == chat_visible)
     result = await db.execute(query)
     configs = result.scalars().all()
-    return [
-        LLMConfigResponse(
-            id=c.id,
-            name=c.name,
-            provider=c.provider,
-            base_url=c.base_url,
-            model=c.model,
-            api_key_set=bool(c.api_key),
-            is_default=c.is_default,
-            chat_visible=c.chat_visible,
-            stream_enabled=c.stream_enabled,
-            thinking_enabled=c.thinking_enabled,
-            max_context_tokens=c.max_context_tokens,
-            created_at=c.created_at.isoformat() if c.created_at else "",
-        )
-        for c in configs
-    ]
+    return [_to_response(c) for c in configs]
 
 
 @router.post("", response_model=LLMConfigResponse, status_code=201)
@@ -131,33 +137,21 @@ async def create_llm_config(
         id=config_id,
         name=body.name,
         provider=body.provider,
+        vendor=body.vendor,
         base_url=body.base_url,
         model=body.model,
         api_key=body.api_key or None,
         is_default=body.is_default,
         chat_visible=body.chat_visible,
         stream_enabled=body.stream_enabled,
-        thinking_enabled=body.thinking_enabled,
+        thinking_control=body.thinking_control,
         max_context_tokens=body.max_context_tokens,
     )
     db.add(config)
     await db.flush()
     await db.refresh(config)
 
-    return LLMConfigResponse(
-        id=config.id,
-        name=config.name,
-        provider=config.provider,
-        base_url=config.base_url,
-        model=config.model,
-        api_key_set=bool(config.api_key),
-        is_default=config.is_default,
-        chat_visible=config.chat_visible,
-        stream_enabled=config.stream_enabled,
-        thinking_enabled=config.thinking_enabled,
-        max_context_tokens=config.max_context_tokens,
-        created_at=config.created_at.isoformat() if config.created_at else "",
-    )
+    return _to_response(config)
 
 
 @router.put("/{config_id}", response_model=LLMConfigResponse)
@@ -187,20 +181,7 @@ async def update_llm_config(
     await db.flush()
     await db.refresh(config)
 
-    return LLMConfigResponse(
-        id=config.id,
-        name=config.name,
-        provider=config.provider,
-        base_url=config.base_url,
-        model=config.model,
-        api_key_set=bool(config.api_key),
-        is_default=config.is_default,
-        chat_visible=config.chat_visible,
-        stream_enabled=config.stream_enabled,
-        thinking_enabled=config.thinking_enabled,
-        max_context_tokens=config.max_context_tokens,
-        created_at=config.created_at.isoformat() if config.created_at else "",
-    )
+    return _to_response(config)
 
 
 @router.delete("/{config_id}", status_code=204)
@@ -221,9 +202,11 @@ async def delete_llm_config(
 class LLMTestRequest(BaseModel):
     """测试模型连通性请求"""
     provider: str
+    vendor: Optional[str] = None
     base_url: str
     model: str
     api_key: Optional[str] = None
+    thinking_control: Optional[str] = None
     config_id: Optional[str] = None  # 编辑已有配置时传入，用于补全空密钥
 
 
@@ -254,7 +237,13 @@ async def test_llm_connection(
         if body.provider == "ollama":
             llm = OllamaLLM(base_url=body.base_url, model=body.model)
         else:
-            llm = VllmLLM(base_url=body.base_url, model=body.model, api_key=api_key)
+            llm = VllmLLM(
+                base_url=body.base_url,
+                model=body.model,
+                api_key=api_key,
+                provider=body.vendor,
+                thinking_control=body.thinking_control,
+            )
 
         # 发送简单测试消息
         messages = [{"role": "user", "content": "你好，请回复测试成功"}]
@@ -285,7 +274,13 @@ async def test_llm_config(
         if config.provider == "ollama":
             llm = OllamaLLM(base_url=config.base_url, model=config.model)
         else:
-            llm = VllmLLM(base_url=config.base_url, model=config.model, api_key=config.api_key or "")
+            llm = VllmLLM(
+                base_url=config.base_url,
+                model=config.model,
+                api_key=config.api_key or "",
+                provider=config.vendor,
+                thinking_control=config.thinking_control,
+            )
 
         messages = [{"role": "user", "content": "你好，请回复测试成功"}]
         reply = await llm.generate(messages)

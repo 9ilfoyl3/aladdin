@@ -3,10 +3,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, CheckCircle, XCircle, Zap, Globe, Power } from 'lucide-react'
 import { embedConfigApi } from '@/lib/api'
 import type { EmbedConfigItem } from '@/lib/api'
+import { providersForCategory, defaultBaseUrl, type ModelCategory } from '@/lib/model-providers'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -16,6 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 interface FormData {
   name: string
   config_type: string
+  vendor: string
   model_name: string
   base_url: string
   api_key: string
@@ -27,6 +30,7 @@ interface FormData {
 const emptyForm: FormData = {
   name: '',
   config_type: 'embedding',
+  vendor: 'generic',
   model_name: 'BAAI/bge-m3',
   base_url: '',
   api_key: '',
@@ -54,6 +58,7 @@ function EmbedConfig() {
     mutationFn: (data: FormData) => embedConfigApi.create({
       name: data.name,
       config_type: data.config_type,
+      vendor: data.vendor,
       model_name: data.model_name,
       base_url: data.base_url,
       api_key: data.api_key || undefined,
@@ -156,11 +161,22 @@ function EmbedConfig() {
     setShowDialog(true)
   }
 
+  // 选服务商：自动回填 base_url（仅当前为空时）。运行时仍走后端 URL 格式自动检测。
+  function handleVendorChange(vendor: string) {
+    setForm((prev) => {
+      const url = defaultBaseUrl(vendor, prev.config_type as ModelCategory)
+      const next = { ...prev, vendor }
+      if (url && !prev.base_url.trim()) next.base_url = url
+      return next
+    })
+  }
+
   function openEdit(item: EmbedConfigItem) {
     setEditingItem(item)
     setForm({
       name: item.name,
       config_type: item.config_type,
+      vendor: item.vendor || 'generic',
       model_name: item.model_name,
       base_url: item.base_url || '',
       api_key: '',
@@ -183,6 +199,7 @@ function EmbedConfig() {
     if (editingItem) {
       const payload: Record<string, unknown> = {
         name: form.name,
+        vendor: form.vendor,
         model_name: form.model_name,
         base_url: form.base_url,
         timeout: parseFloat(form.timeout) || 60,
@@ -384,6 +401,25 @@ function EmbedConfig() {
                 placeholder="如：TEI Embedding 服务、Jina Rerank"
                 required
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label>服务商</Label>
+              <Select value={form.vendor} onValueChange={handleVendorChange}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {providersForCategory(form.config_type as ModelCategory).map((p) => (
+                    <SelectItem key={p.value} value={p.value}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                选择服务商自动填写地址；TEI/Infinity/自建服务请选「自定义」手动填写。无论选哪家，运行时都按地址格式自动适配
+              </p>
             </div>
 
             <div className="space-y-2">

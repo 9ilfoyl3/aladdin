@@ -395,7 +395,7 @@ export const systemApi = {
 export const llmConfigApi = {
   list: (chatVisible?: boolean) =>
     request<unknown[]>(chatVisible !== undefined ? `/llm-configs?chat_visible=${chatVisible}` : '/llm-configs'),
-  create: (data: { name: string; provider: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_enabled?: boolean; max_context_tokens?: number; chat_visible?: boolean }) =>
+  create: (data: { name: string; provider: string; vendor?: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_control?: string; max_context_tokens?: number; chat_visible?: boolean }) =>
     request<unknown>('/llm-configs', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -409,7 +409,7 @@ export const llmConfigApi = {
     request<void>(`/llm-configs/${id}`, { method: 'DELETE' }),
   test: (id: string) =>
     request<{ success: boolean; message: string; reply?: string }>(`/llm-configs/${id}/test`, { method: 'POST' }),
-  testConnection: (data: { provider: string; base_url: string; model: string; api_key?: string; config_id?: string }) =>
+  testConnection: (data: { provider: string; vendor?: string; base_url: string; model: string; api_key?: string; thinking_control?: string; config_id?: string }) =>
     request<{ success: boolean; message: string; reply?: string }>('/llm-configs/test', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -422,6 +422,7 @@ export interface EmbedConfigItem {
   name: string
   config_type: string  // embedding | rerank
   provider: string  // remote
+  vendor: string | null
   model_name: string
   base_url: string | null
   api_key_set: boolean
@@ -453,6 +454,7 @@ export const embedConfigApi = {
   create: (data: {
     name: string
     config_type: string
+    vendor?: string
     model_name?: string
     base_url: string
     api_key?: string

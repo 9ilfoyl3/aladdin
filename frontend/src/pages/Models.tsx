@@ -2,6 +2,15 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, Star, Cpu, Zap, CheckCircle, XCircle, Globe, Server, Search, LayoutGrid, List } from 'lucide-react'
 import { llmConfigApi } from '@/lib/api'
+import {
+  providersForCategory,
+  defaultBaseUrl,
+  defaultThinkingControl,
+  infraForVendor,
+  vendorLabel,
+  THINKING_CONTROL_OPTIONS,
+  type ThinkingControlValue,
+} from '@/lib/model-providers'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,12 +25,13 @@ interface LLMConfigItem {
   id: string
   name: string
   provider: string
+  vendor: string | null
   base_url: string
   model: string
   api_key_set: boolean
   is_default: boolean
   stream_enabled: boolean
-  thinking_enabled: boolean
+  thinking_control: string | null
   max_context_tokens: number | null
   chat_visible: boolean
   created_at: string
@@ -29,26 +39,26 @@ interface LLMConfigItem {
 
 interface FormData {
   name: string
-  provider: string
+  vendor: string
   base_url: string
   model: string
   api_key: string
   is_default: boolean
   stream_enabled: boolean
-  thinking_enabled: boolean
+  thinking_control: ThinkingControlValue
   max_context_tokens: string
   chat_visible: boolean
 }
 
 const emptyForm: FormData = {
   name: '',
-  provider: 'vllm',
+  vendor: 'generic',
   base_url: '',
   model: '',
   api_key: '',
   is_default: false,
   stream_enabled: true,
-  thinking_enabled: false,
+  thinking_control: 'none',
   max_context_tokens: '',
   chat_visible: true,
 }
@@ -62,6 +72,29 @@ function Models() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [searchQuery, setSearchQuery] = useState('')
   const [filterProvider, setFilterProvider] = useState<string>('all')
+  // 用户是否手动改过思考参数格式（改过则不再随服务商/模型名自动覆盖）
+  const [thinkingManual, setThinkingManual] = useState(false)
+
+  // 选服务商：自动回填 base_url（仅当前为空时），并按服务商+模型重选思考格式
+  function handleVendorChange(vendor: string) {
+    setForm((prev) => {
+      const url = defaultBaseUrl(vendor, 'chat')
+      const next = { ...prev, vendor }
+      // 仅在地址为空时自动填充，避免覆盖用户已手填的地址
+      if (url && !prev.base_url.trim()) next.base_url = url
+      if (!thinkingManual) next.thinking_control = defaultThinkingControl(vendor, prev.model)
+      return next
+    })
+  }
+
+  // 改模型名：若用户未手动定过思考格式，按服务商+模型名重新预选
+  function handleModelChange(model: string) {
+    setForm((prev) => {
+      const next = { ...prev, model }
+      if (!thinkingManual) next.thinking_control = defaultThinkingControl(prev.vendor, model)
+      return next
+    })
+  }
 
   const { data: configs = [], isLoading } = useQuery({
     queryKey: ['llm-configs'],
@@ -80,18 +113,22 @@ function Models() {
   }, [configs, searchQuery, filterProvider])
 
   const createMutation = useMutation({
-    mutationFn: (data: FormData) => llmConfigApi.create({
-      name: data.name,
-      provider: data.provider,
-      base_url: data.base_url,
-      model: data.model,
-      api_key: data.api_key || undefined,
-      is_default: data.is_default,
-      stream_enabled: data.stream_enabled,
-      thinking_enabled: data.thinking_enabled,
-      max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
-      chat_visible: data.chat_visible,
-    }),
+    mutationFn: (data: FormData) => {
+      const infra = infraForVendor(data.vendor)
+      return llmConfigApi.create({
+        name: data.name,
+        provider: infra,
+        vendor: data.vendor,
+        base_url: data.base_url,
+        model: data.model,
+        api_key: data.api_key || undefined,
+        is_default: data.is_default,
+        stream_enabled: data.stream_enabled,
+        thinking_control: infra === 'vllm' ? data.thinking_control : undefined,
+        max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
+        chat_visible: data.chat_visible,
+      })
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['llm-configs'] })
       closeDialog()
@@ -99,9 +136,22 @@ function Models() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<FormData> }) => {
-      const payload: Record<string, unknown> = { ...data }
-      if (!payload.api_key) delete payload.api_key
+    mutationFn: ({ id, data }: { id: string; data: FormData }) => {
+      const infra = infraForVendor(data.vendor)
+      const payload: Record<string, unknown> = {
+        name: data.name,
+        provider: infra,
+        vendor: data.vendor,
+        base_url: data.base_url,
+        model: data.model,
+        is_default: data.is_default,
+        stream_enabled: data.stream_enabled,
+        // Ollama 无需思考参数格式：清空，避免残留旧值
+        thinking_control: infra === 'vllm' ? data.thinking_control : null,
+        max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : null,
+        chat_visible: data.chat_visible,
+      }
+      if (data.api_key) payload.api_key = data.api_key
       return llmConfigApi.update(id, payload)
     },
     onSuccess: () => {
@@ -149,12 +199,15 @@ function Models() {
     setDialogTesting(true)
     setDialogTestResult(null)
     try {
+      const infra = infraForVendor(form.vendor)
       // 始终用表单当前值测试，API Key 为空时后端通过 config_id 从数据库补全
       const result = await llmConfigApi.testConnection({
-        provider: form.provider,
+        provider: infra,
+        vendor: form.vendor,
         base_url: form.base_url,
         model: form.model,
         api_key: form.api_key || undefined,
+        thinking_control: infra === 'vllm' ? form.thinking_control : undefined,
         config_id: editingItem?.id || undefined,
       })
       setDialogTestResult(result)
@@ -168,24 +221,28 @@ function Models() {
   function openCreate() {
     setEditingItem(null)
     setForm(emptyForm)
+    setThinkingManual(false)
     setDialogTestResult(null)
     setShowDialog(true)
   }
 
   function openEdit(item: LLMConfigItem) {
     setEditingItem(item)
+    // 旧数据可能没有 vendor：按基础设施类型回退（ollama→ollama，其余→generic）
+    const vendor = item.vendor || (item.provider === 'ollama' ? 'ollama' : 'generic')
     setForm({
       name: item.name,
-      provider: item.provider,
+      vendor,
       base_url: item.base_url,
       model: item.model,
       api_key: '',
       is_default: item.is_default,
       stream_enabled: item.stream_enabled,
-      thinking_enabled: item.thinking_enabled,
+      thinking_control: (item.thinking_control as ThinkingControlValue) || 'none',
       max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
       chat_visible: item.chat_visible,
     })
+    setThinkingManual(true)  // 编辑既有配置：尊重已存格式，不随服务商/模型自动覆盖
     setShowDialog(true)
   }
 
@@ -236,9 +293,9 @@ function Models() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">全部 Provider</SelectItem>
-              <SelectItem value="ollama">Ollama</SelectItem>
-              <SelectItem value="vllm">OpenAI 兼容</SelectItem>
+              <SelectItem value="all">全部接入方式</SelectItem>
+              <SelectItem value="ollama">Ollama 本地</SelectItem>
+              <SelectItem value="vllm">远端 API</SelectItem>
             </SelectContent>
           </Select>
           <div className="flex items-center border border-border rounded-lg p-0.5 ml-auto">
@@ -302,7 +359,7 @@ function Models() {
                     <Badge variant="secondary" className="text-xs shrink-0">仅内部</Badge>
                   )}
                   <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                    {config.provider}
+                    {vendorLabel(config.vendor)}
                   </Badge>
                 </div>
                 <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
@@ -344,7 +401,7 @@ function Models() {
             <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm border-b border-border">
               <tr>
                 <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">名称</th>
-                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">Provider</th>
+                <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">服务商</th>
                 <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden md:table-cell">模型</th>
                 <th className="text-left font-medium px-4 py-2.5 text-muted-foreground hidden lg:table-cell">地址</th>
                 <th className="text-right font-medium px-4 py-2.5 text-muted-foreground">操作</th>
@@ -362,7 +419,7 @@ function Models() {
                   </td>
                   <td className="px-4 py-3">
                     <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20">
-                      {config.provider}
+                      {vendorLabel(config.vendor)}
                     </Badge>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground truncate max-w-[160px] hidden md:table-cell">{config.model}</td>
@@ -390,119 +447,146 @@ function Models() {
 
       {/* 创建/编辑对话框 */}
       <Dialog open={showDialog} onOpenChange={closeDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingItem ? '编辑模型' : '添加模型'}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <Label>名称</Label>
-              <Input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="如：DeepSeek Chat"
-                className="mt-1.5"
-                required
-              />
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>名称</Label>
+                <Input
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="如：DeepSeek Chat"
+                  className="mt-1.5"
+                  required
+                />
+              </div>
+              <div>
+                <Label>服务商</Label>
+                <Select value={form.vendor} onValueChange={handleVendorChange}>
+                  <SelectTrigger className="mt-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providersForCategory('chat').map((p) => (
+                      <SelectItem key={p.value} value={p.value}>
+                        {p.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div>
-              <Label>Provider</Label>
-              <Select value={form.provider} onValueChange={(val) => setForm({ ...form, provider: val })}>
-                <SelectTrigger className="mt-1.5">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ollama">Ollama（本地）</SelectItem>
-                  <SelectItem value="vllm">OpenAI 兼容（远端）</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground mt-1.5">
-                Ollama 用于本地模型，OpenAI 兼容用于 DeepSeek/OpenAI/通义等远端 API
-              </p>
+            <p className="text-xs text-muted-foreground -mt-2">
+              {infraForVendor(form.vendor) === 'ollama'
+                ? '本地 Ollama 服务，自动填写默认地址（http://localhost:11434），无需 API Key'
+                : '选择服务商自动填写 API 地址并预选思考参数格式；选「自定义」则手动填写地址'}
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>API 地址</Label>
+                <Input
+                  value={form.base_url}
+                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                  placeholder="如：https://api.deepseek.com"
+                  className="mt-1.5"
+                  required
+                />
+              </div>
+              <div>
+                <Label>模型名称</Label>
+                <Input
+                  value={form.model}
+                  onChange={(e) => handleModelChange(e.target.value)}
+                  placeholder="如：deepseek-chat"
+                  className="mt-1.5"
+                  required
+                />
+              </div>
             </div>
-            <div>
-              <Label>API 地址</Label>
-              <Input
-                value={form.base_url}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                placeholder="如：https://api.deepseek.com"
-                className="mt-1.5"
-                required
-              />
+            <div className="grid grid-cols-2 gap-4">
+              {infraForVendor(form.vendor) !== 'ollama' && (
+                <div>
+                  <Label>API Key</Label>
+                  <PasswordInput
+                    value={form.api_key}
+                    onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                    placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
+                    className="mt-1.5"
+                  />
+                </div>
+              )}
+              <div>
+                <Label>最大上下文长度（token）</Label>
+                <Input
+                  type="number"
+                  value={form.max_context_tokens}
+                  onChange={(e) => setForm({ ...form, max_context_tokens: e.target.value })}
+                  placeholder="留空默认 200K"
+                  className="mt-1.5"
+                />
+              </div>
             </div>
-            <div>
-              <Label>模型名称</Label>
-              <Input
-                value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
-                placeholder="如：deepseek-chat"
-                className="mt-1.5"
-                required
-              />
-            </div>
-            <div>
-              <Label>API Key</Label>
-              <PasswordInput
-                value={form.api_key}
-                onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                placeholder={editingItem ? '密钥已设置，点击修改' : '输入 API 密钥（可选）'}
-                className="mt-1.5"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="is_default"
-                checked={form.is_default}
-                onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
-                className="rounded border-border"
-              />
-              <Label htmlFor="is_default" className="text-sm font-normal cursor-pointer">设为默认模型</Label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="chat_visible"
-                checked={form.chat_visible}
-                onChange={(e) => setForm({ ...form, chat_visible: e.target.checked })}
-                className="rounded border-border"
-              />
-              <Label htmlFor="chat_visible" className="text-sm font-normal cursor-pointer">允许在对话中选择此模型</Label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="stream_enabled"
-                checked={form.stream_enabled}
-                onChange={(e) => setForm({ ...form, stream_enabled: e.target.checked })}
-                className="rounded border-border"
-              />
-              <Label htmlFor="stream_enabled" className="text-sm font-normal cursor-pointer">启用流式输出</Label>
-              <span className="text-xs text-muted-foreground">（部分模型不支持流式，关闭后使用非流式生成）</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="thinking_enabled"
-                checked={form.thinking_enabled}
-                onChange={(e) => setForm({ ...form, thinking_enabled: e.target.checked })}
-                className="rounded border-border"
-              />
-              <Label htmlFor="thinking_enabled" className="text-sm font-normal cursor-pointer">启用深度思考</Label>
-              <span className="text-xs text-muted-foreground">（开启后模型会进行推理思考，适用于支持 thinking 的模型）</span>
-            </div>
-            <div>
-              <Label>最大上下文长度（token）</Label>
-              <Input
-                type="number"
-                value={form.max_context_tokens}
-                onChange={(e) => setForm({ ...form, max_context_tokens: e.target.value })}
-                placeholder="留空默认 200000（200K）"
-                className="mt-1.5"
-              />
-              <p className="text-xs text-muted-foreground mt-1.5">
-                填模型的完整上下文窗口（如 128000、1000000）。用于检索上下文裁剪和 Agent 上下文管理；留空默认 200K，百万上下文模型请手动填写
-              </p>
+            {infraForVendor(form.vendor) !== 'ollama' && (
+              <div>
+                <Label>思考模式参数格式</Label>
+                <Select
+                  value={form.thinking_control}
+                  onValueChange={(val) => {
+                    setThinkingManual(true)
+                    setForm({ ...form, thinking_control: val as ThinkingControlValue })
+                  }}
+                >
+                  <SelectTrigger className="mt-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {THINKING_CONTROL_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  {THINKING_CONTROL_OPTIONS.find((o) => o.value === form.thinking_control)?.hint}
+                  。决定智能体「深度思考」开启时如何写入 API；已按服务商/模型预选，与实际不符时按 API 文档手动调整
+                </p>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="is_default"
+                  checked={form.is_default}
+                  onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
+                  className="rounded border-border"
+                />
+                <Label htmlFor="is_default" className="text-sm font-normal cursor-pointer">设为默认模型</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="chat_visible"
+                  checked={form.chat_visible}
+                  onChange={(e) => setForm({ ...form, chat_visible: e.target.checked })}
+                  className="rounded border-border"
+                />
+                <Label htmlFor="chat_visible" className="text-sm font-normal cursor-pointer">允许在对话中选择</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="stream_enabled"
+                  checked={form.stream_enabled}
+                  onChange={(e) => setForm({ ...form, stream_enabled: e.target.checked })}
+                  className="rounded border-border"
+                />
+                <Label htmlFor="stream_enabled" className="text-sm font-normal cursor-pointer">启用流式输出</Label>
+              </div>
             </div>
             {dialogTestResult && (
               <div className={`p-2.5 rounded-lg text-xs ${dialogTestResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
