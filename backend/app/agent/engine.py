@@ -955,6 +955,9 @@ class AgentEngine:
                     "success": result.success,
                     "duration_ms": duration_ms,
                     "iteration": step.iteration,
+                    # 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），供前端在该
+                    # 步骤行内联展示可点击预览的文件（粒度到文件）。
+                    "files": (result.data or {}).get("files", []),
                 },
             ))
 
@@ -1001,6 +1004,9 @@ class AgentEngine:
                     "success": result.success,
                     "duration_ms": duration_ms,
                     "iteration": step.iteration,
+                    # 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），供前端在该
+                    # 步骤行内联展示可点击预览的文件（粒度到文件）。
+                    "files": (result.data or {}).get("files", []),
                 },
             ))
 

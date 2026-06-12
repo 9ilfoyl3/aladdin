@@ -43,7 +43,6 @@ function Chat() {
   // 已选知识库（按选中顺序，首个即后端主库 kb_ids[0]，检索权重更高）。
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
-  const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const [contextUsage, setContextUsage] = useState<{ current: number; max: number }>({ current: 0, max: 0 })
   // 会话文件本地占位（POST 在飞 / 失败提示），与服务端列表一起展示。
   // 同步上传完成后由 react-query 刷新列表 + 清掉对应占位。
@@ -148,7 +147,6 @@ function Chat() {
       setInput('')
       setPendingFiles([])
       setExpandedRefs(new Set())
-      setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
       return
     }
@@ -160,7 +158,6 @@ function Chat() {
     async function loadMessages() {
       setIsLoadingMessages(true)
       setExpandedRefs(new Set())
-      setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
       try {
         const msgs = await sessionApi.getMessages(currentSessionId!)
@@ -205,6 +202,7 @@ function Chat() {
                   if (existing) {
                     existing.success = step.success as boolean
                     existing.durationMs = step.duration_ms as number | undefined
+                    existing.files = ((step as Record<string, unknown>).files as ContentSegment['files']) || undefined
                   }
                 } else if (step.type === 'final_answer') {
                   if (step.content) {
@@ -292,7 +290,6 @@ function Chat() {
     setInput('')
     setPendingFiles([])
     setExpandedRefs(new Set())
-    setExpandedRefDetails(new Set())
     setContextUsage({ current: 0, max: 0 })
     // 释放本会话内上传的图片预览 object URL，避免内存泄漏
     Object.values(imagePreviewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url))
@@ -502,6 +499,7 @@ function Chat() {
                             ...seg,
                             success: parsed.success,
                             durationMs: parsed.duration_ms,
+                            files: parsed.files,
                           }
                         : seg
                     )
@@ -774,15 +772,6 @@ function Chat() {
     })
   }
 
-  function toggleRefDetail(key: string) {
-    setExpandedRefDetails((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
   function toggleKb(kbId: string) {
     setSelectedKbIds((prev) =>
       prev.includes(kbId) ? prev.filter((id) => id !== kbId) : [...prev, kbId]
@@ -1007,9 +996,7 @@ function Chat() {
                   isLast={idx === messages.length - 1}
                   isLastAssistant={idx === lastAssistantIdx && !isStreaming}
                   expandedRefs={expandedRefs}
-                  expandedRefDetails={expandedRefDetails}
                   onToggleRef={toggleRef}
-                  onToggleRefDetail={toggleRefDetail}
                   imagePreviewUrls={imagePreviewUrls}
                   sessionId={currentSessionId}
                   sessionFiles={sessionFiles}

@@ -905,6 +905,9 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "tool_name": event.data.get("tool_name", ""),
             "success": event.data.get("success", False),
             "duration_ms": event.data.get("duration_ms", 0),
+            # 本次工具读到的文件（检索类工具带出 doc_id→文件名/来源），供前端在步骤行内联
+            # 展示可点击预览的文件。落库进 agent_steps，历史回放可还原。
+            "files": event.data.get("files", []),
         }
     elif event.type == EventType.FINAL_ANSWER:
         return {
