@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi } from '@/lib/api'
+import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi, truncateSessionTitle } from '@/lib/api'
 import type { SessionFileResponse, MessageAttachment } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
@@ -14,6 +14,7 @@ import SideRays from '@/components/SideRays'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
+import { useArtifactStore } from '@/stores/artifactStore'
 
 interface KnowledgeBaseItem {
   id: string
@@ -42,7 +43,6 @@ function Chat() {
   // 已选知识库（按选中顺序，首个即后端主库 kb_ids[0]，检索权重更高）。
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
   const [expandedRefs, setExpandedRefs] = useState<Set<number>>(new Set())
-  const [expandedRefDetails, setExpandedRefDetails] = useState<Set<string>>(new Set())
   const [contextUsage, setContextUsage] = useState<{ current: number; max: number }>({ current: 0, max: 0 })
   // 会话文件本地占位（POST 在飞 / 失败提示），与服务端列表一起展示。
   // 同步上传完成后由 react-query 刷新列表 + 清掉对应占位。
@@ -57,9 +57,10 @@ function Chat() {
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
 
-  const { currentSessionId, setCurrentSessionId, refreshSessions } = useSession()
+  const { currentSessionId, setCurrentSessionId, newSessionNonce, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
   const confirm = useConfirm()
   const queryClient = useQueryClient()
+  const closeArtifact = useArtifactStore((s) => s.closeArtifact)
 
   const { data: knowledgeBases = [] } = useQuery({
     queryKey: ['knowledge-bases'],
@@ -139,10 +140,13 @@ function Chat() {
 
   // 会话切换时加载消息
   useEffect(() => {
+    // 切换/进入会话时关闭可能残留的 Artifact 预览（上一会话打开的附件预览不应带到新会话）
+    closeArtifact()
     if (currentSessionId === null) {
       setMessages([])
+      setInput('')
+      setPendingFiles([])
       setExpandedRefs(new Set())
-      setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
       return
     }
@@ -154,7 +158,6 @@ function Chat() {
     async function loadMessages() {
       setIsLoadingMessages(true)
       setExpandedRefs(new Set())
-      setExpandedRefDetails(new Set())
       setContextUsage({ current: 0, max: 0 })
       try {
         const msgs = await sessionApi.getMessages(currentSessionId!)
@@ -199,6 +202,7 @@ function Chat() {
                   if (existing) {
                     existing.success = step.success as boolean
                     existing.durationMs = step.duration_ms as number | undefined
+                    existing.files = ((step as Record<string, unknown>).files as ContentSegment['files']) || undefined
                   }
                 } else if (step.type === 'final_answer') {
                   if (step.content) {
@@ -277,6 +281,22 @@ function Chat() {
     loadMessages()
   }, [currentSessionId])
 
+  // 点击「新对话」时强制清空当前页面所有本地状态（输入框、暂存文件、消息、引用展开态、
+  // 图片预览等）。用 nonce 触发：即使已处于空会话（currentSessionId 不变）也能重置。
+  useEffect(() => {
+    if (newSessionNonce === 0) return
+    closeArtifact()
+    setMessages([])
+    setInput('')
+    setPendingFiles([])
+    setExpandedRefs(new Set())
+    setContextUsage({ current: 0, max: 0 })
+    // 释放本会话内上传的图片预览 object URL，避免内存泄漏
+    Object.values(imagePreviewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url))
+    imagePreviewUrlsRef.current = {}
+    setImagePreviewUrls({})
+  }, [newSessionNonce])
+
   // 发送消息
   async function handleSend(overrideQuery?: string) {
     const query = (overrideQuery ?? input).trim()
@@ -284,16 +304,33 @@ function Chat() {
 
     let sessionId = currentSessionId
     if (!sessionId) {
+      // 先用临时 id 同步插入侧栏（不等任何网络往返）：以用户问题作占位标题，
+      // 让新会话 item 立即出现。create 返回后再把临时 id 替换成真实 id。
+      const tempId = `temp-${Date.now()}`
+      const nowIso = new Date().toISOString()
+      addOptimisticSession({
+        id: tempId,
+        title: truncateSessionTitle(query),
+        kb_id: null,
+        model_config_id: null,
+        message_count: 1,
+        created_at: nowIso,
+        updated_at: nowIso,
+      })
       try {
         const session = await sessionApi.create({ title: '新对话' })
         sessionId = session.id
         // 标记该会话为本地发起发送，避免 setCurrentSessionId 触发的 loadMessages 覆盖本地消息
         pendingSendSessionRef.current = session.id
         setCurrentSessionId(session.id)
-        // 不在此刷新侧栏：此刻会话尚无消息（被空会话过滤隐藏）。
-        // 待首个流式分片到达（后端已入库用户消息+播种标题）时再刷新。
+        // 临时项替换为真实会话（保留问题占位标题；后续 refreshSessions 用服务端数据覆盖）。
+        replaceOptimisticSession(tempId, { ...session, title: truncateSessionTitle(query) })
       } catch (e) {
         console.error('自动创建会话失败', e)
+        // 回滚临时项，避免侧栏残留无效会话。
+        removeOptimisticSession(tempId)
+        setIsStreaming(false)
+        return
       }
     } else {
       // 已有会话内发送：同样标记，防止其它原因触发的重载覆盖流式消息
@@ -462,6 +499,7 @@ function Chat() {
                             ...seg,
                             success: parsed.success,
                             durationMs: parsed.duration_ms,
+                            files: parsed.files,
                           }
                         : seg
                     )
@@ -734,15 +772,6 @@ function Chat() {
     })
   }
 
-  function toggleRefDetail(key: string) {
-    setExpandedRefDetails((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
   function toggleKb(kbId: string) {
     setSelectedKbIds((prev) =>
       prev.includes(kbId) ? prev.filter((id) => id !== kbId) : [...prev, kbId]
@@ -967,11 +996,10 @@ function Chat() {
                   isLast={idx === messages.length - 1}
                   isLastAssistant={idx === lastAssistantIdx && !isStreaming}
                   expandedRefs={expandedRefs}
-                  expandedRefDetails={expandedRefDetails}
                   onToggleRef={toggleRef}
-                  onToggleRefDetail={toggleRefDetail}
                   imagePreviewUrls={imagePreviewUrls}
                   sessionId={currentSessionId}
+                  sessionFiles={sessionFiles}
                   onFeedback={handleFeedback}
                   onRetry={handleRetry}
                 />

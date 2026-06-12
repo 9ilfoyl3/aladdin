@@ -426,7 +426,7 @@ async def _generate_title_with_llm(user_query: str, assistant_answer: str) -> st
         生成的标题字符串，失败时返回 None
     """
     try:
-        llm, _, _, _ = await _get_llm_for_request(None)
+        llm, _, _ = await _get_llm_for_request(None)
         prompt = (
             f"根据以下对话生成一个≤15字的简短标题：\n"
             f"用户：{user_query[:200]}\n"
@@ -444,13 +444,17 @@ async def _generate_title_with_llm(user_query: str, assistant_answer: str) -> st
     return None
 
 
-async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None, bool]:
+async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider, bool, int | None]:
     """根据 model_config_id 获取 LLM 实例和配置
 
     优先级：指定 ID > 数据库中的默认配置 > 系统全局配置
 
     Returns:
-        (LLM 实例, 是否启用流式, 最大上下文 token 数, 是否启用 thinking)
+        (LLM 实例, 是否启用流式, 最大上下文 token 数)
+
+    注：思考开关（深度思考）由智能体预设独占控制，不再来自模型配置。
+    thinking 开关写入请求体的字段格式由 LLMConfig.thinking_control 决定（已在
+    _create_llm_from_config 注入 VllmLLM）。
     """
     if model_config_id:
         async with async_session() as session:
@@ -459,7 +463,7 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
             )
             config = result.scalar_one_or_none()
             if config:
-                return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens, config.thinking_enabled
+                return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 尝试使用数据库中标记为默认的配置
     async with async_session() as session:
@@ -468,13 +472,13 @@ async def _get_llm_for_request(model_config_id: str | None) -> tuple[LLMProvider
         )
         config = result.scalar_one_or_none()
         if config:
-            return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens, config.thinking_enabled
+            return _create_llm_from_config(config), config.stream_enabled, config.max_context_tokens
 
     # 回退到系统全局配置
     settings = get_settings()
     if settings.llm_provider == "vllm":
-        return _get_cached_llm("vllm", settings.llm_base_url, settings.llm_model, settings.llm_api_key), True, None, False
-    return _get_cached_llm("ollama", settings.llm_base_url, settings.llm_model, ""), True, None, False
+        return _get_cached_llm("vllm", settings.llm_base_url, settings.llm_model, settings.llm_api_key), True, None
+    return _get_cached_llm("ollama", settings.llm_base_url, settings.llm_model, ""), True, None
 
 
 # 进程内 LLM 实例缓存：复用底层 httpx.AsyncClient 连接池，避免每个请求新建客户端
@@ -486,11 +490,19 @@ _llm_cache: dict[tuple, LLMProvider] = {}
 _llm_cache_loop: "asyncio.AbstractEventLoop | None" = None
 
 
-def _get_cached_llm(provider: str, base_url: str, model: str, api_key: str) -> LLMProvider:
-    """按 (provider, base_url, model, api_key) 复用 LLM 实例。
+def _get_cached_llm(
+    provider: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    vendor: str | None = None,
+    thinking_control: str | None = None,
+) -> LLMProvider:
+    """按 (provider, base_url, model, api_key, vendor, thinking_control) 复用 LLM 实例。
 
-    同一配置返回同一实例（复用 httpx 连接池）；配置变更（如改地址/密钥）自然命中新 key
-    生成新实例。注意：测试连通性端点（llm_config.py）仍各自新建并 close()，不走此缓存。
+    同一配置返回同一实例（复用 httpx 连接池）；配置变更（如改地址/密钥/厂商/思考格式）
+    自然命中新 key 生成新实例。注意：测试连通性端点（llm_config.py）仍各自新建并
+    close()，不走此缓存。
     """
     global _llm_cache, _llm_cache_loop
     try:
@@ -502,13 +514,19 @@ def _get_cached_llm(provider: str, base_url: str, model: str, api_key: str) -> L
         _llm_cache = {}
         _llm_cache_loop = loop
 
-    key = (provider, base_url, model, api_key)
+    key = (provider, base_url, model, api_key, vendor, thinking_control)
     inst = _llm_cache.get(key)
     if inst is None:
         if provider == "ollama":
             inst = OllamaLLM(base_url=base_url, model=model)
         else:
-            inst = VllmLLM(base_url=base_url, model=model, api_key=api_key)
+            inst = VllmLLM(
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                provider=vendor,
+                thinking_control=thinking_control,
+            )
         _llm_cache[key] = inst
     return inst
 
@@ -518,9 +536,17 @@ def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
     if config.provider == "ollama":
         return _get_cached_llm("ollama", config.base_url, config.model, "")
     else:
-        # provider 字段当前承载基础设施类型（ollama/vllm）。对于 vLLM 兼容端点，
-        # 实际模型厂商由 VllmLLM 内部根据 base_url 自动检测，用于 thinking 方言分派。
-        return _get_cached_llm("vllm", config.base_url, config.model, config.api_key or "")
+        # provider 字段承载基础设施类型（ollama/vllm）；vendor 承载实际模型厂商，
+        # thinking_control 承载思考开关的写入格式。两者显式传入 VllmLLM，使 thinking
+        # 方言分派不再依赖 base_url/模型名的脆弱自动猜测（为空时 VllmLLM 内部仍自动检测）。
+        return _get_cached_llm(
+            "vllm",
+            config.base_url,
+            config.model,
+            config.api_key or "",
+            vendor=config.vendor,
+            thinking_control=config.thinking_control,
+        )
 
 
 
@@ -879,6 +905,9 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "tool_name": event.data.get("tool_name", ""),
             "success": event.data.get("success", False),
             "duration_ms": event.data.get("duration_ms", 0),
+            # 本次工具读到的文件（检索类工具带出 doc_id→文件名/来源），供前端在步骤行内联
+            # 展示可点击预览的文件。落库进 agent_steps，历史回放可还原。
+            "files": event.data.get("files", []),
         }
     elif event.type == EventType.FINAL_ANSWER:
         return {
@@ -1516,7 +1545,11 @@ async def chat_completions(
     mode = request.retrieval_mode or preset_cfg.get("agent_mode") or "agent"
 
     # 获取 LLM 实例（根据 model_config_id 动态选择）
-    llm, stream_enabled, max_context_tokens, thinking_enabled = await _get_llm_for_request(request.model_config_id)
+    llm, stream_enabled, max_context_tokens = await _get_llm_for_request(request.model_config_id)
+    # 深度思考由智能体预设独占控制（不再来自模型配置）：简单 RAG 链路与 Agent 链路一致，
+    # 统一取预设的 thinking_enabled。thinking 写入请求体的字段格式由 LLMConfig.thinking_control
+    # 决定（已在构造 VllmLLM 时注入）。
+    thinking_enabled = bool(preset_cfg.get("thinking_enabled", False))
 
     print(f"[Chat] query={user_query!r}, kb={request.knowledge_base_id}, mode={mode}, model_config={request.model_config_id}, preset={request.agent_preset_id}, stream={request.stream}, session={request.session_id}")
 

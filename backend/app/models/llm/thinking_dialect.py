@@ -1,8 +1,8 @@
 """思考链（thinking）请求方言分派
 
-不同模型厂商通过不同的请求字段控制「是否输出思考链」。前端只暴露一个布尔开关
-（thinking_enabled），后端据厂商自动选择正确的字段格式注入到请求体。采用
-per-provider RequestCustomizer 的分派表实现。
+不同模型厂商通过不同的请求字段控制「是否输出思考链」。是否开启思考由智能体预设
+（preset 的 thinking_enabled）控制，后端据厂商 / 配置的 thinking_control 选择正确的
+字段格式注入到请求体。采用 per-provider RequestCustomizer 的分派表实现。
 
 设计要点：
 - 每个 customizer 接收 (payload, enable, model)，**就地修改并返回 payload**。
@@ -91,12 +91,55 @@ _DIALECTS: dict[LLMProviderName, ThinkingCustomizer] = {
 }
 
 
+# --- 显式「思考模式参数格式」分派（前端可见、可手动覆盖）---
+#
+# 厂商自动检测（base_url + 模型名启发式）脆弱：自建网关落到 GENERIC、新命名漏匹配等。
+# 前端「思考模式参数格式」下拉直接指定写入哪种字段格式，由本表分派，**完全跳过厂商/模型
+# 名猜测**。四个取值与 WeKnora thinkingControl 对齐：
+#   - none                 → 不写入任何思考字段（厂商不支持，或想保持默认）
+#   - chat_template_kwargs → 自建 vLLM/SGLang、NVIDIA NIM、本地 Qwen
+#   - enable_thinking      → 阿里云 DashScope（顶层 enable_thinking）
+#   - thinking_type        → 火山引擎 Ark / DeepSeek 官方 / 腾讯云 LKEAP（thinking.type）
+# 这些 customizer 无条件写入对应字段（不再做模型名判定）——既然用户已显式选定格式，
+# 就尊重用户选择，避免启发式二次否决。
+THINKING_CONTROL_NONE = "none"
+
+
+def _explicit_chat_template_kwargs(payload: dict, enable: bool, model: str) -> dict:
+    ctk = payload.get("chat_template_kwargs")
+    if not isinstance(ctk, dict):
+        ctk = {}
+    ctk["enable_thinking"] = enable
+    payload["chat_template_kwargs"] = ctk
+    return payload
+
+
+def _explicit_enable_thinking(payload: dict, enable: bool, model: str) -> dict:
+    payload["enable_thinking"] = enable
+    return payload
+
+
+def _explicit_thinking_type(payload: dict, enable: bool, model: str) -> dict:
+    payload["thinking"] = {"type": "enabled" if enable else "disabled"}
+    return payload
+
+
+# 思考模式参数格式（字符串） → customizer。
+_EXPLICIT_CONTROLS: dict[str, ThinkingCustomizer] = {
+    THINKING_CONTROL_NONE: _noop,
+    "chat_template_kwargs": _explicit_chat_template_kwargs,
+    "enable_thinking": _explicit_enable_thinking,
+    "thinking_type": _explicit_thinking_type,
+}
+
+
 def apply_thinking(
     payload: dict,
     enable: bool | None,
     base_url: str,
     model: str,
     provider: LLMProviderName | None = None,
+    thinking_control: str | None = None,
 ) -> dict:
     """按厂商方言把 thinking 开关注入到请求 payload。
 
@@ -105,12 +148,43 @@ def apply_thinking(
         enable: 是否启用思考。None 表示「未配置」→ 不注入任何字段（保持厂商默认）。
         base_url / model: 用于自动检测厂商（provider 显式给定时优先）。
         provider: 可选，显式指定厂商，跳过自动检测。
+        thinking_control: 可选，前端显式选定的「思考模式参数格式」
+                          （none / chat_template_kwargs / enable_thinking / thinking_type）。
+                          给定且合法时**优先级最高**，直接据此写入字段、跳过厂商检测。
 
     Returns:
         修改后的 payload。
     """
     if enable is None:
         return payload
+    # 显式格式优先：用户在 UI 选定了写入方式，直接照办。
+    if thinking_control:
+        customizer = _EXPLICIT_CONTROLS.get(thinking_control)
+        if customizer is not None:
+            return customizer(payload, enable, model)
+    # 回退：按厂商自动方言分派（保持原有零回归行为）。
     name = provider or detect_provider(base_url, model)
     customizer = _DIALECTS.get(name, _noop)
     return customizer(payload, enable, model)
+
+
+def default_thinking_control(provider: str, model: str = "") -> str:
+    """按厂商 + 模型名预选「思考模式参数格式」（与前端 defaultThinkingControl 对齐）。
+
+    供后端创建配置时回填默认值。返回四个合法取值之一。
+    """
+    p = (provider or "").strip().lower()
+    name = (model or "").strip()
+    if p == "aliyun":
+        return "enable_thinking" if is_qwen_thinking_model(name) else THINKING_CONTROL_NONE
+    if p == "lkeap":
+        # R1 系列后端不发 thinking 参数；其余按 thinking.type 预选。
+        if name and ("deepseek-r1" in name.lower()):
+            return THINKING_CONTROL_NONE
+        return "thinking_type"
+    if p in ("generic", "nvidia"):
+        return "chat_template_kwargs"
+    if p in ("volcengine", "deepseek"):
+        return "thinking_type"
+    # openai / azure_openai / zhipu / gemini / siliconflow / openrouter / … → 不写入
+    return THINKING_CONTROL_NONE

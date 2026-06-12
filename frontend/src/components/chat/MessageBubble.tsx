@@ -8,8 +8,18 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { isImageFilename } from '@/components/chat/SessionFileList'
-import type { MessageAttachment } from '@/lib/api'
-import { useArtifactStore, isPreviewable } from '@/stores/artifactStore'
+import type { MessageAttachment, SessionFileResponse } from '@/lib/api'
+import { useArtifactStore, isPreviewable, type ArtifactTarget } from '@/stores/artifactStore'
+
+// 从文件名提取小写扩展名（无点），用于判断是否可预览
+function extOf(name: string): string {
+  return name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+}
+
+// 会话文件扩展名：优先 file_type，回退文件名后缀
+function sessionFileExt(f: SessionFileResponse): string {
+  return (f.file_type || extOf(f.filename)).toLowerCase()
+}
 
 // 流式渲染动画配置：模糊渐入、按字符、放慢节奏
 const STREAM_ANIMATION = {
@@ -19,6 +29,13 @@ const STREAM_ANIMATION = {
   stagger: 20,
   easing: 'ease-out',
 } as const
+
+// 工具读到的文件（检索/附件类工具带出）：用于在步骤行内联展示可点击预览。
+export interface ToolFile {
+  id: string
+  filename: string
+  source: 'document' | 'session-file'
+}
 
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
@@ -30,6 +47,8 @@ export interface ContentSegment {
   toolArgs?: Record<string, unknown>
   success?: boolean
   durationMs?: number
+  // 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），用于步骤行内联可点击预览
+  files?: ToolFile[]
 }
 
 // 消息类型
@@ -89,13 +108,13 @@ interface MessageBubbleProps {
   isStreaming: boolean
   isLast: boolean
   expandedRefs: Set<number>
-  expandedRefDetails: Set<string>
   onToggleRef: (index: number) => void
-  onToggleRefDetail: (key: string) => void
   /** 文件名 → 图片预览 URL（本会话内上传的图片，用于附件 chip 缩略图/放大预览） */
   imagePreviewUrls?: Record<string, string>
   /** 当前会话 ID（用于附件在 Artifact 面板按会话拉取原件预览） */
   sessionId?: string | null
+  /** 本会话已上传文件列表（用于 read_attachment 步骤按文件名解析原件、点击预览） */
+  sessionFiles?: SessionFileResponse[]
   /** 设置/取消反馈（点赞/踩）。仅 assistant 且已落库（有 id）时可用。 */
   onFeedback?: (message: Message, feedback: 'like' | 'dislike' | null) => void
   /** 重试本轮对话。仅最新一条 assistant 消息可用。 */
@@ -110,33 +129,14 @@ function MessageBubble({
   isStreaming,
   isLast,
   expandedRefs,
-  expandedRefDetails,
   onToggleRef,
-  onToggleRefDetail,
   imagePreviewUrls = {},
   sessionId = null,
+  sessionFiles = [],
   onFeedback,
   onRetry,
   isLastAssistant = false,
 }: MessageBubbleProps) {
-  // 在父块内容中高亮子块命中部分
-  function highlightChild(parentContent: string, childContent: string) {
-    if (!childContent || !parentContent.includes(childContent)) {
-      return <span>{parentContent}</span>
-    }
-    const i = parentContent.indexOf(childContent)
-    const before = parentContent.slice(0, i)
-    const match = parentContent.slice(i, i + childContent.length)
-    const after = parentContent.slice(i + childContent.length)
-    return (
-      <>
-        {before && <span>{before}</span>}
-        <mark className="bg-primary/15 text-foreground font-medium rounded-sm px-0.5">{match}</mark>
-        {after && <span>{after}</span>}
-      </>
-    )
-  }
-
   if (msg.role === 'user') {
     return (
       <div className="flex flex-col items-end gap-1.5 animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
@@ -162,6 +162,8 @@ function MessageBubble({
             isStreaming={isStreaming}
             isLast={isLast}
             totalDurationMs={msg.totalDurationMs}
+            sessionId={sessionId}
+            sessionFiles={sessionFiles}
           />
         ) : (
           <>
@@ -226,19 +228,6 @@ function MessageBubble({
                   : '知识库检索部分失败，本次回答可能遗漏部分知识库内容。'}
             </span>
           </div>
-        )}
-
-        {/* 引用来源 */}
-        {msg.references && msg.references.length > 0 && (
-          <ReferencesBlock
-            references={msg.references}
-            index={idx}
-            expandedRefs={expandedRefs}
-            expandedRefDetails={expandedRefDetails}
-            onToggleRef={onToggleRef}
-            onToggleRefDetail={onToggleRefDetail}
-            highlightChild={highlightChild}
-          />
         )}
 
         {/* 动作栏：复制 / 赞 / 踩 / 重试。流式进行中不显示；错误消息仅显示重试。 */}
@@ -377,15 +366,21 @@ function AgentStreamContent({
   isStreaming,
   isLast,
   totalDurationMs,
+  sessionId,
+  sessionFiles,
 }: {
   segments: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
   totalDurationMs?: number
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
-  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染
+  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染。
+  // 思考段需过滤纯空白内容（如模型只吐了 "\n" 的空思考）——按需思考型模型在直接调工具的
+  // 轮次常产出空 thought，渲染出来会是一个空步骤，无意义。tool_call 段的 content 是工具名，不过滤。
   const processSegments = segments.filter(
-    (s) => s.type === 'thought' || s.type === 'tool_call'
+    (s) => (s.type === 'thought' && s.content.trim() !== '') || s.type === 'tool_call'
   )
   const answerSegments = segments.filter((s) => s.type === 'answer')
 
@@ -399,6 +394,8 @@ function AgentStreamContent({
           isLast={isLast}
           totalDurationMs={totalDurationMs}
           answerStarted={answerSegments.length > 0}
+          sessionId={sessionId}
+          sessionFiles={sessionFiles}
         />
       )}
 
@@ -472,12 +469,16 @@ function StepSummaryPanel({
   isLast,
   totalDurationMs,
   answerStarted,
+  sessionId,
+  sessionFiles,
 }: {
   steps: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
   totalDurationMs?: number
   answerStarted?: boolean
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
   const [open, setOpen] = useState(true)
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
@@ -548,6 +549,8 @@ function StepSummaryPanel({
                   expanded={expandedSteps.has(i) || isActive}
                   onToggle={() => toggleStep(i)}
                   animating={isActive}
+                  sessionId={sessionId}
+                  sessionFiles={sessionFiles}
                 />
               )
             })}
@@ -584,22 +587,124 @@ function toolArgSummary(toolName?: string, args?: Record<string, unknown>): stri
   return null
 }
 
+// 检索类工具读到的文件：在步骤标题行内联展示（与阅读附件同形式，免展开即可见）。
+// 单行排列，放不下时右侧淡出并显示「共 N 个」总数提示；命中可预览类型的文件名可点击预览。
+function InlineToolFiles({
+  files,
+  fileTarget,
+  onOpen,
+}: {
+  files: ToolFile[]
+  fileTarget: (f: ToolFile) => ArtifactTarget | null
+  onOpen: (t: ArtifactTarget) => void
+}) {
+  const clipRef = useRef<HTMLSpanElement>(null)
+  const [overflow, setOverflow] = useState(false)
+
+  useEffect(() => {
+    const el = clipRef.current
+    if (!el) return
+    const measure = () => setOverflow(el.scrollWidth - el.clientWidth > 1)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [files])
+
+  return (
+    <span className="flex items-center gap-1.5 min-w-0 flex-1">
+      <span
+        ref={clipRef}
+        className={cn(
+          'flex items-center gap-2 min-w-0 overflow-hidden',
+          overflow && 'mask-[linear-gradient(to_right,black_88%,transparent)]'
+        )}
+      >
+        {files.map((f, i) => {
+          const t = fileTarget(f)
+          return t ? (
+            <span
+              key={`${f.id}-${i}`}
+              role="link"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpen(t)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onOpen(t)
+                }
+              }}
+              className="shrink-0 max-w-[18em] truncate text-primary underline-offset-2 hover:underline cursor-pointer"
+              title={`点击预览 ${f.filename}`}
+            >
+              {f.filename}
+            </span>
+          ) : (
+            <span key={`${f.id}-${i}`} className="shrink-0 max-w-[18em] truncate text-muted-foreground">
+              {f.filename}
+            </span>
+          )
+        })}
+      </span>
+      {overflow && (
+        <span className="shrink-0 text-muted-foreground/70">共 {files.length} 个</span>
+      )}
+    </span>
+  )
+}
+
 // 单个步骤行：思考显示文本摘要，工具调用显示「调用 xxx」前缀，均可折叠
 function StepRow({
   seg,
   expanded,
   onToggle,
   animating,
+  sessionId,
+  sessionFiles,
 }: {
   seg: ContentSegment
   expanded: boolean
   onToggle: () => void
   animating: boolean
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
 }) {
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
   const isTool = seg.type === 'tool_call'
   const isSkill = isTool && seg.toolName === 'read_skill'
   const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content
   const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
+
+  // read_attachment 步骤：尝试按文件名解析本会话已上传文件，命中可预览类型则可点击预览。
+  // filename 省略时（默认读第一个附件），回退到列表首个文件，与后端解析逻辑一致。
+  const attachmentTarget: ArtifactTarget | null = (() => {
+    if (seg.toolName !== 'read_attachment' || !sessionId || !sessionFiles?.length) return null
+    const wanted = typeof seg.toolArgs?.filename === 'string' ? seg.toolArgs.filename.trim().toLowerCase() : ''
+    const file = wanted
+      ? sessionFiles.find((f) => f.filename.trim().toLowerCase() === wanted)
+      : sessionFiles[0]
+    if (!file) return null
+    const ext = sessionFileExt(file)
+    if (!isPreviewable(ext)) return null
+    return { id: file.id, filename: file.filename, fileType: ext, source: 'session-file', sessionId }
+  })()
+
+  // 检索类工具（语义检索/关键词检索）本次读到的文件：后端按 doc_id 解析出文件名/来源。
+  // 在步骤行内联展示，命中可预览类型即可点击预览（粒度到文件，不到 chunk）。
+  function fileTarget(f: ToolFile): ArtifactTarget | null {
+    const ext = extOf(f.filename)
+    if (!isPreviewable(ext)) return null
+    if (f.source === 'session-file') {
+      if (!sessionId) return null
+      return { id: f.id, filename: f.filename, fileType: ext, source: 'session-file', sessionId }
+    }
+    return { id: f.id, filename: f.filename, fileType: ext, source: 'document' }
+  }
+  const readFiles = isTool ? seg.files ?? [] : []
 
   return (
     <div className="rounded-lg border border-border/40 bg-background/40 overflow-hidden">
@@ -615,10 +720,34 @@ function StepRow({
           <Lightbulb className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         )}
         {isTool ? (
-          <span className="truncate text-foreground/80">
-            {toolLabel}
-            {argSummary && (
-              <span className="font-mono text-primary/80 ml-1">{argSummary}</span>
+          <span className="flex items-center gap-2 min-w-0 flex-1">
+            <span className="shrink-0 text-foreground/80">{toolLabel}</span>
+            {attachmentTarget ? (
+              <span
+                role="link"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openArtifact(attachmentTarget)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    openArtifact(attachmentTarget)
+                  }
+                }}
+                className="min-w-0 truncate text-primary underline-offset-2 hover:underline cursor-pointer"
+                title="点击预览原文"
+              >
+                {attachmentTarget.filename}
+              </span>
+            ) : readFiles.length > 0 ? (
+              <InlineToolFiles files={readFiles} fileTarget={fileTarget} onOpen={openArtifact} />
+            ) : (
+              argSummary && (
+                <span className="min-w-0 truncate font-mono text-primary/80">{argSummary}</span>
+              )
             )}
           </span>
         ) : (
@@ -640,10 +769,54 @@ function StepRow({
         <div className="overflow-hidden">
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
-              <p className="text-xs text-muted-foreground">
-                {isSkill ? '加载技能' : '调用工具'}{' '}
-                <span className="font-mono">{argSummary || toolLabel}</span>
-              </p>
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  {attachmentTarget ? (
+                    <>
+                      已读取附件原文{' '}
+                      <button
+                        onClick={() => openArtifact(attachmentTarget)}
+                        className="font-medium text-primary underline-offset-2 hover:underline cursor-pointer"
+                        title="点击预览原文"
+                      >
+                        {attachmentTarget.filename}
+                      </button>
+                    </>
+                  ) : isSkill ? (
+                    <>
+                      已加载技能 <span className="font-mono">{argSummary || toolLabel}</span>
+                    </>
+                  ) : readFiles.length > 0 ? (
+                    <>读到 {readFiles.length} 个文件 ：</>
+                  ) : (
+                    <>已调用 <span className="font-mono">{argSummary || toolLabel}</span></>
+                  )}
+                </p>
+                {/* 检索类工具读到的文件：内联可点击预览（命中可预览类型才可点） */}
+                {readFiles.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    {readFiles.map((f, fi) => {
+                      const target = fileTarget(f)
+                      return (
+                        <div key={`${f.id}-${fi}`} className="flex items-center gap-1.5 text-xs">
+                          <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                          {target ? (
+                            <button
+                              onClick={() => openArtifact(target)}
+                              className="truncate text-primary underline-offset-2 hover:underline cursor-pointer text-left"
+                              title="点击预览原文"
+                            >
+                              {f.filename}
+                            </button>
+                          ) : (
+                            <span className="truncate text-muted-foreground">{f.filename}</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
                 <Streamdown plugins={{ cjk: cjk }} isAnimating={animating} animated={STREAM_ANIMATION}>
@@ -800,105 +973,6 @@ function AgentStepsBlock({
           </div>
         </>
       )}
-    </div>
-  )
-}
-
-// 引用来源子组件
-function ReferencesBlock({
-  references,
-  index,
-  expandedRefs,
-  expandedRefDetails,
-  onToggleRef,
-  onToggleRefDetail,
-  highlightChild,
-}: {
-  references: Reference[]
-  index: number
-  expandedRefs: Set<number>
-  expandedRefDetails: Set<string>
-  onToggleRef: (index: number) => void
-  onToggleRefDetail: (key: string) => void
-  highlightChild: (parent: string, child: string) => React.ReactNode
-}) {
-  return (
-    <div className="mt-3">
-      <button
-        onClick={() => onToggleRef(index)}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
-      >
-        <span className="transition-transform duration-200" style={{ transform: expandedRefs.has(index) ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
-          <ChevronDown className="h-3.5 w-3.5" />
-        </span>
-        <span>{references.length} 个引用来源</span>
-      </button>
-
-      <div
-        className="grid transition-all duration-300 ease-in-out"
-        style={{
-          gridTemplateRows: expandedRefs.has(index) ? '1fr' : '0fr',
-          opacity: expandedRefs.has(index) ? 1 : 0,
-        }}
-      >
-        <div className="overflow-hidden">
-          <div className="mt-2 space-y-2">
-            {references.map((ref, refIdx) => {
-              const detailKey = `${index}-${refIdx}`
-              const isDetailExpanded = expandedRefDetails.has(detailKey)
-              return (
-                <div
-                  key={refIdx}
-                  className="rounded-xl border border-border bg-card p-3.5 transition-all duration-200 hover:border-primary/20 hover:shadow-sm"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <FileText className="h-3 w-3 shrink-0" />
-                      <span className="truncate max-w-[220px]">{ref.filename || ref.doc_id?.slice(0, 8)}</span>
-                    </div>
-                    <Badge variant="outline" className="text-[10px] font-mono tabular-nums px-1.5 py-0">
-                      {ref.score?.toFixed(3)}
-                    </Badge>
-                  </div>
-
-                  <p className="text-xs leading-relaxed text-foreground/80 line-clamp-3">
-                    {ref.child_content || ref.content}
-                  </p>
-
-                  {ref.content && ref.child_content && ref.content !== ref.child_content && (
-                    <>
-                      <button
-                        onClick={() => onToggleRefDetail(detailKey)}
-                        className="mt-2 flex items-center gap-1 text-[11px] text-primary/70 hover:text-primary cursor-pointer transition-colors"
-                      >
-                        <span className="transition-transform duration-200" style={{ transform: isDetailExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
-                          <ChevronDown className="h-3 w-3" />
-                        </span>
-                        {isDetailExpanded ? '收起上下文' : '查看完整上下文'}
-                      </button>
-                      <div
-                        className="grid transition-all duration-200 ease-in-out"
-                        style={{
-                          gridTemplateRows: isDetailExpanded ? '1fr' : '0fr',
-                          opacity: isDetailExpanded ? 1 : 0,
-                        }}
-                      >
-                        <div className="overflow-hidden">
-                          <div className="mt-2 pt-2 border-t border-border/60">
-                            <p className="text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-                              {highlightChild(ref.content, ref.child_content)}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      </div>
     </div>
   )
 }

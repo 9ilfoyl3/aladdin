@@ -7,6 +7,7 @@
 import logging
 
 from app.agent.tools.base import BaseTool, ToolResult
+from app.agent.tools.doc_files import build_tool_files
 from app.retrieval.bm25 import BM25Retriever
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,10 @@ class GrepChunksTool(BaseTool):
             # XML 格式化输出
             output = self._format_xml(deduped)
 
-            return ToolResult(success=True, output=output)
+            # 解析本次读到的文件（doc_id → 文件名/来源），供前端在工具步骤行内联展示可点击预览
+            files = await build_tool_files([r.doc_id for r in deduped])
+
+            return ToolResult(success=True, output=output, data={"files": files})
 
         except Exception as e:
             logger.exception("grep_chunks 执行失败: %s", e)

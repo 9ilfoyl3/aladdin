@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate, Navigate } from 'react-router-dom'
 import {
   Database,
@@ -30,6 +30,7 @@ import { useAuth } from '@/lib/auth-context'
 import ProfileDialog from '@/components/ProfileDialog'
 import SettingsDialog from '@/components/SettingsDialog'
 import ArtifactPanel from '@/components/artifact/ArtifactPanel'
+import { useArtifactStore } from '@/stores/artifactStore'
 
 // 导航项配置。固定角色模型下不再用权限点驱动可见性，而是按 group + 角色推导：
 // - content：内容菜单，member/admin 均可见；
@@ -60,6 +61,13 @@ function Layout() {
   const isChat = location.pathname === '/chat'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+
+  // 路由切换时关闭 Artifact 预览面板：预览内容（会话附件/知识库文档原件）与具体页面绑定，
+  // 离开页面后悬浮的预览已失去上下文，应随之收起。
+  const closeArtifact = useArtifactStore((s) => s.closeArtifact)
+  useEffect(() => {
+    closeArtifact()
+  }, [location.pathname, closeArtifact])
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const confirm = useConfirm()

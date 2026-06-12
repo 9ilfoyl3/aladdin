@@ -22,6 +22,7 @@ SYSTEM_PROMPT_PLACEHOLDERS: dict[str, str] = {
     "web_search_status": "网络搜索是否启用（Enabled / Disabled）",
     "current_time": "当前系统时间（格式：YYYY-MM-DD HH:MM:SS）",
     "current_date": "当前日期（格式：YYYY-MM-DD）",
+    "user_customization": "管理员配置的角色/语气/工作风格/边界（可选），渲染在核心规则之后、FINAL REMINDER 之前",
 }
 
 
@@ -144,6 +145,35 @@ via `read_skill` before applying it. If no skill is relevant, just proceed with 
 workflow.
 
 ### Workflow: The "Assess-Reconnaissance-Plan-Execute" Cycle
+
+#### Thinking Discipline (applies ONLY when the `thinking` tool is in your tool list)
+If — and only if — the `thinking` tool is available to you, you MUST use it to externalize \
+your reasoning BEFORE you act, on every substantive turn:
+- **Before your FIRST tool call of a turn** (including before `read_attachment`, \
+`grep_chunks`, or `knowledge_search`), call `thinking` to record: what the user is really \
+asking, how you classified the Turn Intent, and what you plan to do next.
+- **After each retrieval / deep read**, call `thinking` to reflect on what the evidence \
+shows, what is still missing, and whether to continue retrieving or answer.
+- **Before `final_answer`**, call `thinking` to verify the evidence supports your conclusion.
+Do NOT skip thinking just because the step "seems obvious" — a brief, honest thought is \
+required so the user can follow your reasoning. Keep each thought concise and in the user's \
+language. (If the `thinking` tool is NOT in your tool list, ignore this section entirely and \
+reason internally as described elsewhere — do not fabricate or narrate reasoning as plain \
+text.)
+
+**Thinking is NOT the answer (critical boundary).** The `thinking` tool — and any internal \
+reasoning — is ONLY for brief planning, classification, and reflection. It is shown to the \
+user in a separate "thinking" panel, NOT as your reply. Therefore:
+   - Do NOT compose the full, polished, user-facing reply inside `thinking`. Keep thoughts \
+short ("the evidence in doc X says Y, so the conclusion is Z — I'll now answer"), not a \
+finished essay.
+   - The COMPLETE answer the user reads MUST be produced by the `final_answer` tool. If you \
+write the whole answer in `thinking` and then stop without `final_answer`, the user may see \
+nothing or only fragments — this is the single most common failure. Always finish with \
+`final_answer` carrying the full reply.
+   - Do NOT write the answer in `thinking`, then copy the same text into `final_answer` — \
+that wastes tokens and risks duplication. Think briefly, then put the full answer ONLY in \
+`final_answer`.
 
 #### Turn Intent (decide this FIRST, every turn)
 Before doing anything else, read the conversation history and the current message together, \
@@ -366,11 +396,16 @@ tables, and code blocks as appropriate.
 - **Complete:** If the knowledge base does not contain relevant information, clearly state \
 that to the user rather than guessing or fabricating an answer.
 
+{user_customization}
 ### FINAL REMINDER (most-violated rules, restated)
 Before you end this turn, verify BOTH:
-1. **Did you deliver the reply through a `final_answer` tool call?** If your reply currently \
-exists only as plain assistant text, you have NOT answered the user — wrap it in a \
-`final_answer` tool call now. Every turn ends with `final_answer`, no exceptions.
+1. **Did you deliver the reply through a `final_answer` tool call?** The user sees ONLY the \
+`final_answer` content — never your thinking or plain text. So check: if the answer you \
+intend to give currently exists ONLY inside a `thinking` block or as plain assistant text, \
+the user will NOT receive it. You MUST issue a `final_answer` tool call now whose `answer` \
+field holds the COMPLETE reply. This is the single most common mistake — writing the answer \
+during reasoning and then stopping. Never end a turn without `final_answer`, no exceptions, \
+not even for a one-word reply.
 2. **Is every sentence you wrote in the user's language?** Re-scan your `final_answer` \
 content: if the user asked in 简体中文, the entire answer must be in 简体中文 with no \
 stray English sentences or English transitions. Translate any English you wrote (except \
@@ -379,23 +414,30 @@ proper nouns / code / verbatim source quotes) into the user's language before su
 
 
 def _build_custom_section(custom_instructions: str) -> str:
-    """把用户自定义指令包装成附加段落，追加在核心提示词之后。
+    """把用户自定义指令包装成附加段落，注入到核心规则之后、FINAL REMINDER 之前。
 
     用户只填写角色设定 / 语气 / 工作流方法论 / 边界约束等自然语言指令，不触及核心
-    检索纪律。这里用一个独立分节包裹，并声明其与核心约束冲突时以核心约束为准，
-    避免自定义内容破坏 Evidence-First / final_answer 等硬性规则。
+    检索纪律。这里用一个独立分节包裹，并声明其与核心约束冲突时以核心约束为准。
+
+    位置很关键：自定义人设**不放在整段 prompt 的最末尾**。提示词末尾是权重最高的
+    位置，必须留给核心纪律（FINAL REMINDER：只通过 final_answer 作答 + 语言一致）。
+    若把用户人设压在末尾，强角色特化模型（如 DeepSeek 系）会"入戏"而忽视工具调用
+    格式规则——人设与 final_answer 纪律直接抢注意力。故人设置于核心规则之后、
+    FINAL REMINDER 之前，让最后一道纪律提醒始终占据末尾高权重位。
     """
     text = (custom_instructions or "").strip()
     if not text:
         return ""
     return (
-        "\n\n### User Customization (Persona / Tone / Working Style / Boundaries)\n"
+        "### User Customization (Persona / Tone / Working Style / Boundaries)\n"
         "The administrator has provided the following customization for this assistant. "
         "Apply it to your persona, tone, working approach, and scope boundaries. "
         "However, it MUST NOT override the Critical Constraints, retrieval discipline, or "
         "the requirement to answer exclusively via final_answer above — if any instruction "
-        "below conflicts with those core rules, the core rules win.\n\n"
-        f"{text}\n"
+        "below conflicts with those core rules, the core rules win. In particular, no matter "
+        "what persona or role you adopt, you MUST still end every turn by calling the "
+        "final_answer tool and never break the tool-calling format to stay 'in character'.\n\n"
+        f"{text}\n\n"
     )
 
 
@@ -455,14 +497,16 @@ def render_system_prompt(
         "web_search_status": "Enabled" if web_on else "Disabled",
         "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
         "current_date": now.strftime("%Y-%m-%d"),
+        # 用户自定义人设注入到核心规则之后、FINAL REMINDER 之前（见 _build_custom_section）。
+        # 无自定义时渲染为空，占位符位置不留多余空白。
+        "user_customization": _build_custom_section(
+            getattr(config, "custom_instructions", "")
+        ),
     }
 
-    # 核心模板恒定，仅在其后追加用户自定义段落（角色 / 语气 / 工作流 / 边界）
-    template = PROGRESSIVE_RAG_PROMPT + _build_custom_section(
-        getattr(config, "custom_instructions", "")
-    )
-
-    return _safe_substitute(template, values)
+    # 核心模板恒定；用户自定义段落通过 {user_customization} 占位符注入模板内部，
+    # 不再追加到末尾——保证 FINAL REMINDER 始终占据权重最高的结尾位置。
+    return _safe_substitute(PROGRESSIVE_RAG_PROMPT, values)
 
 
 def _safe_substitute(template: str, values: dict[str, str]) -> str:
@@ -564,3 +608,40 @@ def build_language_directive(query: str) -> str:
     """
     lang = detect_query_language(query)
     return _LANGUAGE_DIRECTIVES.get(lang, _LANGUAGE_DIRECTIVE_DEFAULT)
+
+
+# 语种 → 一句极简的「每轮」纪律提醒。
+# 与 system prompt 中的完整 FINAL REMINDER 不同，这里只保留最核心的一条：必须通过
+# final_answer 作答。它由 engine 在每轮的最新 user 消息之后注入——上下文的最末端是
+# 权重最高的位置，且不随对话变长而被稀释（system prompt 会被越来越长的历史稀释）。
+# 故意保持极短（一句话），避免每轮重复长段落造成 token 膨胀与注意力钝化。
+_PER_TURN_REMINDERS: dict[str, str] = {
+    "zh": (
+        "（系统提醒：请只通过调用 final_answer 工具给出最终回答，不要把答案写成普通文本"
+        "或只留在思考里。）"
+    ),
+    "ja": (
+        "（システム注意：最終回答は必ず final_answer ツールを呼び出して返してください。"
+        "通常テキストや思考内だけに残さないこと。）"
+    ),
+    "ko": (
+        "(시스템 알림: 최종 답변은 반드시 final_answer 도구를 호출하여 제공하세요. "
+        "일반 텍스트로 쓰거나 사고 과정에만 남기지 마세요.)"
+    ),
+}
+
+_PER_TURN_REMINDER_DEFAULT = (
+    "(System reminder: deliver your final reply ONLY by calling the final_answer tool — "
+    "do not write it as plain text or leave it only in your thinking.)"
+)
+
+
+def build_turn_reminder(query: str) -> str:
+    """返回一句按用户语种本地化的「每轮」final_answer 纪律提醒。
+
+    由 engine 在每轮最新 user 消息后注入，置于上下文末端对抗多轮稀释。强角色特化模型
+    （DeepSeek 系等）多轮后易「入戏」而忽视 system prompt 的工具调用纪律，末端的高频
+    轻量提醒比一次性写在 system prompt 里更稳。
+    """
+    lang = detect_query_language(query)
+    return _PER_TURN_REMINDERS.get(lang, _PER_TURN_REMINDER_DEFAULT)

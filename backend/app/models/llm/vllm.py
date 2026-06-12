@@ -30,6 +30,7 @@ class VllmLLM(LLMProvider):
         model: str,
         api_key: str = "",
         provider: str | None = None,
+        thinking_control: str | None = None,
     ):
         """初始化 vLLM 客户端
 
@@ -42,10 +43,15 @@ class VllmLLM(LLMProvider):
             provider: 可选，显式指定模型厂商（thinking 方言分派用）。
                       为空时根据 base_url 自动检测。前端无需配置——仅在需要覆盖
                       自动检测时使用。
+            thinking_control: 可选，显式指定「思考模式参数格式」
+                      （none / chat_template_kwargs / enable_thinking / thinking_type）。
+                      给定时优先级最高，直接决定 thinking 开关写入哪种字段，
+                      跳过厂商/模型名自动猜测（取代脆弱的自动匹配）。
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        self.thinking_control = thinking_control or None
         # 模型厂商：决定 thinking 开关注入到请求体的哪个字段（见 thinking_dialect）。
         # 显式指定优先；否则按 base_url 自动检测。
         if provider:
@@ -84,6 +90,7 @@ class VllmLLM(LLMProvider):
             self.base_url,
             self.model,
             self.provider,
+            self.thinking_control,
         )
         return payload
 
@@ -425,8 +432,11 @@ class VllmLLM(LLMProvider):
                             response_type="content",
                         )
 
-                    # 处理 reasoning_content delta（DeepSeek/doubao 等模型的思考内容）
-                    reasoning = delta.get("reasoning_content") or ""
+                    # 处理思考内容 delta：
+                    # - reasoning_content：DeepSeek/doubao 及 vLLM 旧版 reasoning parser 的字段名
+                    # - reasoning：vLLM 0.21+ / 部分 Qwen3 部署使用的字段名
+                    # 两者择一即可，做双字段兼容，避免换 vLLM 版本/模型时思考通道丢数据。
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                     if reasoning:
                         yield StreamChunk(
                             content=reasoning,

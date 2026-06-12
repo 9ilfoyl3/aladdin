@@ -135,13 +135,20 @@ class LLMConfig(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     provider: Mapped[str] = mapped_column(String, nullable=False)  # ollama | vllm
+    # 模型厂商（vendor）：openai/aliyun/zhipu/volcengine/deepseek/siliconflow/generic 等。
+    # 显式存储后传给 VllmLLM，使 thinking 方言分派不再依赖 base_url 猜测。空表示未指定。
+    vendor: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     chat_visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     stream_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    thinking_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 思考模式参数格式：none/chat_template_kwargs/enable_thinking/thinking_type。
+    # 显式指定 thinking 开关写入请求体的字段格式，取代脆弱的厂商/模型名自动匹配。
+    # 空表示未指定 → 运行时回退到自动方言分派（零回归）。
+    # 注：是否开启思考由智能体预设独占控制，本字段仅决定「开启时怎么写入 API」。
+    thinking_control: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -171,6 +178,9 @@ class EmbedConfig(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     config_type: Mapped[str] = mapped_column(String(20), nullable=False)  # embedding | rerank
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="remote")  # 统一为 remote
+    # 模型厂商（vendor）：仅用于 UI 记忆「选了哪家服务商」以自动回填 base_url；
+    # 运行时仍走 RemoteEmbedder/RemoteReranker 的 URL 格式自动检测，不影响多后端兼容。
+    vendor: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     # 远程服务字段
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)  # BAAI/bge-m3 等
     base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)

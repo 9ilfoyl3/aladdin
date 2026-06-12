@@ -50,7 +50,10 @@ async def _migrate_db() -> None:
         "ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT TRUE",
         "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
         "ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT TRUE",
-        "ALTER TABLE llm_configs ADD COLUMN thinking_enabled BOOLEAN DEFAULT FALSE",
+        # 模型厂商（vendor）+ 思考模式参数格式：显式化，取代脆弱的 base_url/模型名自动匹配
+        # （思考是否开启由智能体预设独占控制，thinking_control 仅决定写入 API 的字段格式）
+        "ALTER TABLE llm_configs ADD COLUMN vendor VARCHAR",
+        "ALTER TABLE llm_configs ADD COLUMN thinking_control VARCHAR",
         # 文档表新增字段
         "ALTER TABLE documents ADD COLUMN folder_id VARCHAR REFERENCES folders(id)",
         # 文档表新增进度追踪字段
@@ -59,6 +62,8 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
+        # Embedding/Rerank 配置表新增厂商（vendor）列：仅用于 UI 记忆所选服务商
+        "ALTER TABLE embed_configs ADD COLUMN vendor VARCHAR",
         # 对话消息表新增知识库追踪字段
         "ALTER TABLE chat_messages ADD COLUMN kb_id VARCHAR",
         "ALTER TABLE chat_messages ADD COLUMN kb_ids JSON",

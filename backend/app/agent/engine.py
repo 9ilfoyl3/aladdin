@@ -257,7 +257,21 @@ class AgentEngine:
         # 把闲聊/确认类输入（"好的"、"谢谢"）脑补成上一轮的问题从而误触发检索。
         # （单轮检索链路的前置改写在 api/query_understanding.py，仅用于检索、不替换
         # 答案生成所用的 query，与此处的 Agent 链路不是同一回事。）
-        messages.append({"role": "user", "content": query})
+        #
+        # 末端注入一句极简的 final_answer 纪律提醒：上下文末端权重最高且不随多轮稀释，
+        # 对抗强角色特化模型（DeepSeek 系等）多轮后"入戏"忽视工具调用纪律的问题。
+        # 用换行拼进同一条 user 消息（而非新增独立消息），避免连续两条 user 消息触发
+        # 部分 chat template（如 Qwen）的 role 交替异常；提醒置于 query 之后，不改写
+        # query 的检索语义。
+        user_content = query
+        try:
+            from app.agent.prompts.progressive_rag import build_turn_reminder
+            reminder = build_turn_reminder(query)
+            if reminder:
+                user_content = f"{query}\n\n{reminder}"
+        except Exception as e:
+            logger.warning("[Agent] Failed to build turn reminder: %s", e)
+        messages.append({"role": "user", "content": user_content})
 
         # 获取工具定义
         tools = self._tool_registry.get_function_definitions()
@@ -941,6 +955,9 @@ class AgentEngine:
                     "success": result.success,
                     "duration_ms": duration_ms,
                     "iteration": step.iteration,
+                    # 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），供前端在该
+                    # 步骤行内联展示可点击预览的文件（粒度到文件）。
+                    "files": (result.data or {}).get("files", []),
                 },
             ))
 
@@ -987,6 +1004,9 @@ class AgentEngine:
                     "success": result.success,
                     "duration_ms": duration_ms,
                     "iteration": step.iteration,
+                    # 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），供前端在该
+                    # 步骤行内联展示可点击预览的文件（粒度到文件）。
+                    "files": (result.data or {}).get("files", []),
                 },
             ))
 
