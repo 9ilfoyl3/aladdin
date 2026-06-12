@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback } from 'react'
+import { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { sessionApi } from '@/lib/api'
 import type { SessionItem } from '@/lib/api'
@@ -12,6 +12,8 @@ interface SessionContextValue {
   handleDeleteSession: (sessionId: string, e: React.MouseEvent) => void
   refreshSessions: () => void
   addOptimisticSession: (session: SessionItem) => void
+  replaceOptimisticSession: (tempId: string, session: SessionItem) => void
+  removeOptimisticSession: (tempId: string) => void
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null)
@@ -25,11 +27,35 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, mustChangePassword, isSuperAdmin } = useAuth()
   const sessionsEnabled = isAuthenticated && !mustChangePassword && !isSuperAdmin
 
-  const { data: sessions = [] } = useQuery({
+  const { data: serverSessions = [] } = useQuery({
     queryKey: ['sessions'],
     queryFn: () => sessionApi.list(),
     enabled: sessionsEnabled,
   })
+
+  // 乐观会话：新建会话时本地立即插入，与服务端列表分开存放（不写 query 缓存，
+  // 避免被 refreshSessions 的 refetch 整体覆盖）。后端用户消息入库后服务端列表
+  // 会返回同 id 的会话，届时该乐观项被自动去重移除（见下方 merge 逻辑）。
+  const [optimisticSessions, setOptimisticSessions] = useState<SessionItem[]>([])
+
+  // 合并：服务端列表为准，乐观项里"服务端尚未返回"的补在最前（最新）。
+  // 服务端一旦返回同 id（用户消息已入库），对应乐观项自然被过滤掉，无缝切换。
+  const sessions = useMemo(() => {
+    if (optimisticSessions.length === 0) return serverSessions
+    const serverIds = new Set(serverSessions.map((s) => s.id))
+    const pending = optimisticSessions.filter((s) => !serverIds.has(s.id))
+    return pending.length > 0 ? [...pending, ...serverSessions] : serverSessions
+  }, [serverSessions, optimisticSessions])
+
+  // 服务端列表已包含的乐观项及时清除，避免 optimisticSessions 无限累积。
+  useEffect(() => {
+    if (optimisticSessions.length === 0) return
+    const serverIds = new Set(serverSessions.map((s) => s.id))
+    setOptimisticSessions((prev) => {
+      const remaining = prev.filter((s) => !serverIds.has(s.id))
+      return remaining.length === prev.length ? prev : remaining
+    })
+  }, [serverSessions, optimisticSessions.length])
 
   const handleNewSession = useCallback(() => {
     setCurrentSessionId(null)
@@ -42,6 +68,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       if (currentSessionId === sessionId) {
         setCurrentSessionId(null)
       }
+      setOptimisticSessions((prev) => prev.filter((s) => s.id !== sessionId))
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
     } catch (err) {
       console.error('删除会话失败', err)
@@ -52,16 +79,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     queryClient.invalidateQueries({ queryKey: ['sessions'] })
   }, [queryClient])
 
-  // 新建会话时乐观插入侧栏：直接写入 react-query 缓存，让会话（以用户问题为标题）
-  // 立即出现，无需等后端入库用户消息 + 首个流式分片返回。后续 refreshSessions 会用
-  // 服务端真实数据（含 LLM 精炼后的标题）覆盖。已存在同 id 则跳过（避免重复）。
+  // 新建会话时乐观插入侧栏：写入本地 state（不进 query 缓存），让会话（以用户问题
+  // 为标题）立即出现，无需等后端入库 + 首个流式分片。已存在同 id 则跳过。
   const addOptimisticSession = useCallback((session: SessionItem) => {
-    queryClient.setQueryData<SessionItem[]>(['sessions'], (prev) => {
-      const list = prev ?? []
-      if (list.some((s) => s.id === session.id)) return list
-      return [session, ...list]
+    setOptimisticSessions((prev) =>
+      prev.some((s) => s.id === session.id) ? prev : [session, ...prev]
+    )
+  }, [])
+
+  // create 返回后用真实会话替换临时项（回填真实 id），保留问题占位标题。
+  const replaceOptimisticSession = useCallback((tempId: string, session: SessionItem) => {
+    setOptimisticSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === tempId)
+      if (idx >= 0) {
+        const next = [...prev]
+        next[idx] = session
+        return next
+      }
+      return prev.some((s) => s.id === session.id) ? prev : [session, ...prev]
     })
-  }, [queryClient])
+  }, [])
+
+  // 移除乐观项（create 失败回滚）。
+  const removeOptimisticSession = useCallback((tempId: string) => {
+    setOptimisticSessions((prev) => prev.filter((s) => s.id !== tempId))
+  }, [])
 
   return (
     <SessionContext.Provider value={{
@@ -72,6 +114,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       handleDeleteSession,
       refreshSessions,
       addOptimisticSession,
+      replaceOptimisticSession,
+      removeOptimisticSession,
     }}>
       {children}
     </SessionContext.Provider>

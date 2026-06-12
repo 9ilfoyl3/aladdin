@@ -57,7 +57,7 @@ function Chat() {
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
 
-  const { currentSessionId, setCurrentSessionId, refreshSessions, addOptimisticSession } = useSession()
+  const { currentSessionId, setCurrentSessionId, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
   const confirm = useConfirm()
   const queryClient = useQueryClient()
 
@@ -284,17 +284,33 @@ function Chat() {
 
     let sessionId = currentSessionId
     if (!sessionId) {
+      // 先用临时 id 同步插入侧栏（不等任何网络往返）：以用户问题作占位标题，
+      // 让新会话 item 立即出现。create 返回后再把临时 id 替换成真实 id。
+      const tempId = `temp-${Date.now()}`
+      const nowIso = new Date().toISOString()
+      addOptimisticSession({
+        id: tempId,
+        title: truncateSessionTitle(query),
+        kb_id: null,
+        model_config_id: null,
+        message_count: 1,
+        created_at: nowIso,
+        updated_at: nowIso,
+      })
       try {
         const session = await sessionApi.create({ title: '新对话' })
         sessionId = session.id
         // 标记该会话为本地发起发送，避免 setCurrentSessionId 触发的 loadMessages 覆盖本地消息
         pendingSendSessionRef.current = session.id
         setCurrentSessionId(session.id)
-        // 乐观插入侧栏：以用户问题作占位标题立即显示，无需等后端入库 + 首个流式分片。
-        // 后续 refreshSessions 会用服务端真实数据（含 LLM 精炼后的标题）覆盖。
-        addOptimisticSession({ ...session, title: truncateSessionTitle(query) })
+        // 临时项替换为真实会话（保留问题占位标题；后续 refreshSessions 用服务端数据覆盖）。
+        replaceOptimisticSession(tempId, { ...session, title: truncateSessionTitle(query) })
       } catch (e) {
         console.error('自动创建会话失败', e)
+        // 回滚临时项，避免侧栏残留无效会话。
+        removeOptimisticSession(tempId)
+        setIsStreaming(false)
+        return
       }
     } else {
       // 已有会话内发送：同样标记，防止其它原因触发的重载覆盖流式消息
