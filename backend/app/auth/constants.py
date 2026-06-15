@@ -131,6 +131,10 @@ class AuditActionEnum(str, Enum):
     KB_SET_VISIBILITY = "kb.set_visibility"
     KB_SHARE = "kb.share"
     KB_REVOKE_SHARE = "kb.revoke_share"
+    # 跨租户分享链接（cross-tenant-kb-share）：签发 / 领取 / 吊销
+    KB_SHARE_LINK_CREATE = "kb.share_link_create"
+    KB_SHARE_LINK_ACCEPT = "kb.share_link_accept"
+    KB_SHARE_LINK_REVOKE = "kb.share_link_revoke"
     INVITATION_CREATE = "invitation.create"
     INVITATION_REVOKE = "invitation.revoke"
     INVITATION_ACCEPT = "invitation.accept"

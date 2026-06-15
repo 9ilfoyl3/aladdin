@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X } from 'lucide-react'
-import { authApi, knowledgeBaseApi } from '@/lib/api'
+import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X, Link2, Copy } from 'lucide-react'
+import { authApi, knowledgeBaseApi, kbShareLinkApi } from '@/lib/api'
 import type { PageResult, KnowledgeBaseListParams, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
@@ -23,6 +23,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import CardGridSkeleton from '@/components/skeletons/CardGridSkeleton'
 import KBCapacityBar from '@/components/KBCapacityBar'
+import KbShareAcceptDialog from '@/components/KbShareAcceptDialog'
 import { toast } from 'sonner'
 
 // 知识库数据类型（kb-sharing-refinement：附带归属、可见性与组织开放维度，用于前端按钮显隐 + 关系标签）
@@ -260,6 +261,22 @@ function KnowledgeBase() {
     onError: (e: Error) => toast.error(e.message || '撤销失败'),
   })
 
+  // 跨租户分享链接（cross-tenant-kb-share）：生成只读链接发给其他团队的用户领取
+  const [shareLink, setShareLink] = useState<string | null>(null)
+  const createLinkMutation = useMutation({
+    mutationFn: (kbId: string) =>
+      kbShareLinkApi.create({ kb_id: kbId, expires_in_hours: 24 * 7 }),
+    onSuccess: (res: { token: string }) => {
+      const url = `${window.location.origin}/knowledge-bases?share=${res.token}`
+      setShareLink(url)
+      navigator.clipboard?.writeText(url).then(
+        () => toast.success('已生成并复制链接（有效期 7 天）'),
+        () => toast.success('已生成链接（有效期 7 天）'),
+      )
+    },
+    onError: (e: Error) => toast.error(e.message || '生成链接失败'),
+  })
+
   // 变更可见性（private / organization + org_permission）
   const visibilityMutation = useMutation({
     mutationFn: ({ kbId, visibility, orgPermission }: { kbId: string; visibility: string; orgPermission?: string }) =>
@@ -343,6 +360,7 @@ function KnowledgeBase() {
     setShareKb(null)
     setSelectedUserIds([])
     setShareSearch('')
+    setShareLink(null)
   }
 
   function toggleUser(id: string) {
@@ -374,6 +392,8 @@ function KnowledgeBase() {
 
   return (
     <div>
+      {/* 跨租户分享领取弹窗：URL 带 ?share=<token> 时自动弹出确认 */}
+      <KbShareAcceptDialog />
       {/* 页面头部 */}
       <div className="flex items-center justify-between mb-5">
         <div>
@@ -769,6 +789,42 @@ function KnowledgeBase() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+
+            {/* 跨租户分享：生成只读链接，发给其他团队的用户登录后领取 */}
+            <div className="border-t pt-4">
+              <Label className="flex items-center gap-1.5">
+                <Link2 className="h-3.5 w-3.5" /> 跨团队分享（只读链接）
+              </Label>
+              <p className="text-xs text-muted-foreground mt-1">
+                生成一个只读分享链接，发给其他团队的成员；对方登录后领取即可访问该知识库。
+              </p>
+              {shareLink ? (
+                <div className="mt-2 flex items-center gap-2">
+                  <Input readOnly value={shareLink} className="text-xs" onFocus={(e) => e.currentTarget.select()} />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => navigator.clipboard?.writeText(shareLink).then(() => toast.success('已复制'))}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  disabled={!shareKb || createLinkMutation.isPending}
+                  onClick={() => shareKb && createLinkMutation.mutate(shareKb.id)}
+                >
+                  <Link2 className="h-3.5 w-3.5 mr-1" />
+                  {createLinkMutation.isPending ? '生成中…' : '生成只读分享链接'}
+                </Button>
               )}
             </div>
           </div>

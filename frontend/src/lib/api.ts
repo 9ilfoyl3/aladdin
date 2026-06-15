@@ -136,6 +136,54 @@ export const knowledgeBaseApi = {
     ),
 }
 
+// 跨租户知识库分享链接（cross-tenant-kb-share）
+export interface ShareLinkInfo {
+  kb_name: string
+  owner_username: string | null
+  owner_avatar: string | null
+  owner_tenant_name: string | null
+  permission: string
+  valid: boolean
+  can_accept: boolean
+  reason: string | null
+}
+
+export interface ShareLinkItem {
+  id: string
+  token: string | null
+  kb_id: string
+  permission: string
+  max_uses: number | null
+  used_count: number
+  expires_at: string
+  is_active: boolean
+  created_at: string
+}
+
+export const kbShareLinkApi = {
+  // 为本人拥有的库签发跨租户只读分享链接
+  create: (data: { kb_id: string; expires_in_hours: number; max_uses?: number | null }) =>
+    request<{ id: string; token: string; kb_id: string; permission: string; expires_at: string; max_uses: number | null }>(
+      '/kb-share-links',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  // 列出某库的分享链接（仅 owner）
+  list: (kbId: string) =>
+    request<ShareLinkItem[]>(`/kb-share-links?kb_id=${encodeURIComponent(kbId)}`),
+  // 吊销分享链接（仅 owner）
+  revoke: (linkId: string) =>
+    request<void>(`/kb-share-links/${linkId}`, { method: 'DELETE' }),
+  // 领取页信息（需登录）
+  info: (token: string) =>
+    request<ShareLinkInfo>(`/kb-share-links/${encodeURIComponent(token)}/info`),
+  // 领取分享（需登录）
+  accept: (token: string) =>
+    request<{ detail: string; kb_id: string; permission: string }>(
+      `/kb-share-links/${encodeURIComponent(token)}/accept`,
+      { method: 'POST' }
+    ),
+}
+
 // 文档相关接口
 export const documentApi = {
   list: (
