@@ -119,24 +119,27 @@ async def assemble_allowed_kb_ids(
     subject_id = identity.acting_subject_id
     own_ids = {kid for kid, owner, _vis in kbs if owner is not None and owner == subject_id}
 
-    # 外部用户：自有私有库 ∪ 本（外部）租户公共库
+    # 跨租户被共享库（cross-tenant-kb-share）：被授予、且不属于本租户的 KB。
+    # 仓储兜底已对「KB 内容类」放行这批 id，故并入可见集合后，list/检索可正常装载。
+    # 所有自然人身份（含管理员）都可能领取跨租户分享，故在各分支统一并入。
+    cross_tenant_shared = set(await cross_tenant_granted_kb_ids(session, identity))
+
+    # 外部用户：自有私有库 ∪ 本（外部）租户公共库 ∪ 跨租户被授予库
     if identity.is_external_user:
-        return own_ids | public_ids
+        return own_ids | public_ids | cross_tenant_shared
 
     # 租户管理员 / 超管：监管可读本租户全部库（含他人私有库）。
     # 与 owner-only 实体操作解耦——这里只决定「列表/检索可见（read）」范围；
     # 写/改/删仍由 kb_authorization_decision 与 owner 闸门各自裁决（admin 不写他人库内容）。
+    # 管理员同样可能以自然人身份领取他租户分享，故并入跨租户被授予库。
     if identity.is_tenant_admin or identity.is_super_admin:
-        return {kid for kid, _o, _v in kbs}
+        return {kid for kid, _o, _v in kbs} | cross_tenant_shared
 
     # 注册用户 / 用户级 Key：自有 ∪ 公共 ∪ 被共享（read/write）
     shared_ids = await _shared_kb_ids(session, identity)
     # 同租户被共享库
     same_tenant_shared = shared_ids & {kid for kid, _o, _v in kbs}
-    # 跨租户被共享库（cross-tenant-kb-share）：被授予、且不属于本租户的 KB。
-    # 仓储兜底已对「KB 内容类」放行这批 id，故此处并入可见集合后，list/检索可正常装载。
-    cross_tenant_shared = await cross_tenant_granted_kb_ids(session, identity)
-    return own_ids | public_ids | same_tenant_shared | set(cross_tenant_shared)
+    return own_ids | public_ids | same_tenant_shared | cross_tenant_shared
 
 
 async def _shared_kb_ids(session: AsyncSession, identity: IdentityContext) -> set[str]:
