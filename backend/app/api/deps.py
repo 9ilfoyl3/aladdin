@@ -19,6 +19,7 @@ Guard 内部顺序（任一不满足即拒绝）：
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Callable
 
 from fastapi import Depends, Request
@@ -51,6 +52,24 @@ from app.schema.db import Tenant, User
 
 # Authorization 头的 Bearer 前缀（大小写不敏感匹配）。
 _BEARER_PREFIX = "bearer "
+
+logger = logging.getLogger(__name__)
+
+
+async def _resolve_cross_tenant_kb_ids(
+    identity: IdentityContext, session: AsyncSession
+) -> frozenset[str]:
+    """cross-tenant-kb-share：算出当前身份经跨租户点对点分享被授予 read 的 KB id 集合。
+
+    包一层异常兜底：任何查询异常都退化为空集（等价旧行为），绝不因本特性拖垮鉴权主流程。
+    """
+    try:
+        from app.auth.kb_scope import cross_tenant_granted_kb_ids
+
+        return await cross_tenant_granted_kb_ids(session, identity)
+    except Exception:  # noqa: BLE001 — 跨租户放行是增量能力，失败应安全降级而非中断鉴权
+        logger.warning("解析跨租户分享 KB 失败，降级为无跨租户放行", exc_info=True)
+        return frozenset()
 
 
 def _extract_bearer(request: Request) -> str | None:
@@ -205,8 +224,15 @@ def authorization_guard(
                 # 6) 目标租户入口归属校验
                 _enforce_target_tenant(request, identity)
 
+                # 6.5) cross-tenant-kb-share：算出当前身份经跨租户分享被授予 read 的 KB id。
+                #      须在设置 contextvar 之前查（此时无租户兜底过滤，方能查到他租户 KB）。
+                #      空集时 scope 行为与改造前等价。
+                cross_kb_ids = await _resolve_cross_tenant_kb_ids(identity, session)
+
             # 7) 设置 contextvar 三态（仓储兜底用），yield 给端点，结束后 reset。
-            scope_token = set_tenant_scope(scope_from_identity(identity))
+            scope_token = set_tenant_scope(
+                scope_from_identity(identity, cross_tenant_kb_ids=cross_kb_ids)
+            )
             yield identity
         finally:
             if scope_token is not None:

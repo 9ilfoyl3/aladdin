@@ -8,6 +8,9 @@
 
 判定顺序（**跨租户前置永远第一**，owner 先于一切角色判定）：
   1. 跨租户硬隔离前置：kb.tenant_id != identity.tenant_id -> (deny, 404)，先于一切。
+     例外（cross-tenant-kb-share）：当前自然人主体持有指向该 KB 的点对点 read/write
+     user-grant 时，允许**跨租户只读**放行（写仍拒绝，第一版不开放跨租户写）。
+     grant 跟人走（grantee_id == acting_subject_id），与发起方租户无关。
   2. tenant_level Key（Virtual_Identity，机器身份）：role 为 None 且无 subject 且持 kb_scope，
      完全由 ApiKey_Authorized_Scope 裁决——落在 scope 内读写均放行，否则 404。
      （外部用户不会进入此分支：其 role=member 且 subject=external_user_id。）
@@ -109,8 +112,16 @@ def kb_authorization_decision(
     is_write = access == KbAccessEnum.WRITE
     subject = identity.acting_subject_id
 
-    # 1) 跨租户硬隔离前置（红线，先于一切 visibility/grant/owner）
+    # 1) 跨租户硬隔离前置（红线）。
+    #    cross-tenant-kb-share 例外：若当前自然人主体持有指向该 KB 的点对点 user-grant，
+    #    则允许**跨租户只读**（写一律拒绝，第一版不开放跨租户写）。其余跨租户访问仍 404。
     if kb_tenant_id != identity.tenant_id:
+        if (
+            not is_write
+            and subject is not None
+            and _has_read_user_grant(subject, grants)
+        ):
+            return KbDecision.allowed()
         return KbDecision.denied(404)
 
     # 2) tenant_level Key（Virtual_Identity，机器身份）：role 为 None 且无自然人主体，
@@ -143,6 +154,22 @@ def kb_authorization_decision(
 
     # 6) private 非 owner 非 admin：依据 user-grant 裁决
     return _decide_by_user_grants(identity, grants, is_write)
+
+
+def _has_read_user_grant(subject: str, grants: list[GrantView]) -> bool:
+    """是否存在指向该主体的、含读权限的点对点 user-grant（read 或 write 均蕴含读）。
+
+    供跨租户分享只读放行判定：grant 跟人走（grantee_id == acting_subject_id），
+    与发起分享时主体所属租户无关，换租户不影响。
+    """
+    for g in grants:
+        if g.grantee_type == GranteeTypeEnum.USER.value and g.grantee_id == subject:
+            if g.permission in (
+                GrantPermissionEnum.READ.value,
+                GrantPermissionEnum.WRITE.value,
+            ):
+                return True
+    return False
 
 
 def _decide_by_user_grants(
