@@ -570,3 +570,39 @@ class Invitation(Base):
     created_by: Mapped[str] = mapped_column(String, nullable=False)
     created_by_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class KbShareLink(Base):
+    """跨租户知识库分享链接（cross-tenant-kb-share）。
+
+    场景：A 租户用户把自己拥有的某个知识库，通过链接点对点只读分享给任意租户的某个用户。
+    被分享方登录后凭 token "领取"——领取动作向 ``KnowledgeBaseGrant`` upsert 一条
+    ``grantee_type=user``、``grantee_id=领取者 user_id`` 的授权记录（与租户内点对点分享
+    共用同一套授权数据），故授权天然跟人走、换租户不影响。
+
+    与 Invitation 区分：Invitation 用于"建租户/建用户"（免登录建号）；本表用于"已存在用户
+    领取一个已存在 KB 的访问权"，必须登录后领取（领取者即被授权主体）。
+
+    安全：token 只存哈希（token_plain 供创建者复制重发，与 Invitation 同款权衡）；
+    受 expires_at + max_uses 约束；吊销即 is_active=False。第一版仅 read。
+    本表不继承 TenantScopedMixin：分享链接本身按 owner_user_id 归属与查询，
+    且领取方跨租户读取本表元数据属正常流程，不应被租户兜底过滤拦截。
+    """
+    __tablename__ = "kb_share_links"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # 明文 token：供创建者列表展示/复制重发（与 Invitation 同款权衡，受有效期+次数约束）
+    token_plain: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # 被分享的知识库
+    kb_id: Mapped[str] = mapped_column(String, ForeignKey("knowledge_bases.id"), index=True, nullable=False)
+    # 分享发起者（必为 KB owner）所属租户与用户，供展示"谁分享的"与审计
+    owner_tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    owner_user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    # 授予权限：第一版固定 read（保留列以便后续扩展 write）
+    permission: Mapped[str] = mapped_column(String, default="read", nullable=False)
+    max_uses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # null=有效期内不限次
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

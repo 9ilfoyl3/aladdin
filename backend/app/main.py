@@ -26,6 +26,7 @@ from app.api.document import router as document_router
 from app.api.embed_config import router as embed_config_router
 from app.api.folder import router as folder_router
 from app.api.knowledge_base import router as kb_router
+from app.api.kb_share_link import router as kb_share_link_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
 from app.api.retrieval import router as retrieval_router
@@ -423,6 +424,7 @@ app.include_router(mcp_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(invitation_router)
+app.include_router(kb_share_link_router)
 
 # 统一异常处理（AppError -> {"detail": ...}，跨租户 404/权限 403 等语义一致）
 from app.api.errors import register_exception_handlers  # noqa: E402

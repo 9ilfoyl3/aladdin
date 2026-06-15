@@ -19,6 +19,7 @@ const ACTION_LABEL: Record<string, string> = {
   'role.create': '创建角色', 'role.set_permissions': '改角色权限', 'role.delete': '删除角色',
   'apikey.create': '创建Key', 'apikey.revoke': '撤销Key', 'apikey.update_scope': '改Key范围',
   'kb.set_visibility': '改KB可见性', 'kb.share': '共享KB', 'kb.revoke_share': '撤销共享',
+  'kb.share_link_create': '创建跨团队分享链接', 'kb.share_link_accept': '领取跨团队分享', 'kb.share_link_revoke': '吊销分享链接',
   'invitation.create': '创建邀请', 'invitation.revoke': '吊销邀请', 'invitation.accept': '接受邀请',
   'auth.login_success': '登录成功', 'auth.login_fail': '登录失败', 'auth.change_password': '修改密码',
   'user.update_profile': '更新资料', 'tenant.update_profile': '更新租户资料',

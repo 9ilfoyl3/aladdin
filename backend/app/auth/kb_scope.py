@@ -131,9 +131,12 @@ async def assemble_allowed_kb_ids(
 
     # 注册用户 / 用户级 Key：自有 ∪ 公共 ∪ 被共享（read/write）
     shared_ids = await _shared_kb_ids(session, identity)
-    # 仅保留同租户的被共享库（跨租户 grant 在 v1 不存在，这里再过滤一道）
-    shared_ids &= {kid for kid, _o, _v in kbs}
-    return own_ids | public_ids | shared_ids
+    # 同租户被共享库
+    same_tenant_shared = shared_ids & {kid for kid, _o, _v in kbs}
+    # 跨租户被共享库（cross-tenant-kb-share）：被授予、且不属于本租户的 KB。
+    # 仓储兜底已对「KB 内容类」放行这批 id，故此处并入可见集合后，list/检索可正常装载。
+    cross_tenant_shared = await cross_tenant_granted_kb_ids(session, identity)
+    return own_ids | public_ids | same_tenant_shared | set(cross_tenant_shared)
 
 
 async def _shared_kb_ids(session: AsyncSession, identity: IdentityContext) -> set[str]:
@@ -149,3 +152,34 @@ async def _shared_kb_ids(session: AsyncSession, identity: IdentityContext) -> se
         )
     )
     return {r[0] for r in rows.all()}
+
+
+async def cross_tenant_granted_kb_ids(
+    session: AsyncSession, identity: IdentityContext
+) -> frozenset[str]:
+    """cross-tenant-kb-share：当前身份经点对点 grant 被授予、且**属于其他租户**的 KB id 集合。
+
+    用途：守卫在请求入口算出这批 id 注入 contextvar（TenantScope.cross_tenant_kb_ids），
+    使仓储兜底（方案 B）对「KB 内容类」额外放行这批跨租户 KB 的读取。
+
+    - 仅注册用户 / 用户级 Key 有自然人主体（acting_subject_id）；机器级 tenant_level Key
+      与 platform 超管无主体或无租户，返回空集（不参与跨租户分享）。
+    - 严格排除本租户 KB（本租户库走原有同租户范围，不应混入跨租户放行集合）。
+    - grant 跟人走：grantee_id == acting_subject_id，换租户不影响匹配。
+    """
+    subject_id = identity.acting_subject_id
+    tenant_id = identity.tenant_id
+    if subject_id is None or tenant_id is None:
+        return frozenset()
+
+    # 被授予的全部 KB（user-grant），联表取各 KB 的归属租户，过滤出「非本租户」的部分。
+    rows = await session.execute(
+        select(KnowledgeBase.id)
+        .join(KnowledgeBaseGrant, KnowledgeBaseGrant.kb_id == KnowledgeBase.id)
+        .where(
+            KnowledgeBaseGrant.grantee_type == GranteeTypeEnum.USER.value,
+            KnowledgeBaseGrant.grantee_id == subject_id,
+            KnowledgeBase.tenant_id != tenant_id,
+        )
+    )
+    return frozenset(r[0] for r in rows.all())
