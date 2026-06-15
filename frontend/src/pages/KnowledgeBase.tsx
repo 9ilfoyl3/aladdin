@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X, Link2, Copy } from 'lucide-react'
 import { authApi, knowledgeBaseApi, kbShareLinkApi } from '@/lib/api'
+import { copyToClipboard } from '@/lib/clipboard'
 import type { PageResult, KnowledgeBaseListParams, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
@@ -266,13 +267,12 @@ function KnowledgeBase() {
   const createLinkMutation = useMutation({
     mutationFn: (kbId: string) =>
       kbShareLinkApi.create({ kb_id: kbId, expires_in_hours: 24 * 7 }),
-    onSuccess: (res: { token: string }) => {
+    onSuccess: async (res: { token: string }) => {
       const url = `${window.location.origin}/knowledge-bases?share=${res.token}`
       setShareLink(url)
-      navigator.clipboard?.writeText(url).then(
-        () => toast.success('已生成并复制链接（有效期 7 天）'),
-        () => toast.success('已生成链接（有效期 7 天）'),
-      )
+      // 用统一的剪贴板工具（兼容非 HTTPS 部署的 execCommand 降级）
+      const ok = await copyToClipboard(url)
+      toast.success(ok ? '已生成并复制链接（有效期 7 天）' : '已生成链接（有效期 7 天），请手动复制')
     },
     onError: (e: Error) => toast.error(e.message || '生成链接失败'),
   })
@@ -808,7 +808,7 @@ function KnowledgeBase() {
                     variant="outline"
                     size="sm"
                     className="shrink-0"
-                    onClick={() => navigator.clipboard?.writeText(shareLink).then(() => toast.success('已复制'))}
+                    onClick={async () => { const ok = await copyToClipboard(shareLink); toast.success(ok ? '已复制' : '复制失败，请手动复制') }}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
