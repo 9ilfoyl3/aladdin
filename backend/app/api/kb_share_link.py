@@ -120,6 +120,7 @@ class ShareLinkInfo(BaseModel):
     """领取页展示用。"""
     kb_name: str
     owner_username: str | None
+    owner_avatar: str | None = None
     owner_tenant_name: str | None
     permission: str
     valid: bool
@@ -277,9 +278,11 @@ async def get_share_link_info(
         raise CrossTenantError("分享链接无效或已失效")
 
     owner_username = None
+    owner_avatar = None
     if link.owner_user_id:
         u = await db.get(User, link.owner_user_id)
         owner_username = u.username if u else None
+        owner_avatar = u.avatar if u else None
     owner_tenant_name = None
     if link.owner_tenant_id:
         t = await db.get(Tenant, link.owner_tenant_id)
@@ -287,7 +290,7 @@ async def get_share_link_info(
 
     can_accept, reason = _accept_eligibility(identity, link, kb)
     return ShareLinkInfo(
-        kb_name=kb.name, owner_username=owner_username,
+        kb_name=kb.name, owner_username=owner_username, owner_avatar=owner_avatar,
         owner_tenant_name=owner_tenant_name, permission=link.permission,
         valid=True, can_accept=can_accept, reason=reason,
     )

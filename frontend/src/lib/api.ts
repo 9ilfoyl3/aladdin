@@ -140,6 +140,7 @@ export const knowledgeBaseApi = {
 export interface ShareLinkInfo {
   kb_name: string
   owner_username: string | null
+  owner_avatar: string | null
   owner_tenant_name: string | null
   permission: string
   valid: boolean
