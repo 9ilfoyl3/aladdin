@@ -246,6 +246,8 @@ function KnowledgeBase() {
     onSuccess: () => {
       toast.success('已共享')
       if (shareKb) queryClient.invalidateQueries({ queryKey: ['kb-shares', shareKb.id] })
+      // 同步刷新列表，使卡片上的「分享给 N 人」人数即时更新
+      queryClient.invalidateQueries({ queryKey: ['knowledge-bases'] })
       setSelectedUserIds([])
     },
     onError: (e: Error) => toast.error(e.message || '共享失败'),
@@ -258,6 +260,8 @@ function KnowledgeBase() {
     onSuccess: (_data, vars) => {
       toast.success('已撤销共享')
       queryClient.invalidateQueries({ queryKey: ['kb-shares', vars.kbId] })
+      // 同步刷新列表，使卡片上的「分享给 N 人」人数即时更新
+      queryClient.invalidateQueries({ queryKey: ['knowledge-bases'] })
     },
     onError: (e: Error) => toast.error(e.message || '撤销失败'),
   })
