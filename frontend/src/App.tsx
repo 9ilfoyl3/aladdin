@@ -40,10 +40,10 @@ function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 // 登录后默认落地页：超管为纯平台管理身份（无知识库/对话），落到"租户管理"；
-// 其余身份落到知识库。避免超管落到一个其菜单里并不存在的知识库页（右侧内容与左侧菜单不一致）。
+// 其余身份落到对话页。
 function DefaultLanding() {
   const { isSuperAdmin } = useAuth()
-  return <Navigate to={isSuperAdmin ? '/tenants' : '/knowledge-bases'} replace />
+  return <Navigate to={isSuperAdmin ? '/tenants' : '/chat'} replace />
 }
 
 // 根路径入口：未登录展示炫酷落地页；已登录则按身份跳转到对应首页。
