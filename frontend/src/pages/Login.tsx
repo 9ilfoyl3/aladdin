@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { authApi } from '@/lib/api'
@@ -37,6 +37,7 @@ export default function Login() {
     '连接数据源，沉淀团队知识，让智能问答触手可及。',
   )
   const navigate = useNavigate()
+  const location = useLocation()
   const { login } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -57,8 +58,13 @@ export default function Login() {
     setSubmitting(true)
     try {
       await login(username, password)
-      // 强制改密由路由守卫接管；否则进首页
-      navigate('/', { replace: true })
+      // 登录后跳回来源页（含 query，如分享链接 ?share=token）；无来源则进首页。
+      // 强制改密场景由路由守卫接管。
+      const from = (location.state as { from?: { pathname?: string; search?: string } } | null)?.from
+      const target = from?.pathname
+        ? `${from.pathname}${from.search || ''}`
+        : '/'
+      navigate(target, { replace: true })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '登录失败')
     } finally {

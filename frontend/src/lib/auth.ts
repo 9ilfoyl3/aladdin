@@ -1,17 +1,16 @@
 // 前端鉴权基础设施（tenant-auth）
-// - JWT 存取（内存 + sessionStorage 持久化）
+// - JWT 存取（内存 + localStorage 持久化）
 // - 统一注入 Authorization 头
 // - 401/403 处理钩子（由 AuthProvider 注册）
 //
 // 注意：前端是展示层防御，不是安全边界——真正鉴权由后端 Guard 强制。
 //
-// 存储选型：使用 sessionStorage 而非 localStorage。
-// 原因：sessionStorage 按"浏览器标签页"隔离，使得同一浏览器可在不同标签页
-// 分别登录不同用户（超管 / 租户管理员 / 普通用户），便于多角色并行测试与使用，
-// 且避免多标签共享同一 token 互相覆盖导致的登录态错乱。
-// 代价：新开一个空白标签页需重新登录（同标签页内刷新仍保持登录）。
+// 存储选型：使用 localStorage（单点登录）。
+// 同一浏览器内所有标签页共享同一登录态——新开标签页 / 粘贴链接打开都免重新登录，
+// 跨标签 storage 事件可使一处登出全局同步。代价是同一浏览器无法并行登录多账号
+// （多角色测试请用不同浏览器或隐身窗口）。
 
-const TOKEN_KEY = 'artoo.jwt'
+export const TOKEN_KEY = 'artoo.jwt'
 
 let _token: string | null = null
 
@@ -21,7 +20,7 @@ let _onUnauthorized: (() => void) | null = null
 export function loadToken(): string | null {
   if (_token === null) {
     try {
-      _token = sessionStorage.getItem(TOKEN_KEY)
+      _token = localStorage.getItem(TOKEN_KEY)
     } catch {
       _token = null
     }
@@ -32,10 +31,10 @@ export function loadToken(): string | null {
 export function setToken(token: string | null): void {
   _token = token
   try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token)
-    else sessionStorage.removeItem(TOKEN_KEY)
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
   } catch {
-    /* sessionStorage 不可用时仅保留内存态 */
+    /* localStorage 不可用时仅保留内存态 */
   }
 }
 
