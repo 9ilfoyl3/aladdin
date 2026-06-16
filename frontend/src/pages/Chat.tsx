@@ -298,7 +298,10 @@ function Chat() {
   }, [newSessionNonce])
 
   // 发送消息
-  async function handleSend(overrideQuery?: string) {
+  async function handleSend(
+    overrideQuery?: string,
+    overrides?: { attachments?: MessageAttachment[]; kbIds?: string[] },
+  ) {
     const query = (overrideQuery ?? input).trim()
     if (!query || isStreaming) return
 
@@ -339,12 +342,15 @@ function Chat() {
 
     const userMessage: Message = { role: 'user', content: query }
     // 绑定当前暂存的会话文件为本条用户消息的附件（已建索引完成的；上传中的不绑）。
-    const boundAttachments: MessageAttachment[] = stagedFiles.map((f) => ({
-      file_id: f.id,
-      filename: f.filename,
-      file_size: f.file_size,
-      file_type: f.file_type,
-    }))
+    // 重试场景由 overrides.attachments 显式传入（避免依赖尚未刷新的派生 stagedFiles）。
+    const boundAttachments: MessageAttachment[] =
+      overrides?.attachments ??
+      stagedFiles.map((f) => ({
+        file_id: f.id,
+        filename: f.filename,
+        file_size: f.file_size,
+        file_type: f.file_type,
+      }))
     if (boundAttachments.length > 0) userMessage.attachments = boundAttachments
     setMessages((prev) => [...prev, userMessage])
     setInput('')
@@ -357,8 +363,10 @@ function Chat() {
       // 合并知识库选择映射到后端契约（保持既有路由语义不变）：
       // - 0 个库 → 都不传；1 个库 → 仅 knowledge_base_id（走 SINGLE_KB，保留单库查询理解链路）；
       // - 2+ 个库 → kb_ids（走 MULTI_KB），数组首个即权重 1.0 的主库。
-      const primaryKb = selectedKbIds[0] || undefined
-      const multiKbIds = selectedKbIds.length > 1 ? selectedKbIds : undefined
+      // 重试场景由 overrides.kbIds 显式传入（沿用该轮原始知识库，而非当前选择器状态）。
+      const effectiveKbIds = overrides?.kbIds ?? selectedKbIds
+      const primaryKb = effectiveKbIds[0] || undefined
+      const multiKbIds = effectiveKbIds.length > 1 ? effectiveKbIds : undefined
 
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
@@ -741,7 +749,7 @@ function Chat() {
     }
   }
 
-  // 重试最新一轮：先调后端删除该轮 user+assistant 消息，再用原问题与附件重新发起。
+  // 重试最新一轮：先调后端删除该轮 user+assistant 消息，再用原问题、知识库与附件重新发起。
   async function handleRetry() {
     if (!currentSessionId || isStreaming) return
     try {
@@ -755,8 +763,15 @@ function Chat() {
         }
         return lastUserIdx >= 0 ? prev.slice(0, lastUserIdx) : prev
       })
-      // 恢复该轮绑定的附件供重发（重新设为暂存文件由 sessionFiles 列表驱动，这里仅重发问题）
-      await handleSend(retry.content)
+      // 沿用该轮原始知识库（kb_ids 优先，回退单选 kb_id），同步选择器并显式传给重发，
+      // 避免依赖尚未刷新的派生状态导致知识库/附件回落到输入框。
+      const retryKbIds = (retry.kb_ids && retry.kb_ids.length > 0)
+        ? retry.kb_ids.filter(Boolean)
+        : (retry.kb_id ? [retry.kb_id] : [])
+      setSelectedKbIds(retryKbIds)
+      // 恢复该轮绑定的附件供重发（原样带回用户气泡，而非落入输入框暂存区）。
+      const retryAttachments = retry.attachments ?? []
+      await handleSend(retry.content, { attachments: retryAttachments, kbIds: retryKbIds })
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '重试失败')
     }
