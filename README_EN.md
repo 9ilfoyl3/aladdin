@@ -97,7 +97,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 
 | Capability | Details |
 |------------|---------|
-| Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images |
+| Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images / audio |
 | Document Organization | Folder hierarchy management, rename, thumbnail preview (authenticated fetch) |
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
 | Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
@@ -112,6 +112,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | LLM | Any OpenAI-compatible API (vLLM / DeepSeek / Qwen / …) / Ollama |
 | Embedding / Rerank | Any OpenAI-compatible remote service (TEI / Infinity / vLLM), hot-swappable via frontend |
 | OCR | TextIn / generic external API (remote); multi-provider with default + fallback auto-switching |
+| ASR | OpenAI-compatible speech recognition (/v1/audio/transcriptions); audio files auto-transcribed and indexed, multi-provider with default + fallback auto-switching |
 | Vector DB | Milvus 2.4+ (dense + sparse vectors) |
 | MCP | Exposes KB capabilities (MCP Server) and integrates remote MCP tools (discovery + auto-registration) |
 | Skills | Progressive Disclosure loading — read full SKILL.md instructions on demand |

@@ -170,6 +170,32 @@ class OCRConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ASRConfig(Base):
+    """ASR（语音识别）服务配置表
+
+    属平台底座（capability-config-to-platform），全平台一份，无 tenant_id，
+    仅超级管理员维护。所有厂商统一走 OpenAI 兼容的 /v1/audio/transcriptions 接口。
+    """
+    __tablename__ = "asr_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String, nullable=False, default="openai")  # openai（兼容接口）
+    # 服务商（vendor）：仅用于 UI 记忆「选了哪家服务商」以自动回填 base_url；
+    # 运行时统一走 OpenAI 兼容 /v1/audio/transcriptions，不影响后端多厂商兼容。
+    vendor: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    api_url: Mapped[str] = mapped_column(String(2048), nullable=False)  # base_url，如 http://host:port/v1
+    api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)  # whisper-1 等
+    language: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 语言提示（可选）
+    timeout: Mapped[float] = mapped_column(Float, default=300.0)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
+    extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class EmbedConfig(Base):
     """Embedding/Rerank 远程服务配置表"""
     __tablename__ = "embed_configs"

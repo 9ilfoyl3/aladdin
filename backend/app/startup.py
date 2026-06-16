@@ -12,7 +12,7 @@ from sqlalchemy import select, func
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
-from app.schema.db import EmbedConfig, OCRConfig
+from app.schema.db import ASRConfig, EmbedConfig, OCRConfig
 from app.storage.database import async_session
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,28 @@ async def load_ocr_manager() -> OCRManager | None:
         return None
     except Exception as e:
         logger.warning("加载 OCR 配置失败: %s", e)
+        return None
+
+
+async def load_asr_manager():
+    """从数据库加载 ASR 配置并创建 ASRManager
+
+    Returns:
+        ASRManager 实例，如果没有配置则返回 None
+    """
+    from app.pipeline.asr.manager import ASRManager
+
+    try:
+        async with async_session() as session:
+            result = await session.execute(select(ASRConfig))
+            configs = result.scalars().all()
+        if configs:
+            logger.info("load_asr_manager: 找到 %d 条 ASR 配置", len(configs))
+            return ASRManager(configs)
+        logger.info("load_asr_manager: 数据库中无 ASR 配置")
+        return None
+    except Exception as e:
+        logger.warning("加载 ASR 配置失败: %s", e)
         return None
 
 

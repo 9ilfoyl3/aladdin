@@ -6,7 +6,7 @@
 
 from app.models.manager import get_model_manager
 from app.pipeline.pipeline import DocumentPipeline
-from app.startup import load_ocr_manager
+from app.startup import load_asr_manager, load_ocr_manager
 from app.storage.database import async_session
 from app.storage.milvus import get_milvus_client
 
@@ -20,10 +20,12 @@ async def create_pipeline() -> DocumentPipeline:
     model_manager = get_model_manager()
     milvus_client = get_milvus_client()
     ocr_manager = await load_ocr_manager()
+    asr_manager = await load_asr_manager()
 
     return DocumentPipeline(
         model_manager=model_manager,
         milvus_client=milvus_client,
         db_session_factory=async_session,
         ocr_manager=ocr_manager,
+        asr_manager=asr_manager,
     )

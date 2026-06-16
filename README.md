@@ -97,7 +97,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 
 | 能力 | 详情 |
 |------|------|
-| 文档格式 | PDF / Word / Excel / PPT / TXT / Markdown / 图片 |
+| 文档格式 | PDF / Word / Excel / PPT / TXT / Markdown / 图片 / 音频 |
 | 文档组织 | 文件夹层级管理、重命名、缩略图预览（鉴权拉取） |
 | 图文混排 | 自动提取嵌入图片并并发 OCR，按页位置插入识别文本，内容 hash 去重 |
 | 结构感知切片 | 按文档逻辑结构切分，表格整块保护，父块（上下文）/ 子块（精检）映射 |
@@ -112,6 +112,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 | LLM | 任意 OpenAI 兼容 API（vLLM / DeepSeek / Qwen / …）/ Ollama |
 | Embedding / Rerank | 任意 OpenAI 兼容远程服务（TEI / Infinity / vLLM），前端可视化热切换 |
 | OCR 服务 | TextIn / 通用外部 API（远程），多 Provider + 默认 + Fallback 自动切换 |
+| ASR 服务 | OpenAI 兼容语音识别（/v1/audio/transcriptions），音频文件自动转写入库，多 Provider + 默认 + Fallback 自动切换 |
 | 向量数据库 | Milvus 2.4+（稠密 + 稀疏向量） |
 | MCP | 对外暴露知识库能力（MCP Server），对内接入远程 MCP 工具（服务发现 + 自动注册） |
 | 技能 Skills | Progressive Disclosure 渐进式加载，按需读取 SKILL.md 完整指令 |

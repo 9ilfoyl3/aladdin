@@ -125,6 +125,8 @@ async def _migrate_db() -> None:
         # 临时文件统一由 kb_chunk_cap 约束，不再补这些列（存量库残留列保持 nullable、不被读取）。
         "ALTER TABLE retrieval_configs ADD COLUMN upload_max_file_mb INTEGER",
         "ALTER TABLE platform_configs ADD COLUMN kb_chunk_cap INTEGER",
+        # ===== asr-config：ASR 配置表 vendor 列（存量库若已建表则补列） =====
+        "ALTER TABLE asr_configs ADD COLUMN vendor VARCHAR(50)",
     ]
     for sql in migrations:
         try:

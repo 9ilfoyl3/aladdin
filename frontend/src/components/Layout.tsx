@@ -8,6 +8,7 @@ import {
   Settings,
   Cpu,
   ScanText,
+  AudioLines,
   Layers,
   Bot,
   Sparkles,
@@ -47,6 +48,7 @@ const navItems = [
   { to: '/models', label: '模型管理', icon: Cpu, group: 'capability' },
   { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'capability' },
   { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'capability' },
+  { to: '/asr-services', label: 'ASR 服务', icon: AudioLines, group: 'capability' },
   { to: '/api-keys', label: 'API Key', icon: Key, group: 'capability' },
   { to: '/tenants', label: '租户管理', icon: Building2, group: 'platform' },
   { to: '/users', label: '用户管理', icon: UsersIcon, group: 'manage' },
@@ -85,6 +87,7 @@ function Layout() {
     '/models',
     '/embed-config',
     '/ocr-services',
+    '/asr-services',
     '/retrieval',
     '/api-keys',
   ])
@@ -118,6 +121,7 @@ function Layout() {
     '/models',
     '/embed-config',
     '/ocr-services',
+    '/asr-services',
     '/retrieval',
     '/api-keys',
   ])

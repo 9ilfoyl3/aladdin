@@ -138,8 +138,11 @@ def _ensure_not_super_admin_content(identity: IdentityContext) -> None:
 
 router = APIRouter(tags=["Document"])
 
-# 支持的文件类型
-_ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png"}
+# 支持的文件类型（含音频，音频走 ASR 语音转写链路）
+_ALLOWED_EXTENSIONS = {
+    "pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png",
+    "mp3", "wav", "m4a", "flac", "ogg",
+}
 
 async def _generate_and_store_thumbnail(doc_id: str, file_type: str, content: bytes) -> None:
     """从上传字节生成缩略图并存入 MinIO（仅 PDF 渲染首页；图片预览直接返回原件）。
@@ -239,11 +242,16 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
         if configs:
             ocr_manager = OCRManager(configs)
 
+        # 从数据库加载 ASR 配置
+        from app.startup import load_asr_manager
+        asr_manager = await load_asr_manager()
+
         pipeline = DocumentPipeline(
             model_manager=manager,
             milvus_client=milvus,
             db_session_factory=async_session,
             ocr_manager=ocr_manager,
+            asr_manager=asr_manager,
         )
         await pipeline.process(file_path, doc_id, kb_id)
         print(f"[Pipeline] 文档 {doc_id} 处理完成")

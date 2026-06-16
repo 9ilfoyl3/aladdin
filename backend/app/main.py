@@ -29,6 +29,7 @@ from app.api.knowledge_base import router as kb_router
 from app.api.kb_share_link import router as kb_share_link_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
+from app.api.asr_config import router as asr_config_router
 from app.api.retrieval import router as retrieval_router
 from app.api.session import router as session_router
 from app.api.session_upload import router as session_upload_router
@@ -415,6 +416,7 @@ app.include_router(api_key_router)
 app.include_router(llm_config_router)
 app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
+app.include_router(asr_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
 app.include_router(session_upload_router)

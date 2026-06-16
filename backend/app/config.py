@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     ocr_external_api_key: str = ""
     ocr_external_api_timeout: float = 30.0
 
+    # ASR（语音识别）配置
+    asr_enabled: bool = True
+    asr_api_url: str = ""
+    asr_api_key: str = ""
+    asr_model_name: str = ""
+    asr_language: str = ""
+    asr_timeout: float = 300.0
+
     # Pipeline Worker
     # 文档准入并发数：Worker 同时推进处理的文档数（含 load/chunk/index 等阶段）。
     # 注意：准入信号量在单个文档「全程」（含 Embedding/OCR I/O 等待）持有，不会中途释放，
@@ -106,6 +114,8 @@ class Settings(BaseSettings):
     pipeline_embed_per_doc_concurrency: int = 2
     # OCR 全局并发：所有文档共享的 OCR 调用并发上限
     pipeline_ocr_concurrency: int = 4
+    # ASR 全局并发：所有文档共享的 ASR（语音转写）调用并发上限
+    pipeline_asr_concurrency: int = 2
     pipeline_embed_max_connections: int = 20  # httpx 连接池上限
 
     # 大文件分道（fast/slow 双队列）：文件大小 ≥ 此阈值走 slow 道，避免大文件占满快道。

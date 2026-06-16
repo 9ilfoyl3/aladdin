@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from app.pipeline.embedder import EmbedResult
     from app.pipeline.ocr.manager import OCRManager
     from app.pipeline.ocr.provider import OCRResult
+    from app.pipeline.asr.manager import ASRManager
     from app.session_upload.limits import UploadLimits
 
 logger = logging.getLogger(__name__)
@@ -116,10 +117,12 @@ class DocumentPipeline:
         milvus_client: MilvusClient,
         db_session_factory: async_sessionmaker[AsyncSession],
         ocr_manager: OCRManager | None = None,
+        asr_manager: "ASRManager | None" = None,
     ):
         self.milvus = milvus_client
         self.db_session_factory = db_session_factory
         self.ocr_manager = ocr_manager
+        self.asr_manager = asr_manager
         # 初始化管道各节点
         self.enricher = Enricher(llm=None, enabled=False)
         settings = get_settings()
@@ -189,9 +192,37 @@ class DocumentPipeline:
         load_result = await asyncio.to_thread(loader.load, file_path)
         images_to_cleanup = load_result.images
         try:
+            # ─── 2. 音频 ASR 转写（音频文件走语音识别链路） ───
+            is_audio = bool(load_result.metadata.get("is_audio"))
+            if is_audio:
+                if not self.asr_manager:
+                    # 音频文件但未配置 ASR 服务：业务输入问题。
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("音频文件需要语音识别，但未配置 ASR 服务")
+
+                asr_result = await self._transcribe_with_limit(file_path)
+                if not asr_result.full_text.strip():
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("音频转写结果为空")
+
+                load_result = LoadResult(
+                    content=asr_result.full_text,
+                    metadata={
+                        **load_result.metadata,
+                        "asr_provider": asr_result.provider_name,
+                    },
+                    images=[],
+                )
+
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
-            needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
+            needs_ocr = (
+                not is_audio
+                and (not stripped_content or len(stripped_content) < 10)
+                and self.ocr_manager
+            )
             has_embedded_images = bool(load_result.images and self.ocr_manager)
 
             if needs_ocr:
@@ -204,7 +235,7 @@ class DocumentPipeline:
                     },
                     images=[],
                 )
-            elif not stripped_content or len(stripped_content) < 10:
+            elif not is_audio and (not stripped_content or len(stripped_content) < 10):
                 if not self.ocr_manager:
                     # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
                     # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
@@ -253,12 +284,13 @@ class DocumentPipeline:
                     page_blocks=use_page_blocks,
                 )
 
-            # 清洗后兜底 OCR：与 process() 一致
+            # 清洗后兜底 OCR：与 process() 一致（音频转写结果不触发 OCR 兜底）
             cleaned_stripped = final_content.strip()
             if (
                 (not cleaned_stripped or len(cleaned_stripped) < 10)
                 and self.ocr_manager
                 and not needs_ocr
+                and not is_audio
             ):
                 ocr_result = await self._recognize_with_limit(file_path)
                 final_content = ocr_result.full_text
@@ -1027,6 +1059,15 @@ class DocumentPipeline:
         from app.pipeline.concurrency import get_ocr_semaphore
         async with get_ocr_semaphore():
             return await self.ocr_manager.recognize(file_path)
+
+    async def _transcribe_with_limit(self, file_path: str):
+        """整文件 ASR：通过进程级全局 ASR 信号量限流后调用 asr_manager.transcribe。
+
+        所有文档共享同一个全局 ASR 信号量，保证对远程 ASR 服务的总并发恒定可控。
+        """
+        from app.pipeline.concurrency import get_asr_semaphore
+        async with get_asr_semaphore():
+            return await self.asr_manager.transcribe(file_path)
 
     async def _concurrent_ocr_images(
         self, images: list[EmbeddedImage], doc_id: str

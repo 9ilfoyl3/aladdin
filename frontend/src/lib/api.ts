@@ -582,6 +582,53 @@ export const ocrConfigApi = {
     request<OCRTestResult>(`/ocr-configs/${id}/test`, { method: 'POST' }),
 }
 
+export interface ASRConfigItem {
+  id: string
+  name: string
+  provider_type: string
+  vendor: string | null
+  api_url: string
+  api_key_set: boolean
+  model_name: string
+  language: string | null
+  timeout: number
+  is_default: boolean
+  is_fallback: boolean
+  extra_config: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ASRTestResult {
+  success: boolean
+  message: string
+  elapsed_ms: number | null
+}
+
+// ASR（语音识别）服务配置接口
+export const asrConfigApi = {
+  list: () => request<ASRConfigItem[]>('/asr-configs'),
+  create: (data: { name: string; provider_type: string; vendor?: string; api_url: string; api_key?: string; model_name: string; language?: string; timeout?: number; is_default?: boolean; is_fallback?: boolean; extra_config?: Record<string, unknown> }) =>
+    request<ASRConfigItem>('/asr-configs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Record<string, unknown>) =>
+    request<ASRConfigItem>(`/asr-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/asr-configs/${id}`, { method: 'DELETE' }),
+  test: (data: { provider_type: string; api_url: string; api_key?: string; timeout?: number }) =>
+    request<ASRTestResult>('/asr-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testSaved: (id: string) =>
+    request<ASRTestResult>(`/asr-configs/${id}/test`, { method: 'POST' }),
+}
+
 
 
 // Agent 预设配置接口
