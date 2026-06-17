@@ -118,6 +118,9 @@ class KnowledgeBaseResponse(BaseModel):
     # 当前请求者对该库是否有内容写权限（owner/组织读写/write 共享）。
     # 供前端在文档页显隐上传/新建/删除等写操作入口；真正鉴权仍在后端守卫。
     can_write: bool | None = None
+    # 当前身份与该库的关系（唯一判定源）：mine|shared|org|others。
+    # 前端关系标签/分组直接按此渲染，不再自行用 owner/visibility/is_admin 重算。
+    relation: str | None = None
     # 容量进度条（Req 7）。列表/详情按需填充；未计算时为 None（向后兼容）。
     capacity: KBCapacityVO | None = None
 
@@ -234,6 +237,7 @@ def _to_resp(
     tenant_name: str | None = None,
     share_count: int | None = None,
     can_write: bool | None = None,
+    relation: str | None = None,
     capacity: KBCapacityVO | None = None,
 ) -> KnowledgeBaseResponse:
     return KnowledgeBaseResponse(
@@ -244,6 +248,7 @@ def _to_resp(
         org_permission=kb.org_permission,
         owner_username=owner_username, tenant_name=tenant_name,
         share_count=share_count, can_write=can_write,
+        relation=relation,
         capacity=capacity,
     )
 
@@ -295,15 +300,24 @@ async def _authorize_kb(
 
 
 def _kb_relation(
-    kb: KnowledgeBase, subject_id: str | None, is_admin: bool
+    kb: KnowledgeBase,
+    subject_id: str | None,
+    is_admin: bool,
+    granted_ids: set[str],
 ) -> str:
-    """计算当前身份与某 KB 的关系（用于筛选/排序展现优先级）。
+    """计算当前身份与某 KB 的关系（唯一判定源，前端按此渲染标签，不再自行重算）。
 
-    与前端 relationBadge 的判定优先级保持一致：
-    mine（我的）> org（组织公共）> others（他人私有·管理员只读）/ shared（共享给我）。
+    判定以「真实归属/授权」为准，优先级：
+    - mine：我是 owner；
+    - shared：该库被点对点授权给我（read/write，含跨租户分享）——只看是否有 grant，
+      与我是不是管理员无关（修复管理员领取的分享被错分到「他人私有」的问题）；
+    - org：组织公共库；
+    - others：管理员监管可见的他人私有库（无授权给我、非组织公共、非我的）。
     """
     if subject_id is not None and kb.owner_user_id == subject_id:
         return "mine"
+    if kb.id in granted_ids:
+        return "shared"
     if kb.visibility == KbVisibilityEnum.ORGANIZATION.value:
         return "org"
     if is_admin:
@@ -351,6 +365,18 @@ async def list_knowledge_bases(
     subject = identity.acting_subject_id
     is_admin = identity.is_tenant_admin or identity.is_super_admin
 
+    # 「被点对点授权给我」的全部 KB id（read/write，含跨租户分享）。
+    # 关系判定据此区分「共享给我」与「管理员监管的他人私有」，避免按身份误判。
+    granted_ids: set[str] = set()
+    if subject is not None:
+        gr = await db.execute(
+            select(KnowledgeBaseGrant.kb_id).where(
+                KnowledgeBaseGrant.grantee_type == GranteeTypeEnum.USER.value,
+                KnowledgeBaseGrant.grantee_id == subject,
+            )
+        )
+        granted_ids = {r[0] for r in gr.all()}
+
     # 名称模糊搜索
     if q and q.strip():
         kw = q.strip().lower()
@@ -358,7 +384,7 @@ async def list_knowledge_bases(
 
     # 关系筛选
     if relation_filter is not None:
-        all_kbs = [kb for kb in all_kbs if _kb_relation(kb, subject, is_admin) == relation_filter]
+        all_kbs = [kb for kb in all_kbs if _kb_relation(kb, subject, is_admin, granted_ids) == relation_filter]
 
     # 文档数：一次分组查询覆盖全部已筛选 KB，供排序与展示复用（跨页排序需全量计数）
     filtered_ids = [kb.id for kb in all_kbs]
@@ -382,7 +408,7 @@ async def list_knowledge_bases(
     else:  # recommended：关系优先级 → 最近更新
         all_kbs.sort(
             key=lambda kb: (
-                _RELATION_RANK.get(_kb_relation(kb, subject, is_admin), 99),
+                _RELATION_RANK.get(_kb_relation(kb, subject, is_admin, granted_ids), 99),
                 -(kb.updated_at or kb.created_at).timestamp(),
             )
         )
@@ -442,6 +468,7 @@ async def list_knowledge_bases(
                 if subject is not None and kb.owner_user_id == subject
                 else None
             ),
+            relation=_kb_relation(kb, subject, is_admin, granted_ids),
             capacity=_compute_capacity(
                 used_chunks=used_chunk_map.get(kb.id, 0),
                 used_files=count_map.get(kb.id, 0),

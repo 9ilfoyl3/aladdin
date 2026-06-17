@@ -40,6 +40,8 @@ interface KnowledgeBaseItem {
   owner_username?: string | null
   tenant_name?: string | null
   share_count?: number | null
+  // 当前身份与该库的关系（后端唯一判定源）：mine|shared|org|others。前端标签/分组按此渲染。
+  relation?: 'mine' | 'shared' | 'org' | 'others' | null
   // 容量进度条（session-file-upload Req 7）。后端列表/详情按需填充，未计算时为 null。
   capacity?: KBCapacity | null
 }
@@ -118,32 +120,34 @@ function KnowledgeBase() {
     return isOwner(kb.owner_user_id)
   }
 
-  // 列表关系标签：我的（蓝）/ 组织公共（灰）/ 共享给我（绿）/ 他人私有·管理员只读（琥珀）
+  // 列表关系标签：我的（蓝）/ 共享给我（绿）/ 组织公共（灰）/ 他人私有·管理员只读（琥珀）。
+  // 关系判定收口到后端 kb.relation（唯一源），前端只负责把档位映射成展示样式，不再用
+  // owner/visibility/is_admin 自行重算（修复管理员领取的分享被误判为「他人私有」的问题）。
   // detail：共享给我 -> 「谁分享的」；组织公共 -> 来源租户名；管理员只读 -> 归属人。
-  // 「我的」库的当前状态以可点击 chip 单独渲染（见卡片底部），不走 detail。
   function relationBadge(kb: KnowledgeBaseItem): { text: string; cls: string; detail?: string } {
-    if (isOwner(kb.owner_user_id)) {
-      return { text: '我的', cls: 'bg-blue-100 text-blue-700 border-blue-200' }
-    }
-    if (kb.visibility === 'organization') {
-      return {
-        text: '组织公共',
-        cls: 'bg-muted text-muted-foreground',
-        detail: kb.tenant_name ? `来自 ${kb.tenant_name}` : undefined,
-      }
-    }
-    // 非自己、非组织公共的私有库：管理员是监管只读可见，普通成员则是被共享
-    if (isAdmin) {
-      return {
-        text: '他人私有 · 只读',
-        cls: 'bg-amber-100 text-amber-700 border-amber-200',
-        detail: kb.owner_username ? `归属 ${kb.owner_username}` : undefined,
-      }
-    }
-    return {
-      text: '共享给我',
-      cls: 'bg-green-100 text-green-700 border-green-200',
-      detail: kb.owner_username ? `来自 ${kb.owner_username}` : undefined,
+    // 向后兼容：旧接口/详情未透出 relation 时，回退按 owner 兜底（其余统一当共享给我）
+    const relation = kb.relation ?? (isOwner(kb.owner_user_id) ? 'mine' : 'shared')
+    switch (relation) {
+      case 'mine':
+        return { text: '我的', cls: 'bg-blue-100 text-blue-700 border-blue-200' }
+      case 'org':
+        return {
+          text: '组织公共',
+          cls: 'bg-muted text-muted-foreground',
+          detail: kb.tenant_name ? `来自 ${kb.tenant_name}` : undefined,
+        }
+      case 'others':
+        return {
+          text: '他人私有 · 只读',
+          cls: 'bg-amber-100 text-amber-700 border-amber-200',
+          detail: kb.owner_username ? `归属 ${kb.owner_username}` : undefined,
+        }
+      default: // shared
+        return {
+          text: '共享给我',
+          cls: 'bg-green-100 text-green-700 border-green-200',
+          detail: kb.owner_username ? `来自 ${kb.owner_username}` : undefined,
+        }
     }
   }
 
