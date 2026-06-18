@@ -33,6 +33,7 @@ import { useGraphGating } from '@/components/graph/useGraphGating'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -75,6 +76,26 @@ interface KnowledgeBaseItem {
 interface BreadcrumbItem {
   id: string | null
   name: string
+}
+
+// 工具栏按钮：artifact 打开（收起为纯图标）时套 Tooltip 显示中文名；展开时按钮自带文字，
+// 直接渲染不套 Tooltip，避免多余包裹。label 同时用于纯图标态的无障碍提示。
+function ToolbarTip({
+  collapsed,
+  label,
+  children,
+}: {
+  collapsed: boolean
+  label: string
+  children: React.ReactNode
+}) {
+  if (!collapsed) return <>{children}</>
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
 }
 
 // 文档管理页面 - Finder 风格
@@ -656,22 +677,24 @@ function Documents() {
         </div>
 
         {/* 操作按钮（只读库隐藏全部写操作入口）。
-            artifact 预览打开时列表区被压窄，按钮收起为纯图标（保留 title 提示）以自适应。 */}
+            artifact 预览打开时列表区被压窄，按钮收起为纯图标（套 Tooltip 显示中文名）以自适应。 */}
+        <TooltipProvider delayDuration={200}>
         <div className="flex items-center gap-2 shrink-0">
           {/* 知识图谱入口：仅全局+KB 双开关均启用时出现（design.md 5.3.1）。
               读权限用户亦可查看图谱，故不受 canWrite 限制。 */}
           {showGraphEntry && (
-            <Link to={`/knowledge-bases/${kbId}/graph`} onClick={(e) => e.stopPropagation()}>
-              <Button
-                variant="outline"
-                size="sm"
-                title="知识图谱"
-                className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
-              >
-                <Network className="h-4 w-4 shrink-0" />
-                <span className={cn(artifactOpen && 'hidden')}>知识图谱</span>
-              </Button>
-            </Link>
+            <ToolbarTip collapsed={artifactOpen} label="知识图谱">
+              <Link to={`/knowledge-bases/${kbId}/graph`} onClick={(e) => e.stopPropagation()}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Network className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>知识图谱</span>
+                </Button>
+              </Link>
+            </ToolbarTip>
           )}
           {canWrite && (selectionMode ? (
             <>
@@ -721,56 +744,61 @@ function Documents() {
           ) : (
             <>
               {documents.length > 0 && (
+                <ToolbarTip collapsed={artifactOpen} label="批量选择">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
+                    className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                  >
+                    <CheckSquare className="h-4 w-4 shrink-0" />
+                    <span className={cn(artifactOpen && 'hidden')}>批量选择</span>
+                  </Button>
+                </ToolbarTip>
+              )}
+              <ToolbarTip collapsed={artifactOpen} label="新建文件夹">
                 <Button
                   variant="outline"
                   size="sm"
-                  title="批量选择"
-                  onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
+                  onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
                   className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
                 >
-                  <CheckSquare className="h-4 w-4 shrink-0" />
-                  <span className={cn(artifactOpen && 'hidden')}>批量选择</span>
+                  <FolderPlus className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>新建文件夹</span>
                 </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                title="新建文件夹"
-                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-                className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
-              >
-                <FolderPlus className="h-4 w-4 shrink-0" />
-                <span className={cn(artifactOpen && 'hidden')}>新建文件夹</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                title="上传文件夹"
-                onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
-                className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
-              >
-                <FolderUp className="h-4 w-4 shrink-0" />
-                <span className={cn(artifactOpen && 'hidden')}>上传文件夹</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                title="链接转存"
-                onClick={(e) => { e.stopPropagation(); setUrlImportOpen(true) }}
-                className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
-              >
-                <Link2 className="h-4 w-4 shrink-0" />
-                <span className={cn(artifactOpen && 'hidden')}>链接转存</span>
-              </Button>
-              <Button
-                size="sm"
-                title="上传文件"
-                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-                className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
-              >
-                <Upload className="h-4 w-4 shrink-0" />
-                <span className={cn(artifactOpen && 'hidden')}>上传文件</span>
-              </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="上传文件夹">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <FolderUp className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>上传文件夹</span>
+                </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="链接转存">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); setUrlImportOpen(true) }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Link2 className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>链接转存</span>
+                </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="上传文件">
+                <Button
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Upload className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>上传文件</span>
+                </Button>
+              </ToolbarTip>
             </>
           ))}
           <input
@@ -789,6 +817,7 @@ function Documents() {
             onChange={(e) => handleFolderSelect(e.target.files)}
           />
         </div>
+        </TooltipProvider>
       </div>
 
       {/* 容量进度条（chunk 真实度量；接近/已满变色，session-file-upload Req 7） */}
