@@ -212,6 +212,13 @@ export const documentApi = {
       return res.json()
     })
   },
+  // 链接转存：粘贴网页 / 公众号链接，后端抓取正文提取后转存为 .md 文档入库。
+  // 复用 request()：自动处理 401 与 422（detail 为后端友好中文，透传到 toast）。
+  fromUrl: (kbId: string, url: string, folderId?: string | null) =>
+    request<unknown>(`/knowledge-bases/${kbId}/documents/from-url`, {
+      method: 'POST',
+      body: JSON.stringify({ url, folder_id: folderId ?? null }),
+    }),
   validateFolder: (kbId: string, paths: string[]) =>
     request<{
       supported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]

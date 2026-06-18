@@ -61,6 +61,9 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
 
+        # 链接转存（url-import）：记录网页正文转存文档的原文链接，便于溯源展示。
+        "ALTER TABLE documents ADD COLUMN source_url VARCHAR",
+
         # 知识图谱（knowledge-graph）：文档抽取状态与权威 attempt 计数。
         # NOT NULL 带 DEFAULT，已有行自动回填（none / 0）。
         "ALTER TABLE documents ADD COLUMN graph_status VARCHAR NOT NULL DEFAULT 'none'",

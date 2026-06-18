@@ -77,6 +77,8 @@ class Document(Base, TenantScopedMixin):
     file_type: Mapped[str] = mapped_column(String, nullable=False)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     file_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # SHA256 文件内容哈希
+    # 链接转存来源：经网页链接抓取正文入库时记录原文 URL（普通上传为 None），便于溯源展示。
+    source_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)

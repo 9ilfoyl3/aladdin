@@ -200,6 +200,7 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     progress: float = 0
     progress_message: str | None = None
+    source_url: str | None = None
     created_at: str
 
 
@@ -406,6 +407,7 @@ async def list_documents(
             chunk_count=d.chunk_count,
             progress=d.progress or 0,
             progress_message=d.progress_message,
+            source_url=d.source_url,
             created_at=d.created_at.isoformat() if d.created_at else "",
         )
         for d in docs
@@ -539,6 +541,141 @@ async def upload_document(
     )
 
 
+class UrlImportRequest(BaseModel):
+    """链接转存请求：粘贴一个网页链接，抓取正文转存进知识库。"""
+    url: str
+    folder_id: str | None = None
+
+
+@router.post(
+    "/api/knowledge-bases/{kb_id}/documents/from-url",
+    response_model=DocumentResponse,
+    status_code=201,
+)
+async def import_document_from_url(
+    kb_id: str,
+    request: Request,
+    body: UrlImportRequest,
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """从网页链接抓取正文转存为知识库文档（移动端核心入口）。
+
+    抓取链接 → trafilatura 提取正文为 Markdown → 当作一篇 ``.md`` 文档复用既有上传
+    管线（存 MinIO → 入队/回退 → load→chunk→embed→index→可选图谱抽取）。支持通用
+    网页文章与微信公众号永久图文链接；登录态/动态渲染/强反爬页面会返回明确失败提示。
+
+    与 ``upload_document`` 共用同一套写权限校验、容量/重复判定与入库触发逻辑，
+    仅来源从「上传文件字节」换成「抓取的网页正文」。
+    """
+    from app.pipeline.url_fetcher import (
+        UrlFetchError,
+        fetch_article,
+        safe_filename_from_title,
+    )
+
+    # 写权限校验（跨租户404 / 无写权403），与上传一致。
+    kb = await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.WRITE)
+
+    # 抓取并提取正文（失败转 422，detail 为明确中文原因）。
+    try:
+        article = await fetch_article(body.url)
+    except UrlFetchError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # 正文转字节，按 .md 文档处理。
+    content = article.markdown.encode("utf-8")
+    file_size = len(content)
+    ext = "md"
+
+    # 文件名取标题（去非法字符、限长），并经统一文件名校验兜底。
+    filename = safe_filename_from_title(article.title)
+    try:
+        filename = validate_filename(filename)
+    except NameValidationError:
+        filename = "网页内容.md"
+
+    # 文件大小校验（与上传同一租户级上限）。
+    limits = await get_upload_limit_resolver().resolve(identity.tenant_id)
+    if file_size > limits.upload_max_file_bytes:
+        raise FileTooLargeError.from_limit(limits.upload_max_file_bytes)
+
+    store = get_object_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="对象存储不可用，无法转存内容")
+
+    doc_id = str(uuid.uuid4())
+    object_key = document_object_key(doc_id, ext)
+
+    # 按正文内容哈希去重：同一链接内容未变时命中既有文档。
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.execute(
+        select(Document).where(
+            Document.kb_id == kb_id,
+            Document.file_hash == file_hash,
+        )
+    )
+    existing_doc = existing.scalar_one_or_none()
+    if existing_doc is not None:
+        return DocumentResponse(
+            id=existing_doc.id,
+            kb_id=existing_doc.kb_id,
+            filename=existing_doc.filename,
+            file_type=existing_doc.file_type,
+            file_size=existing_doc.file_size,
+            status="duplicate",
+            error_message=f"内容已存在（与 {existing_doc.filename} 相同）",
+            chunk_count=existing_doc.chunk_count,
+            created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
+        )
+
+    # 写入 MinIO（权威存储）。
+    await store.put_bytes(object_key, content, content_type="text/markdown; charset=utf-8")
+
+    # 创建文档记录；DB 写失败时补偿删除已上传对象（与上传路径对称）。
+    try:
+        doc = Document(
+            id=doc_id,
+            kb_id=kb_id,
+            folder_id=body.folder_id,
+            filename=filename,
+            file_type=ext,
+            file_size=file_size,
+            file_hash=file_hash,
+            status="pending",
+            source_url=article.url,
+            tenant_id=kb.tenant_id,
+        )
+        db.add(doc)
+        kb.doc_count = (kb.doc_count or 0) + 1
+        await db.flush()
+        await db.refresh(doc)
+        await db.commit()
+    except Exception:
+        await _safe_remove_objects([object_key])
+        raise
+
+    # 后台触发管道处理（与上传同一入队/回退逻辑）。
+    await _enqueue_or_fallback(
+        request, object_key, doc_id, kb_id,
+        file_size=file_size, tenant_id=kb.tenant_id, object_key=object_key,
+    )
+
+    return DocumentResponse(
+        id=doc.id,
+        kb_id=doc.kb_id,
+        filename=doc.filename,
+        file_type=doc.file_type,
+        file_size=doc.file_size,
+        status=doc.status,
+        error_message=doc.error_message,
+        chunk_count=doc.chunk_count,
+        source_url=doc.source_url,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+    )
+
+
 @router.get("/api/documents/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     doc_id: str,
@@ -561,6 +698,7 @@ async def get_document(
         chunk_count=doc.chunk_count,
         progress=doc.progress or 0,
         progress_message=doc.progress_message,
+        source_url=doc.source_url,
         created_at=doc.created_at.isoformat() if doc.created_at else "",
     )
 
