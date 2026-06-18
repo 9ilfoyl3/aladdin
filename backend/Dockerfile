@@ -18,9 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 COPY requirements-graph.txt .
 
-# 知识图谱可选依赖（Neo4j 驱动）默认不装，保持镜像精简、不开图谱零成本。
-# 需要图谱时构建：docker build --build-arg WITH_GRAPH=true -t artoo-backend:latest .
-ARG WITH_GRAPH=false
+# 知识图谱依赖（Neo4j 驱动）默认安装。不需要图谱时可 --build-arg WITH_GRAPH=false 跳过。
+ARG WITH_GRAPH=true
 RUN pip install --no-cache-dir --prefer-binary -r requirements.txt && \
     if [ "$WITH_GRAPH" = "true" ]; then \
       pip install --no-cache-dir --prefer-binary -r requirements-graph.txt; \
