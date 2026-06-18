@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -101,8 +102,19 @@ class MetadataExtractor:
 
         # 拼接全文用于章节路径提取（仅在需要时）
         full_text = ""
+        heading_index: list[tuple[int, int, str]] = []
+        path_snapshots: list[list[str]] = []
         if not skip_section_path and parent_chunks:
             full_text = "\n".join(parent_chunks)
+            # 预扫描全文所有标题（位置/层级/标题文本），只做一次。
+            # 旧实现对每个子块都重新 finditer 全文 → 子块数 × 全文 的 O(n²)，
+            # 在超长文档（如百万字小说切出数千子块）上会卡死。提到循环外预建
+            # 有序标题表后，每个子块仅需一次定位 + 二分查找。
+            heading_index = self._build_heading_index(full_text)
+            # 进一步预计算「每个标题位置处的层级路径快照」，只折叠一次（O(m)）。
+            # 子块定位后直接二分取最近快照即可（O(1)），避免对每个子块重新折叠
+            # 其前面的全部标题（旧版 O(子块数 × 标题数)，在超多章节文档上仍慢）。
+            path_snapshots = self._build_path_snapshots(heading_index)
 
         metadata_list: list[ChunkMetadata] = []
         for child_idx, child_text in enumerate(child_chunks):
@@ -114,7 +126,9 @@ class MetadataExtractor:
             # 提取章节路径（预切分场景跳过）
             section_path = []
             if not skip_section_path and full_text:
-                section_path = self._extract_section_path(child_text, full_text)
+                section_path = self._section_path_from_index(
+                    child_text, full_text, heading_index, path_snapshots
+                )
 
             # 判断元素类型
             element_type = self._detect_element_type(child_text)
@@ -164,25 +178,85 @@ class MetadataExtractor:
 
         return best_page
 
-    def _extract_section_path(
-        self, chunk_content: str, full_text: str
-    ) -> list[str]:
-        """提取 chunk 所属的章节标题路径
+    def _build_heading_index(self, full_text: str) -> list[tuple[int, int, str]]:
+        """预扫描全文，构建按位置升序的标题表 [(position, level, title), ...]。
 
-        基于正则匹配在 full_text 中扫描所有标题，找到 chunk 位置之前的
-        标题层级结构，构建从高到低的章节路径。
+        只在 extract() 中对整篇文档调用一次。把原本"每个子块各扫一遍全文"的
+        O(子块数 × 全文) 降为一次全文扫描，杜绝超长文档的 O(n²) 卡死。
+
+        Args:
+            full_text: 完整文档文本
+
+        Returns:
+            按 position 升序排列的 (position, level, title) 列表
+        """
+        if not full_text:
+            return []
+
+        headings: list[tuple[int, int, str]] = []
+        for level, pattern in _HEADING_PATTERNS:
+            for match in pattern.finditer(full_text):
+                headings.append((match.start(), level, match.group(0).strip()))
+
+        headings.sort(key=lambda x: x[0])
+        return headings
+
+    def _build_path_snapshots(
+        self, heading_index: list[tuple[int, int, str]]
+    ) -> list[list[str]]:
+        """预计算每个标题位置处的「层级路径快照」。
+
+        ``snapshots[i]`` 表示依次应用 ``heading_index[0..i]`` 后的层级路径
+        （高层级标题重置更低层级）。只折叠一次，O(m)。子块定位后取
+        ``snapshots[cut-1]`` 即得其章节路径，无需对每个子块重新折叠。
+
+        与旧版逐块折叠的产出**逐项等价**：折叠规则（高层级 reset 低层级、
+        按层级升序输出）完全一致，只是把重复折叠提取为一次前缀扫描。
+
+        Args:
+            heading_index: 按 position 升序的 (position, level, title) 列表
+
+        Returns:
+            与 heading_index 等长的路径快照列表
+        """
+        snapshots: list[list[str]] = []
+        level_titles: dict[int, str] = {}
+        for _pos, level, title in heading_index:
+            level_titles[level] = title
+            # 出现某层级标题时，清除所有更低层级（数字更大）的标题
+            keys_to_remove = [k for k in level_titles if k > level]
+            for k in keys_to_remove:
+                del level_titles[k]
+            # 按层级从高到低（数字从小到大）排列输出，与旧实现一致
+            sorted_levels = sorted(level_titles.keys())
+            snapshots.append([level_titles[lv] for lv in sorted_levels])
+        return snapshots
+
+    def _section_path_from_index(
+        self,
+        chunk_content: str,
+        full_text: str,
+        heading_index: list[tuple[int, int, str]],
+        path_snapshots: list[list[str]],
+    ) -> list[str]:
+        """基于预建标题表 + 路径快照，计算 chunk 所属的章节标题路径。
+
+        定位 chunk 在全文中的位置后，用二分取出该位置之前最后一个标题的
+        路径快照（O(1)）。定位规则与旧实现一致（chunk 前 50 字符 anchor +
+        ``full_text.find``），保证逐块产出完全相同。
 
         Args:
             chunk_content: chunk 文本内容
-            full_text: 完整文档文本
+            full_text: 完整文档文本（用于定位 chunk 位置）
+            heading_index: _build_heading_index 预建的有序标题表
+            path_snapshots: _build_path_snapshots 预建的路径快照
 
         Returns:
             章节标题路径列表，如 ["第三章", "第二节"]
         """
-        if not full_text or not chunk_content:
+        if not heading_index or not chunk_content:
             return []
 
-        # 用 chunk 前50字符定位 chunk 在 full_text 中的位置
         anchor = chunk_content[:50].strip()
         if not anchor:
             return []
@@ -191,42 +265,12 @@ class MetadataExtractor:
         if chunk_pos == -1:
             return []
 
-        # 扫描 full_text 中所有标题及其位置和层级
-        headings: list[tuple[int, int, str]] = []  # (position, level, title)
-
-        for level, pattern in _HEADING_PATTERNS:
-            for match in pattern.finditer(full_text):
-                pos = match.start()
-                # 只关注 chunk 位置之前的标题
-                if pos >= chunk_pos:
-                    continue
-                # 提取标题文本
-                title = match.group(0).strip()
-                headings.append((pos, level, title))
-
-        if not headings:
+        # 二分定位：cut = position < chunk_pos 的标题数量（heading_index 已按 position 升序）。
+        # 该 chunk 的章节路径 = 应用前 cut 个标题后的快照，即 snapshots[cut-1]。
+        cut = bisect.bisect_left(heading_index, (chunk_pos,))
+        if cut <= 0:
             return []
-
-        # 按位置排序
-        headings.sort(key=lambda x: x[0])
-
-        # 构建层级路径：高层级标题会重置低层级
-        # 用 dict 记录每个层级当前的标题
-        level_titles: dict[int, str] = {}
-
-        for _pos, level, title in headings:
-            level_titles[level] = title
-            # 当出现某层级标题时，清除所有更低层级（数字更大）的标题
-            keys_to_remove = [k for k in level_titles if k > level]
-            for k in keys_to_remove:
-                del level_titles[k]
-
-        # 按层级从高到低排列输出
-        if not level_titles:
-            return []
-
-        sorted_levels = sorted(level_titles.keys())
-        return [level_titles[lv] for lv in sorted_levels]
+        return list(path_snapshots[cut - 1])
 
     def _detect_element_type(self, chunk_content: str) -> str:
         """识别 chunk 的元素类型: text/table/title

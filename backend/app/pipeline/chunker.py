@@ -54,6 +54,26 @@ _MD_TABLE_LINE_RE = re.compile(r'^\|.*\|$')
 # Markdown 标题正则：匹配 # ~ ###### 开头的行
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
 
+# 非 Markdown 章节标记识别（中/英/德），用于在「无 Markdown 标题」的文档中
+# 仍能为 child chunk 生成章节面包屑（context_header），提升检索时的上下文。
+# 每项为 (level, 正则, 是否带捕获组标题)。level 越小层级越高。
+# 设计要点：仅在文档不含 Markdown 标题时启用（见 _HeaderTracker），因此完全
+# 不影响 Markdown 文档的既有 breadcrumb 行为（零回归）。
+_NONMD_HEADING_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
+    # 中文章/编（一级）：第X章 / 第X编
+    (1, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+[章编](?:[ \t]+\S.*)?)$')),
+    # 中文节/部分（二级）：第X节 / 第X部分
+    (2, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+[节節部]分?(?:[ \t]+\S.*)?)$')),
+    # 中文条（三级）：第X条
+    (3, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+条(?:[ \t]+\S.*)?)$')),
+    # 英文章节（一级）：Chapter/Section/Part N
+    (1, re.compile(r'^[ \t]*((?:Chapter|Section|Part)\s+(?:\d+|[IVXLCDM]+)\b.*)$', re.IGNORECASE)),
+    # 德文章节（一级）：Kapitel/Abschnitt/Teil N
+    (1, re.compile(r'^[ \t]*((?:Kapitel|Abschnitt|Teil)\s+(?:\d+|[IVXLCDM]+)\b.*)$', re.IGNORECASE)),
+    # 中文数字序号（二级）：一、二、…（后跟标题文字）
+    (2, re.compile(r'^[ \t]*([一二三四五六七八九十]+、\s*\S.*)$')),
+]
+
 
 @dataclass
 class DocProfile:
@@ -139,40 +159,61 @@ class _HeaderTracker:
     然后可通过 breadcrumb() 获取当前层级的面包屑（如 `# 顶级标题 > ## 二级标题`）。
     """
 
-    def __init__(self):
-        # 栈元素: (level, heading_text)，level 为 1~6
-        self._stack: list[tuple[int, str]] = []
+    def __init__(self, enable_nonmd: bool = False):
+        # 栈元素: (level, heading_text, is_md)，level 为 1~6
+        # is_md=True 表示 Markdown 标题（breadcrumb 带 # 前缀，保持既有格式）；
+        # is_md=False 表示非 Markdown 章节标记（第X章/Chapter 等，breadcrumb 用原文）。
+        self._stack: list[tuple[int, str, bool]] = []
+        # 是否启用非 Markdown 章节标记识别。默认关闭，仅在文档不含 Markdown 标题
+        # 时由调用方开启，从而完全不影响 Markdown 文档的既有 breadcrumb 行为。
+        self._enable_nonmd = enable_nonmd
 
-    def push(self, level: int, text: str) -> None:
+    def push(self, level: int, text: str, is_md: bool = True) -> None:
         """遇到新标题时更新栈：弹出同级或更低级别的标题，压入新标题。"""
         # 弹出所有 level >= 当前 level 的标题（同级或子级）
         while self._stack and self._stack[-1][0] >= level:
             self._stack.pop()
-        self._stack.append((level, text.strip()))
+        self._stack.append((level, text.strip(), is_md))
 
     def breadcrumb(self) -> str:
         """生成当前标题栈的面包屑字符串。
 
-        格式: `# 顶级标题 > ## 二级标题 > ### 三级标题`
+        Markdown 标题格式: `# 顶级标题 > ## 二级标题 > ### 三级标题`
+        非 Markdown 章节标记（第X章等）直接用原文，不加 # 前缀。
         栈为空时返回空字符串。
         """
         if not self._stack:
             return ""
-        parts = [f"{'#' * level} {text}" for level, text in self._stack]
+        parts = []
+        for level, text, is_md in self._stack:
+            if is_md:
+                parts.append(f"{'#' * level} {text}")
+            else:
+                parts.append(text)
         return " > ".join(parts)
 
     def feed_line(self, line: str) -> bool:
-        """检测一行文本是否为 Markdown 标题，如果是则更新栈。
+        """检测一行文本是否为标题，如果是则更新栈。
+
+        优先识别 Markdown 标题；若未命中且开启了非 Markdown 识别，再尝试匹配
+        中/英/德章节标记。
 
         Returns:
             True 如果该行是标题并已更新栈，False 否则。
         """
-        match = _HEADING_RE.match(line.strip())
+        stripped = line.strip()
+        match = _HEADING_RE.match(stripped)
         if match:
             level = len(match.group(1))
             text = match.group(2)
-            self.push(level, text)
+            self.push(level, text, is_md=True)
             return True
+        if self._enable_nonmd:
+            for level, pattern in _NONMD_HEADING_PATTERNS:
+                m = pattern.match(line)
+                if m:
+                    self.push(level, m.group(1).strip(), is_md=False)
+                    return True
         return False
 
     def feed_text(self, text: str) -> None:
@@ -218,10 +259,15 @@ class HierarchicalChunker:
 
         stripped = text.strip()
 
+        # 是否启用非 Markdown 章节标记识别：仅当文档不含 Markdown 标题时启用，
+        # 从而对 Markdown 文档零影响（其 breadcrumb 行为与之前完全一致）。
+        has_md_heading = bool(re.search(r'^#{1,6}\s+', stripped, re.MULTILINE))
+        enable_nonmd = not has_md_heading
+
         # 文本短于 child_size，直接作为单个父块和子块
         if len(stripped) <= self.child_size:
             # 用 _HeaderTracker 检测短文本中的标题
-            tracker = _HeaderTracker()
+            tracker = _HeaderTracker(enable_nonmd=enable_nonmd)
             tracker.feed_text(stripped)
             return ChunkResult(
                 parent_chunks=[stripped],
@@ -255,20 +301,30 @@ class HierarchicalChunker:
         child_chunks: list[str] = []
         context_headers: list[str] = []
         parent_child_map: dict[int, list[int]] = {}
-        tracker = _HeaderTracker()
+        tracker = _HeaderTracker(enable_nonmd=enable_nonmd)
 
         for parent_idx, parent_text in enumerate(parent_chunks):
             children = self._split_child_chunks(parent_text)
-            child_indices = []
+
+            # 先为该父块的每个子块计算 breadcrumb（与原逻辑一致）
+            sub_texts: list[str] = []
+            sub_headers: list[str] = []
             for child_text in children:
-                # 在处理子块之前记录当前面包屑
                 current_breadcrumb = tracker.breadcrumb()
-                # 将子块文本喂给 tracker 以检测其中的标题
                 tracker.feed_text(child_text)
-                # 如果子块内有新标题，使用更新后的面包屑；否则使用之前的
                 new_breadcrumb = tracker.breadcrumb()
                 child_breadcrumb = new_breadcrumb if new_breadcrumb else current_breadcrumb
+                sub_texts.append(child_text)
+                sub_headers.append(child_breadcrumb)
 
+            # 碎片合并（移植自 WeKnora coalesceTinyChunks）：把同一父块内、
+            # breadcrumb 相同且相邻的「过小」子块合并，避免 FAQ / 短条目类文档
+            # 产生大量无信息量碎片。仅合并到 child_size/2 的目标且不超 child_size，
+            # 故对块大小已接近目标的正常文档无影响（零回归）。
+            sub_texts, sub_headers = self._coalesce_tiny_children(sub_texts, sub_headers)
+
+            child_indices = []
+            for child_text, child_breadcrumb in zip(sub_texts, sub_headers):
                 child_indices.append(len(child_chunks))
                 child_chunks.append(child_text)
                 context_headers.append(child_breadcrumb)
@@ -280,6 +336,51 @@ class HierarchicalChunker:
             parent_child_map=parent_child_map,
             context_headers=context_headers,
         )
+
+    def _coalesce_tiny_children(
+        self, texts: list[str], headers: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """合并同一父块内相邻的「过小」子块（移植自 WeKnora coalesceTinyChunks）。
+
+        合并条件（全部满足才合并到当前累积块）：
+        - 与当前块 breadcrumb 相同（保证上下文一致，不跨章节混合）；
+        - 当前累积块仍小于目标（child_size/2，至少 200）；
+        - 合并后不超过 child_size（不制造超大块）。
+
+        正常文档的子块大小已接近 child_size，远超 child_size/2 阈值，第一项
+        size 条件即不满足，因此原样返回（零回归）。仅 FAQ / 短条目类文档受益。
+
+        Args:
+            texts: 子块文本列表（同一父块内，顺序）
+            headers: 与 texts 一一对应的 breadcrumb 列表
+
+        Returns:
+            (合并后的 texts, 合并后的 headers)
+        """
+        if len(texts) <= 1:
+            return texts, headers
+
+        target = max(self.child_size // 2, 200)
+
+        out_texts: list[str] = [texts[0]]
+        out_headers: list[str] = [headers[0]]
+        cur_len = len(texts[0])
+
+        for i in range(1, len(texts)):
+            t = texts[i]
+            h = headers[i]
+            tlen = len(t)
+            same_header = h == out_headers[-1]
+            if same_header and cur_len < target and cur_len + tlen <= self.child_size:
+                # 合并到当前块（用换行拼接，保留可读边界）
+                out_texts[-1] = out_texts[-1] + "\n" + t
+                cur_len += tlen + 1
+            else:
+                out_texts.append(t)
+                out_headers.append(h)
+                cur_len = tlen
+
+        return out_texts, out_headers
 
     def _split_by_strategy(self, text: str, strategy: str) -> list[str]:
         """根据策略名称执行对应的切分逻辑。
@@ -663,3 +764,97 @@ class HierarchicalChunker:
             if chunk:
                 chunks.append(chunk)
         return chunks
+
+
+# 默认父/子块大小（与 HierarchicalChunker 默认值一致，作为护栏的兜底尺寸）
+DEFAULT_PARENT_SIZE = 2500
+DEFAULT_CHILD_SIZE = 450
+DEFAULT_OVERLAP = 70
+
+
+def enforce_size_limits(
+    result: ChunkResult,
+    parent_size: int = DEFAULT_PARENT_SIZE,
+    child_size: int = DEFAULT_CHILD_SIZE,
+    overlap: int = DEFAULT_OVERLAP,
+) -> ChunkResult:
+    """对任意 ChunkResult 施加绝对大小护栏，拆分超限的父块 / 子块。
+
+    对齐 WeKnora ``internal/infrastructure/chunker`` 中 ``mergeUnits`` 的
+    ``absoluteMaxSize`` 思路：无论上游 chunker 用何种策略切分，最终产出的
+    每个父块、子块都不得超过预算上限。这是防止"超大块 → 检索/问答时撑爆模型
+    上下文"的最后一道兜底（例如体裁切分器 laws/paper/qa 仅按结构标记切分、
+    本身无 size 控制，单块可能达到几万字）。
+
+    处理规则：
+    - 父块 ``<= parent_size``：保留；其名下子块逐个检查，超 ``child_size`` 的
+      按字符/句子边界再切，子块语义（如 QA 的 Q/A 拆分）在不超限时不受影响。
+    - 父块 ``> parent_size``：按句子边界重切为多个子父块，每个子父块再派生子块
+      （原子块因父块被拆分而失去对应关系，故就该父块范围重新派生）。
+
+    Args:
+        result: 上游 chunker 产出的切分结果
+        parent_size: 父块字符上限
+        child_size: 子块字符上限
+        overlap: 子块切分时的重叠字符数
+
+    Returns:
+        施加大小护栏后的新 ChunkResult，父子映射与面包屑同步重建。
+    """
+    if not result.parent_chunks:
+        return result
+
+    helper = HierarchicalChunker(
+        parent_size=parent_size, child_size=child_size, overlap=overlap
+    )
+    headers = result.context_headers or []
+
+    new_parents: list[str] = []
+    new_children: list[str] = []
+    new_map: dict[int, list[int]] = {}
+    new_headers: list[str] = []
+
+    for p_idx, parent_text in enumerate(result.parent_chunks):
+        child_indices = result.parent_child_map.get(p_idx, [])
+
+        if len(parent_text) <= parent_size:
+            # 父块合规：保留父块，仅对超限子块再切
+            np_idx = len(new_parents)
+            new_parents.append(parent_text)
+            kept: list[int] = []
+            for c_idx in child_indices:
+                if c_idx >= len(result.child_chunks):
+                    continue
+                ctext = result.child_chunks[c_idx]
+                cheader = headers[c_idx] if c_idx < len(headers) else ""
+                if len(ctext) <= child_size:
+                    kept.append(len(new_children))
+                    new_children.append(ctext)
+                    new_headers.append(cheader)
+                else:
+                    for sub in helper._split_child_by_size(ctext):
+                        kept.append(len(new_children))
+                        new_children.append(sub)
+                        new_headers.append(cheader)
+            new_map[np_idx] = kept
+        else:
+            # 父块超限：按句子边界重切为子父块，逐个派生子块
+            base_header = ""
+            if child_indices and child_indices[0] < len(headers):
+                base_header = headers[child_indices[0]]
+            for sub_parent in helper._split_by_sentences(parent_text, parent_size):
+                np_idx = len(new_parents)
+                new_parents.append(sub_parent)
+                kept = []
+                for sub_child in helper._split_child_chunks(sub_parent):
+                    kept.append(len(new_children))
+                    new_children.append(sub_child)
+                    new_headers.append(base_header)
+                new_map[np_idx] = kept
+
+    return ChunkResult(
+        parent_chunks=new_parents,
+        child_chunks=new_children,
+        parent_child_map=new_map,
+        context_headers=new_headers,
+    )

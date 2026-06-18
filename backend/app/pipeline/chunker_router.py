@@ -7,7 +7,6 @@
 - ChunkResult 数据结构（复用 chunker.py 中的定义）
 """
 
-import re
 from abc import ABC, abstractmethod
 
 # 复用现有 chunker.py 中的 ChunkResult 定义
@@ -52,36 +51,38 @@ class ChunkerFactory:
 
 
 class ChunkerRouter:
-    """根据文件类型和内容特征选择 Chunker"""
+    """根据文件类型选择 Chunker。
 
-    # 法律关键词正则
-    _LAW_PATTERN = re.compile(r'本院认为|判决如下|第[一二三四五六七八九十\d]+条')
+    设计（对齐 WeKnora ``internal/infrastructure/chunker``）：
+    WeKnora 不做"按文档体裁（法律/论文/QA）猜类型"的脆弱路由——那种基于
+    关键词绝对计数的猜测在超长文本上必然误判（例如一本几百万字的小说里
+    "第X条"会出现成百上千次，被误判成法律文书，再用无 size 上限的体裁切分器
+    切出几万字的巨块，最终问答时撑爆模型上下文）。
 
-    # QA 配对正则
-    _QA_PATTERN = re.compile(r'(?:Q:|A:|问:|答:)')
+    取而代之，WeKnora 用"结构特征 profiling + 策略链(heading/heuristic/legacy)
+    + 质量校验回退 + 绝对大小护栏"统一处理所有普通文本。这套逻辑在 aladdin 中
+    由 :class:`~app.pipeline.chunker.HierarchicalChunker`（即 ``naive``）承载。
+
+    因此本路由只区分两类：
+    - ``csv``/``xlsx``：loader 已做结构化预切分，交给 ``table`` 专用处理；
+    - 其它一切：统一交给结构感知的 ``naive``，由其内部 profiler 自动选择
+      heading / heuristic / legacy 策略，并受绝对大小护栏保护。
+
+    法律/论文/QA 等体裁切分器仍注册在 :class:`ChunkerFactory` 中，供用户在
+    知识库 config 里**手动**指定 ``chunker_type`` 时使用，但不再参与自动路由。
+    """
 
     @classmethod
     def select(cls, file_type: str, content: str) -> str:
-        """返回 chunker 类型名称
+        """返回 chunker 类型名称。
 
-        优先级：
-        1. csv/xlsx → table
-        2. 法律关键词 ≥ 3 → laws
-        3. Abstract + References/Bibliography → paper
-        4. QA 配对 ≥ 10 次匹配（5 对） → qa
-        5. 其他 → naive
+        - csv/xlsx → table（结构化表格，loader 预切分）
+        - 其它一律 → naive（结构感知切分，内部自动选择策略 + 大小护栏）
+
+        Args:
+            file_type: 文件扩展名（小写，无点）
+            content: 文档文本内容（保留入参以兼容调用方签名，当前不参与判定）
         """
-        # 优先级 1：表格文件
         if file_type in ("csv", "xlsx"):
             return "table"
-        # 优先级 2：法律文书
-        if len(cls._LAW_PATTERN.findall(content)) >= 3:
-            return "laws"
-        # 优先级 3：学术论文
-        if "Abstract" in content and ("References" in content or "Bibliography" in content):
-            return "paper"
-        # 优先级 4：QA 格式
-        if len(cls._QA_PATTERN.findall(content)) >= 10:  # 5 对 = 10 次匹配
-            return "qa"
-        # 默认
         return "naive"

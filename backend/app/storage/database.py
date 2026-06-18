@@ -68,6 +68,10 @@ async def _migrate_db() -> None:
         # NOT NULL 带 DEFAULT，已有行自动回填（none / 0）。
         "ALTER TABLE documents ADD COLUMN graph_status VARCHAR NOT NULL DEFAULT 'none'",
         "ALTER TABLE documents ADD COLUMN graph_attempt INTEGER NOT NULL DEFAULT 0",
+        # 清理历史遗留列：旧版本 embed_configs 表带 device NOT NULL 列（本地推理设备），
+        # 当前模型已移除该字段（统一走 remote），插入时不再赋值，会触发 NOT NULL 约束错误。
+        # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。
+        "ALTER TABLE embed_configs ALTER COLUMN device DROP NOT NULL",
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
         # Embedding/Rerank 配置表新增厂商（vendor）列：仅用于 UI 记忆所选服务商
