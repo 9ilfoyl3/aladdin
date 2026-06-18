@@ -128,6 +128,34 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # ============ 知识图谱（profile: graph，默认不启动）============
+  # Neo4j + APOC，仅当显式带 --profile graph 才启动；不开图谱零成本。
+  # 启动：docker compose --profile infra --profile graph up -d
+  #       （应用侧还需在 .env 设 GRAPH_ENABLE=true 才会真正连接/抽取）
+  neo4j:
+    container_name: arag-neo4j
+    image: neo4j:5-community        # 需 GDS（阶段 4 社区发现）时改 neo4j:5-enterprise
+    profiles: ["graph"]
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      # 账号口令走 .env（与应用侧 NEO4J_USERNAME/NEO4J_PASSWORD 一致），默认 neo4j/password
+      - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-password}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_pagecache_size=2G
+    ports:
+      # 7474 = 浏览器管理台（HTTP），7687 = Bolt 驱动端口（应用经容器网络以 bolt://neo4j:7687 连接）
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+    restart: unless-stopped
+
   # ============ 应用（profile: app）============
   backend:
     container_name: arag-backend
@@ -152,6 +180,9 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_SECURE=false
       - MINIO_BUCKET=aladdin-documents
+      # 知识图谱 Neo4j 连接（容器内拓扑固定值）。是否真正连接由 .env 的 GRAPH_ENABLE 控制，
+      # 默认 false 即不连；账号口令走 .env 的 NEO4J_USERNAME/NEO4J_PASSWORD。
+      - NEO4J_URI=bolt://neo4j:7687
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
@@ -185,6 +216,9 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_SECURE=false
       - MINIO_BUCKET=aladdin-documents
+      # 知识图谱 Neo4j 连接（容器内拓扑固定值）。GraphExtractWorker 抽取写图用；
+      # 是否真正连接由 .env 的 GRAPH_ENABLE 控制，默认 false 即不连。
+      - NEO4J_URI=bolt://neo4j:7687
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
@@ -209,6 +243,10 @@ services:
     ports:
       - "${FRONTEND_PORT:-8888}:80"
     # nginx.conf 已在镜像内（frontend/nginx.conf），无需挂载覆盖。
+    # 运行时前端配置：只读挂载覆盖镜像内的 /config.js，部署人员改宿主机文件后刷新页面即生效，
+    # 无需重新构建镜像。可调动态背景策略（prismBackground: auto/on/off）等。
+    volumes:
+      - ./frontend/public/config.js:/usr/share/nginx/html/config.js:ro
     depends_on:
       - backend
     restart: unless-stopped
@@ -220,6 +258,7 @@ volumes:
   postgres_data:
   redis_data:
   upload_data:
+  neo4j_data:
 
 networks:
   default:

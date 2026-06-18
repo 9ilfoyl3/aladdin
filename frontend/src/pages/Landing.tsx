@@ -17,7 +17,7 @@ import MagicBento, { type BentoCardData } from '@/components/reactbits/MagicBent
 // GitHub 仓库地址（按需替换为真实仓库）
 const GITHUB_URL = 'https://github.com/9ilfoyl3/artoo'
 
-// 能力 Magic Bento 卡片数据（DeerFlow 式错落布局，4列×3行铺满）
+// 能力 Magic Bento 卡片数据（DeerFlow 式错落布局，4列×4行铺满）
 const BENTO_CARDS: BentoCardData[] = [
   {
     label: 'ReAct Agent',
@@ -27,9 +27,16 @@ const BENTO_CARDS: BentoCardData[] = [
     spanClass: 'lg:col-start-1 lg:col-span-2 lg:row-start-1',
   },
   {
+    label: 'Knowledge Graph',
+    title: '知识图谱增强检索',
+    description:
+      '文档入库后自动用 LLM 抽取实体与关系、归一化消歧并幂等写入 Neo4j；GraphRetriever 作为第四路并入混合检索，通过实体桥接召回纯向量召不回的关联内容，并以力导向图交互浏览、钻取邻居、溯源原文。可整体开关，故障时优雅降级、不影响主链路。',
+    spanClass: 'lg:col-start-3 lg:col-span-2 lg:row-start-1 lg:row-span-2',
+  },
+  {
     label: 'Retrieval',
-    title: '三路混合检索',
-    description: 'Dense 语义 + Sparse 稀疏 + BM25 全文并行召回，RRF 融合 + Rerank 精排 + MMR 去冗余 + 父块扩展。',
+    title: '四路混合检索',
+    description: 'Dense 语义 + Sparse 稀疏 + BM25 全文 + Graph 图谱并行召回，RRF 融合 + Rerank 精排 + MMR 去冗余 + 父块扩展。',
     spanClass: 'lg:col-start-1 lg:row-start-2',
   },
   {
@@ -43,20 +50,20 @@ const BENTO_CARDS: BentoCardData[] = [
     title: '可扩展工具生态',
     description:
       '内置知识检索、关键词匹配、深度阅读、附件阅读、网页搜索、思考、技能加载等工具，并支持接入远程 MCP Server，按需渐进式加载技能。',
-    spanClass: 'lg:col-start-3 lg:col-span-2 lg:row-start-1 lg:row-span-2',
+    spanClass: 'lg:col-start-1 lg:col-span-2 lg:row-start-3 lg:row-span-2',
   },
   {
     label: 'Governance',
     title: '多租户与权限治理',
-    description: '固定角色 + 归属轴 RBAC，知识库私有 / 组织可见 + 点对点共享，超级管理员、邀请注册与审计日志。',
-    spanClass: 'lg:col-start-1 lg:col-span-2 lg:row-start-3',
+    description: '固定角色 + 归属轴 RBAC，知识库私有 / 组织可见 + 点对点共享，图谱数据按租户与 KB 硬隔离，超级管理员、邀请注册与审计日志。',
+    spanClass: 'lg:col-start-3 lg:col-span-2 lg:row-start-3',
   },
   {
     label: 'Free & Open Source',
     title: '开源免费 · 私有可控',
     description:
       'MIT 协议开源，自托管、完全自主可控。所有 AI 推理通过 HTTP 调用外部服务，后端轻量，支持内网离线部署。',
-    spanClass: 'lg:col-start-3 lg:col-span-2 lg:row-start-3',
+    spanClass: 'lg:col-start-3 lg:col-span-2 lg:row-start-4',
   },
 ]
 
@@ -66,6 +73,7 @@ const HERO_PHRASES = [
   '自主编排工具',
   '先取证据再作答',
   '读懂你的文档',
+  '构建知识图谱',
   '沉淀团队知识',
 ]
 
@@ -159,7 +167,7 @@ export default function Landing() {
           </h1>
 
           <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-white/60 sm:text-lg">
-            <span className="font-serif font-semibold">Artoo</span> 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语义检索、深度阅读、网页搜索与
+            <span className="font-serif font-semibold">Artoo</span> 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语义检索、知识图谱、深度阅读、网页搜索与
             MCP 工具，构建"先检索证据、再作答"的可追溯问答体验。
           </p>
 

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",
@@ -26,6 +28,7 @@
     "ogl": "^1.0.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-force-graph-2d": "^1.29.1",
     "react-router-dom": "^6.23.1",
     "sonner": "^1.7.2",
     "streamdown": "^2.5.0",
@@ -35,11 +38,17 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "^2.1.9",
+    "jsdom": "^29.1.1",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.4.5",
-    "vite": "^5.3.1"
+    "vite": "^5.3.1",
+    "vitest": "^2.1.9"
   }
 }

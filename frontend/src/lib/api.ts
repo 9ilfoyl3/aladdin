@@ -212,6 +212,13 @@ export const documentApi = {
       return res.json()
     })
   },
+  // 链接转存：粘贴网页 / 公众号链接，后端抓取正文提取后转存为 .md 文档入库。
+  // 复用 request()：自动处理 401 与 422（detail 为后端友好中文，透传到 toast）。
+  fromUrl: (kbId: string, url: string, folderId?: string | null) =>
+    request<unknown>(`/knowledge-bases/${kbId}/documents/from-url`, {
+      method: 'POST',
+      body: JSON.stringify({ url, folder_id: folderId ?? null }),
+    }),
   validateFolder: (kbId: string, paths: string[]) =>
     request<{
       supported_files: { relative_path: string; filename: string; file_type: string; supported: boolean; reason?: string }[]
@@ -436,7 +443,7 @@ export const systemApi = {
       body: JSON.stringify(data),
     }),
   getFrontendConfig: () =>
-    request<{ upload_max_concurrent: number; upload_max_file_size_mb: number }>('/system/frontend-config'),
+    request<{ upload_max_concurrent: number; upload_max_file_size_mb: number; graph_enabled: boolean }>('/system/frontend-config'),
 }
 
 // LLM 模型配置接口
@@ -1101,5 +1108,157 @@ export const inviteApi = {
     request<{ detail: string; tenant_id?: string; user_id?: string }>(`/invitations/${token}/accept`, {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+}
+
+// ============================================================
+// 知识图谱接口（knowledge-graph，design.md 5.1 / 5.3）
+// ============================================================
+//
+// 数据流：组件 → graphStore action → 这里的 graphApi → 后端 Graph API。
+// 组件不直接调用这些接口，统一经 store 触发，保证数据流单向清晰（design.md 5.3.3）。
+//
+// 降级语义：后端 store 不可用时返回 503，request() 会抛出带 detail 的 Error
+// （"知识图谱未启用或不可用"），由 store 捕获后置为不可用态（design.md 5.3.4）。
+
+/** 力导向图节点（对应后端 nodes[]，design.md 5.1）。 */
+export interface GraphNode {
+  id: string
+  name: string
+  type: string
+  /** 度数（入边+出边），用于映射节点大小 */
+  degree: number
+}
+
+/** 力导向图边（对应后端 edges[]）。source/target 为实体 id。 */
+export interface GraphEdge {
+  source: string
+  target: string
+  type: string
+  weight: number
+}
+
+/** 子图元信息（对应后端 meta）。center/depth 仅 ego 模式下返回。 */
+export interface GraphMeta {
+  mode: 'overview' | 'ego'
+  total: number
+  returned: number
+  /** 是否因上限被截断（用于「已显示 X / 共 Y」提示） */
+  truncated: boolean
+  center?: string
+  depth?: number
+}
+
+/** overview / ego 子图响应（GET /graph）。 */
+export interface GraphSubset {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  meta: GraphMeta
+}
+
+/** 图谱统计（GET /graph/stats）。types 为「类型 → 数量」分布。 */
+export interface GraphStats {
+  entity_count: number
+  relation_count: number
+  types: Record<string, number>
+  orphan_count: number
+  status: string
+}
+
+/** 实体邻居摘要（实体详情的 neighbors[]）。 */
+export interface GraphNeighbor {
+  id: string
+  name: string
+  type: string
+  /** 与中心实体的关系类型 */
+  rel_type: string
+}
+
+/** 实体关联原文 chunk 预览（实体详情的 chunks[]）。 */
+export interface GraphEntityChunk {
+  chunk_id: string
+  doc_id: string
+  content_preview: string
+}
+
+/** 实体详情（GET /graph/entity/{id}，懒加载，design.md 5.3.3）。 */
+export interface GraphEntityDetail {
+  id: string
+  name: string
+  type: string
+  aliases: string[]
+  /** 属性描述（LLM 抽取，后端为字符串列表） */
+  attributes: string[]
+  degree: number
+  neighbors: GraphNeighbor[]
+  chunks: GraphEntityChunk[]
+}
+
+/** KB 级图谱配置（config.graph，design.md 3.3 / 5.2）。 */
+export interface GraphConfig {
+  enabled: boolean
+  entity_types: string[]
+  relation_types: string[]
+  extract_granularity: string
+  extract_model_id: string | null
+  enable_alias_dedup: boolean
+  alias_sim_threshold: number
+}
+
+/** getGraph 查询参数（design.md 5.1）。 */
+export interface GraphQueryParams {
+  mode?: 'overview' | 'ego'
+  /** ego 中心节点（entity_id 或 name），ego 模式必填 */
+  center?: string
+  /** ego BFS 跳数（后端 clamp 到平台硬上限） */
+  depth?: number
+  /** 类型过滤（前端传数组，这里拼为逗号分隔串） */
+  types?: string[]
+  /** 节点数上限（0/省略=用平台默认上限，后端 clamp） */
+  limit?: number
+}
+
+// config.graph 缺省值（KB 详情未显式配置 graph 时的兜底，与后端默认对齐）。
+const DEFAULT_GRAPH_CONFIG: GraphConfig = {
+  enabled: false,
+  entity_types: [],
+  relation_types: [],
+  extract_granularity: 'parent',
+  extract_model_id: null,
+  enable_alias_dedup: true,
+  alias_sim_threshold: 0.92,
+}
+
+export const graphApi = {
+  // overview / ego 子图：参数被后端按平台上限 clamp。
+  getGraph: (kbId: string, params?: GraphQueryParams) => {
+    const qs = new URLSearchParams()
+    qs.set('mode', params?.mode ?? 'overview')
+    if (params?.center) qs.set('center', params.center)
+    if (params?.depth != null) qs.set('depth', String(params.depth))
+    if (params?.types && params.types.length > 0) qs.set('types', params.types.join(','))
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    return request<GraphSubset>(`/kb/${kbId}/graph?${qs.toString()}`)
+  },
+  // 图谱统计：实体/关系数、类型分布、孤立数、状态。
+  getGraphStats: (kbId: string) =>
+    request<GraphStats>(`/kb/${kbId}/graph/stats`),
+  // 实体详情（懒加载）：属性/别名/邻居/关联原文 chunk 预览。
+  getGraphEntity: (kbId: string, entityId: string) =>
+    request<GraphEntityDetail>(`/kb/${kbId}/graph/entity/${entityId}`),
+  // KB 图谱配置：后端尚无独立 GET config 端点（task 5.2 的 PUT 之外），
+  // 故从 KB 详情的 config.graph 派生（逐字段兜底，缺失回退安全默认）。
+  getGraphConfig: async (kbId: string): Promise<GraphConfig> => {
+    const kb = await request<{ config?: { graph?: Partial<GraphConfig> } | null }>(
+      `/knowledge-bases/${kbId}`
+    )
+    const graph = kb?.config?.graph ?? {}
+    return { ...DEFAULT_GRAPH_CONFIG, ...graph }
+  },
+  // 更新 KB 图谱配置（部分更新，仅传字段被合并）。返回生效后的 config.graph。
+  updateGraphConfig: (kbId: string, body: Partial<GraphConfig>) =>
+    request<GraphConfig>(`/kb/${kbId}/graph/config`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 }

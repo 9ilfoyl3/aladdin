@@ -25,6 +25,7 @@ from app.api.chat import router as chat_router
 from app.api.document import router as document_router
 from app.api.embed_config import router as embed_config_router
 from app.api.folder import router as folder_router
+from app.api.graph import router as graph_router
 from app.api.knowledge_base import router as kb_router
 from app.api.kb_share_link import router as kb_share_link_router
 from app.api.llm_config import router as llm_config_router
@@ -127,6 +128,10 @@ async def lifespan(app: FastAPI):
         "kb_data": _handle_kb_data,
         "tenant_config": _handle_tenant_config,
     })
+
+    # 初始化知识图谱存储（失败仅 warning 不阻断启动；未启用/不可用则降级关闭）
+    from app.startup import init_graph_store
+    await init_graph_store()
 
     yield
 
@@ -410,6 +415,7 @@ app.include_router(chat_router, tags=["Chat"])
 app.include_router(kb_router)
 app.include_router(folder_router)
 app.include_router(document_router)
+app.include_router(graph_router)
 app.include_router(retrieval_router)
 app.include_router(system_router)
 app.include_router(api_key_router)

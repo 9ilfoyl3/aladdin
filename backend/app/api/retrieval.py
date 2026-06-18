@@ -154,6 +154,8 @@ async def retrieval_test(
         )
 
     # hybrid 模式（三路：Dense + Sparse + BM25）+ 链路追踪
+    # 注：调参链路走 search_with_trace（不并入图谱第四路），故此处不注入 graph_retriever，
+    # 与生产 search_with_degraded 的第四路解耦；图谱召回效果在生产问答链路体现。
     vector_retriever = VectorRetriever(manager.embedder, milvus)
     sparse_retriever = SparseRetriever(manager.embedder, milvus)
     bm25_retriever = BM25Retriever(milvus)

@@ -128,10 +128,11 @@ function FileThumbnail({ filename, status, docId }: { filename: string; status: 
   const [thumbUrl, setThumbUrl] = useState<string | null>(null)
   const [imgFailed, setImgFailed] = useState(false)
 
-  // 是否需要加载缩略图：图片/PDF，且非本地上传项、非上传中/排队中状态
+  // 是否需要加载缩略图：图片/PDF/Markdown/TXT（md/txt 的缩略图为封面图或文字卡片），
+  // 且非本地上传项、非上传中/排队中状态
   const ext = filename.split('.').pop()?.toLowerCase() || ''
   const canPreview =
-    ['jpg', 'jpeg', 'png', 'pdf'].includes(ext) &&
+    ['jpg', 'jpeg', 'png', 'pdf', 'md', 'txt'].includes(ext) &&
     !!docId &&
     !docId.startsWith('local_') &&
     status !== 'uploading' &&

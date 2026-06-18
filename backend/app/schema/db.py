@@ -77,11 +77,17 @@ class Document(Base, TenantScopedMixin):
     file_type: Mapped[str] = mapped_column(String, nullable=False)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     file_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # SHA256 文件内容哈希
+    # 链接转存来源：经网页链接抓取正文入库时记录原文 URL（普通上传为 None），便于溯源展示。
+    source_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100 处理进度
     progress_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 阶段描述
+    # 知识图谱抽取状态（knowledge-graph）：none|pending|processing|completed|failed
+    graph_status: Mapped[str] = mapped_column(String, default="none", nullable=False)
+    # 权威 attempt 计数，重解析时 +1，用于隔离陈旧的在途抽取子任务
+    graph_attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # 关联
@@ -284,6 +290,12 @@ class PlatformConfigRow(Base):
     load_cache_ttl: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # collection 加载缓存有效期（秒）
     # 上传限制平台级（超管可配；仅 kb_chunk_cap 生效，session_chunk_ceiling 已废弃）
     kb_chunk_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 单库/单会话 child chunk 硬上限
+    # 知识图谱抗压参数（knowledge-graph，design.md 3.4）：缺失由 PlatformConfig.effective_from_raw 读时兜底
+    graph_overview_max_nodes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # overview 节点上限
+    graph_ego_max_nodes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # ego 节点上限
+    graph_ego_max_depth: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # ego BFS 最大跳数硬上限
+    graph_retriever_hops: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 检索融合邻居跳数
+    graph_retriever_max_chunks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 图谱召回每查询最大 chunk 数
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -632,3 +644,78 @@ class KbShareLink(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ============================================================
+# knowledge-graph：知识图谱抽取任务台账新增模型
+# 新表，经 init_db 的 Base.metadata.create_all 自动创建，无需迁移脚本。
+# ============================================================
+
+
+class GraphExtractJob(Base, TenantScopedMixin):
+    """知识图谱抽取任务台账（按文档一行）。
+
+    借鉴 WeKnora pending_subtasks_count + attempt 机制：
+    - 一个文档的图谱抽取按 parent chunk 拆成 N 个子任务；
+    - pending_subtasks 初始 = N，每个子任务终态（成功/终败）原子 -1；
+    - 归零 → status=completed；
+    - attempt 自增使重解析前的陈旧子任务失效（不污染新数据）。
+
+    带 TenantScopedMixin 走现有租户隔离。当前 attempt 的权威值存放在 Document 上
+    （Document.graph_attempt），本表的 attempt 是该次任务的快照，用于子任务回写时
+    与 Document 当前 attempt 比对判断是否陈旧。
+    """
+    __tablename__ = "graph_extract_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # job id（uuid）
+    kb_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    doc_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending|processing|completed|failed|cancelled
+    pending_subtasks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_subtasks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    entities_count: Mapped[int] = mapped_column(Integer, default=0)
+    relations_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        # 一个 (kb_id, doc_id) 同时只有一个活跃 job；重解析自增 attempt 后旧行保留供审计
+        UniqueConstraint("kb_id", "doc_id", "attempt", name="uq_graph_job_doc_attempt"),
+    )
+
+
+class GraphCommunity(Base, TenantScopedMixin):
+    """知识图谱社区摘要（GraphRAG Global，阶段 4 扩展点）。
+
+    用 Neo4j GDS Louvain 对某 KB 的实体图做社区发现后，对每个社区用 LLM 生成一段摘要，
+    落库本表。回答全局 / 归纳类问题（如「这个库整体讲了什么」）时检索这些社区摘要，与
+    chunk 检索结果融合（task 9.2）。
+
+    带 TenantScopedMixin 走现有租户隔离，与 GraphExtractJob 同款约束风格。社区是按 KB
+    整体重算的，重建时按 kb_id 先清后插（见 graph_store.build_community_summaries），
+    故 (kb_id, community_key, level) 唯一即可。
+    """
+    __tablename__ = "graph_communities"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # uuid
+    kb_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    # Louvain 社区编号（字符串化存储，跨版本/跨重算稳定可比对）
+    community_key: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    # 层级（预留多级社区；当前单级恒为 0）
+    level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_count: Mapped[int] = mapped_column(Integer, default=0)
+    relation_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 社区成员实体 id 列表（反查 / 调试用）
+    member_entity_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # 社区摘要向量在 Milvus 的引用 id（预留 task 9.2 的社区摘要向量检索，可空）
+    embedding_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("kb_id", "community_key", "level", name="uq_graph_community_kb_key_level"),
+    )

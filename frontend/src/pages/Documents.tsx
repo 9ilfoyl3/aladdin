@@ -21,13 +21,19 @@ import {
   RotateCcw,
   CheckSquare,
   Square,
+  Network,
+  Link2,
   X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
 import type { PageResult, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
+import { useGraphGating } from '@/components/graph/useGraphGating'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { cn } from '@/lib/utils'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -72,6 +78,26 @@ interface BreadcrumbItem {
   name: string
 }
 
+// 工具栏按钮：artifact 打开（收起为纯图标）时套 Tooltip 显示中文名；展开时按钮自带文字，
+// 直接渲染不套 Tooltip，避免多余包裹。label 同时用于纯图标态的无障碍提示。
+function ToolbarTip({
+  collapsed,
+  label,
+  children,
+}: {
+  collapsed: boolean
+  label: string
+  children: React.ReactNode
+}) {
+  if (!collapsed) return <>{children}</>
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 // 文档管理页面 - Finder 风格
 function Documents() {
   const { id: kbId } = useParams<{ id: string }>()
@@ -80,6 +106,8 @@ function Documents() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const openArtifact = useArtifactStore((s) => s.openArtifact)
+  // Artifact 预览面板是否打开：打开时列表区被压窄，工具栏按钮收起为纯图标自适应。
+  const artifactOpen = useArtifactStore((s) => s.open)
 
   // 导航状态
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null)
@@ -110,6 +138,12 @@ function Documents() {
   } | null>(null)
   const [folderUploading, setFolderUploading] = useState(false)
 
+  // 链接转存状态：粘贴网页 / 公众号链接，后端抓取正文转存为文档
+  const [urlImportOpen, setUrlImportOpen] = useState(false)
+  const [urlImportValue, setUrlImportValue] = useState('')
+  const [urlImporting, setUrlImporting] = useState(false)
+
+
   // ============================================================
   // 数据查询
   // ============================================================
@@ -132,6 +166,10 @@ function Documents() {
   // 只读访客（含管理员看他人私有库）隐藏全部写操作入口（上传/新建/删除/重试/拖拽）。
   // 后端 get 接口未返回 can_write 时（加载中）默认按只读处理，避免误显示写入口。
   const canWrite = kb?.can_write === true
+
+  // 知识图谱入口门控（design.md 5.3.1）：全局 graph_enabled 且本 KB config.graph.enabled
+  // 才显示「知识图谱」入口。未启用 → 不显示入口（而非显示后报错）。
+  const { showEntry: showGraphEntry } = useGraphGating(kbId)
 
   // 获取当前目录下的文件夹（分页 + 滚动加载）
   const PAGE_SIZE = 20
@@ -466,6 +504,28 @@ function Documents() {
     }
   }
 
+  // 链接转存：抓取网页 / 公众号正文转存为文档
+  async function handleUrlImportConfirm() {
+    const url = urlImportValue.trim()
+    if (!url || !kbId) return
+    setUrlImporting(true)
+    try {
+      const res = await documentApi.fromUrl(kbId, url, currentFolderId) as { status?: string; error_message?: string }
+      if (res?.status === 'duplicate') {
+        toast(res.error_message || '内容已存在（重复）')
+      } else {
+        toast('已开始转存，正在抓取并解析…')
+      }
+      queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      setUrlImportOpen(false)
+      setUrlImportValue('')
+    } catch (err) {
+      toast(`转存失败: ${err instanceof Error ? err.message : '未知错误'}`)
+    } finally {
+      setUrlImporting(false)
+    }
+  }
+
   // 拖拽事件（只读库禁用上传）
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -604,20 +664,38 @@ function Documents() {
       )}
 
       {/* 页面头部 */}
-      <div className="flex items-center justify-between mb-4 shrink-0">
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between gap-3 mb-4 shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
           <Link to="/knowledge-bases">
-            <button className="h-8 w-8 rounded-lg flex items-center justify-center hover:bg-muted transition-colors cursor-pointer">
+            <button className="h-8 w-8 rounded-lg flex items-center justify-center hover:bg-muted transition-colors cursor-pointer shrink-0">
               <ArrowLeft className="h-4 w-4 text-muted-foreground" />
             </button>
           </Link>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{kb?.name || '文档管理'}</h1>
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight truncate">{kb?.name || '文档管理'}</h1>
           </div>
         </div>
 
-        {/* 操作按钮（只读库隐藏全部写操作入口） */}
-        <div className="flex items-center gap-2">
+        {/* 操作按钮（只读库隐藏全部写操作入口）。
+            artifact 预览打开时列表区被压窄，按钮收起为纯图标（套 Tooltip 显示中文名）以自适应。 */}
+        <TooltipProvider delayDuration={200}>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* 知识图谱入口：仅全局+KB 双开关均启用时出现（design.md 5.3.1）。
+              读权限用户亦可查看图谱，故不受 canWrite 限制。 */}
+          {showGraphEntry && (
+            <ToolbarTip collapsed={artifactOpen} label="知识图谱">
+              <Link to={`/knowledge-bases/${kbId}/graph`} onClick={(e) => e.stopPropagation()}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Network className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>知识图谱</span>
+                </Button>
+              </Link>
+            </ToolbarTip>
+          )}
           {canWrite && (selectionMode ? (
             <>
               <Button
@@ -666,42 +744,61 @@ function Documents() {
           ) : (
             <>
               {documents.length > 0 && (
+                <ToolbarTip collapsed={artifactOpen} label="批量选择">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
+                    className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                  >
+                    <CheckSquare className="h-4 w-4 shrink-0" />
+                    <span className={cn(artifactOpen && 'hidden')}>批量选择</span>
+                  </Button>
+                </ToolbarTip>
+              )}
+              <ToolbarTip collapsed={artifactOpen} label="新建文件夹">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={(e) => { e.stopPropagation(); setSelectionMode(true) }}
-                  className="gap-1.5 cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
                 >
-                  <CheckSquare className="h-4 w-4" />
-                  批量选择
+                  <FolderPlus className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>新建文件夹</span>
                 </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={(e) => { e.stopPropagation(); setShowNewFolder(true) }}
-                className="gap-1.5 cursor-pointer"
-              >
-                <FolderPlus className="h-4 w-4" />
-                新建文件夹
-              </Button>
-              <Button
-                size="sm"
-                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-                className="gap-1.5 cursor-pointer"
-              >
-                <Upload className="h-4 w-4" />
-                上传文件
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
-                className="gap-1.5 cursor-pointer"
-              >
-                <FolderUp className="h-4 w-4" />
-                上传文件夹
-              </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="上传文件夹">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <FolderUp className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>上传文件夹</span>
+                </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="链接转存">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); setUrlImportOpen(true) }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Link2 className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>链接转存</span>
+                </Button>
+              </ToolbarTip>
+              <ToolbarTip collapsed={artifactOpen} label="上传文件">
+                <Button
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                  className={cn('cursor-pointer', artifactOpen ? 'px-2' : 'gap-1.5')}
+                >
+                  <Upload className="h-4 w-4 shrink-0" />
+                  <span className={cn(artifactOpen && 'hidden')}>上传文件</span>
+                </Button>
+              </ToolbarTip>
             </>
           ))}
           <input
@@ -720,6 +817,7 @@ function Documents() {
             onChange={(e) => handleFolderSelect(e.target.files)}
           />
         </div>
+        </TooltipProvider>
       </div>
 
       {/* 容量进度条（chunk 真实度量；接近/已满变色，session-file-upload Req 7） */}
@@ -1099,6 +1197,49 @@ function Documents() {
           </div>
         )}
       </div>
+
+      {/* 链接转存对话框 */}
+      <Dialog open={urlImportOpen} onOpenChange={(o) => { if (!urlImporting) setUrlImportOpen(o) }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>链接转存</DialogTitle>
+            <DialogDescription>
+              粘贴网页或微信公众号文章链接，系统会抓取正文并转存为知识库文档。
+              动态渲染或需登录的页面可能无法提取。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <Input
+              autoFocus
+              type="url"
+              placeholder="https://mp.weixin.qq.com/s/..."
+              value={urlImportValue}
+              onChange={(e) => setUrlImportValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !urlImporting && urlImportValue.trim()) {
+                  handleUrlImportConfirm()
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setUrlImportOpen(false)}
+              disabled={urlImporting}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleUrlImportConfirm}
+              disabled={urlImporting || !urlImportValue.trim()}
+              className="gap-1.5"
+            >
+              {urlImporting ? '抓取中…' : '转存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 新建文件夹对话框 */}
       <NewFolderDialog

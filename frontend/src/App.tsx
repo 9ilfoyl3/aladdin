@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import Layout from './components/Layout'
 import KnowledgeBase from './pages/KnowledgeBase'
 import Documents from './pages/Documents'
+import KnowledgeGraph from './pages/KnowledgeGraph'
 import Chat from './pages/Chat'
 import Retrieval from './pages/Retrieval'
 import ApiKeys from './pages/ApiKeys'
@@ -74,6 +75,7 @@ function App() {
       >
         <Route path="knowledge-bases" element={<KnowledgeBase />} />
         <Route path="knowledge-bases/:id" element={<Documents />} />
+        <Route path="knowledge-bases/:id/graph" element={<KnowledgeGraph />} />
         <Route path="chat" element={<Chat />} />
         <Route path="retrieval" element={<Retrieval />} />
         <Route path="models" element={<Models />} />

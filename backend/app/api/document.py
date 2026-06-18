@@ -144,41 +144,83 @@ _ALLOWED_EXTENSIONS = {
     "mp3", "wav", "m4a", "flac", "ogg",
 }
 
-async def _generate_and_store_thumbnail(doc_id: str, file_type: str, content: bytes) -> None:
-    """从上传字节生成缩略图并存入 MinIO（仅 PDF 渲染首页；图片预览直接返回原件）。
+async def _generate_and_store_thumbnail(
+    doc_id: str,
+    file_type: str,
+    content: bytes,
+    cover_image: bytes | None = None,
+) -> None:
+    """生成缩略图并存入 MinIO。失败不影响上传主流程（事件循环外渲染）。
 
-    在事件循环外渲染（to_thread），失败不影响上传主流程。
+    - PDF：fitz 渲染首页。
+    - 图片：预览直接返回原件，无需缩略图。
+    - md / txt：方案 A 优先用 ``cover_image``（链接转存抓到的封面图）转 PNG；
+      无封面图时方案 B 兜底——用 fitz 把「标题 + 正文摘要」渲染成文字卡片，
+      保证所有 md/txt 文档都有一致预览图（含用户手动上传的）。
     """
-    if file_type != "pdf":
-        return
     store = get_object_store()
     if store is None:
         return
 
-    def _render() -> bytes | None:
-        import fitz
+    if file_type == "pdf":
+        def _render_pdf() -> bytes | None:
+            import fitz
 
-        try:
-            pdf_doc = fitz.open(stream=content, filetype="pdf")
-            page = pdf_doc[0]
-            zoom = 200.0 / page.rect.width
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-            data = pix.tobytes("png")
-            pdf_doc.close()
-            return data
-        except Exception as e:  # noqa: BLE001
-            logger.warning("生成缩略图失败 doc_id=%s: %s", doc_id, e)
-            return None
+            try:
+                pdf_doc = fitz.open(stream=content, filetype="pdf")
+                page = pdf_doc[0]
+                zoom = 200.0 / page.rect.width
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                data = pix.tobytes("png")
+                pdf_doc.close()
+                return data
+            except Exception as e:  # noqa: BLE001
+                logger.warning("生成 PDF 缩略图失败 doc_id=%s: %s", doc_id, e)
+                return None
+
+        png_bytes = await asyncio.to_thread(_render_pdf)
+    elif file_type in ("md", "txt"):
+        def _render_text() -> bytes | None:
+            from app.pipeline.thumbnail import image_bytes_to_png, render_text_card
+
+            # 方案 A：封面图优先。
+            if cover_image:
+                png = image_bytes_to_png(cover_image)
+                if png:
+                    return png
+            # 方案 B：文字卡片兜底。标题取首个 markdown 一级标题或首行，正文取全文。
+            text = content.decode("utf-8", errors="ignore")
+            title, body = _split_title_body(text)
+            return render_text_card(title, body)
+
+        png_bytes = await asyncio.to_thread(_render_text)
+    else:
+        return
 
     try:
-        png_bytes = await asyncio.to_thread(_render)
         if png_bytes:
             await store.put_bytes(
                 thumbnail_object_key(doc_id), png_bytes, content_type="image/png"
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("存储缩略图失败 doc_id=%s: %s", doc_id, e)
+
+
+def _split_title_body(text: str) -> tuple[str, str]:
+    """从 markdown/纯文本中拆出标题与正文，用于文字卡片渲染。
+
+    标题取首个一级标题（``# xxx``）或首个非空行；正文为去掉该标题后的剩余文本。
+    """
+    title = ""
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        title = line.lstrip("#").strip() or line
+        break
+    return title, text
 
 
 # ============================================================
@@ -200,6 +242,7 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     progress: float = 0
     progress_message: str | None = None
+    source_url: str | None = None
     created_at: str
 
 
@@ -406,6 +449,7 @@ async def list_documents(
             chunk_count=d.chunk_count,
             progress=d.progress or 0,
             progress_message=d.progress_message,
+            source_url=d.source_url,
             created_at=d.created_at.isoformat() if d.created_at else "",
         )
         for d in docs
@@ -539,6 +583,149 @@ async def upload_document(
     )
 
 
+class UrlImportRequest(BaseModel):
+    """链接转存请求：粘贴一个网页链接，抓取正文转存进知识库。"""
+    url: str
+    folder_id: str | None = None
+
+
+@router.post(
+    "/api/knowledge-bases/{kb_id}/documents/from-url",
+    response_model=DocumentResponse,
+    status_code=201,
+)
+async def import_document_from_url(
+    kb_id: str,
+    request: Request,
+    body: UrlImportRequest,
+    identity: IdentityContext = Depends(require_member()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """从网页链接抓取正文转存为知识库文档（移动端核心入口）。
+
+    抓取链接 → trafilatura 提取正文为 Markdown → 当作一篇 ``.md`` 文档复用既有上传
+    管线（存 MinIO → 入队/回退 → load→chunk→embed→index→可选图谱抽取）。支持通用
+    网页文章与微信公众号永久图文链接；登录态/动态渲染/强反爬页面会返回明确失败提示。
+
+    与 ``upload_document`` 共用同一套写权限校验、容量/重复判定与入库触发逻辑，
+    仅来源从「上传文件字节」换成「抓取的网页正文」。
+    """
+    from app.pipeline.url_fetcher import (
+        UrlFetchError,
+        download_image,
+        fetch_article,
+        safe_filename_from_title,
+    )
+
+    # 写权限校验（跨租户404 / 无写权403），与上传一致。
+    kb = await _authorize_kb_access(db, identity, kb_id, KbAccessEnum.WRITE)
+
+    # 抓取并提取正文（失败转 422，detail 为明确中文原因）。
+    try:
+        article = await fetch_article(body.url)
+    except UrlFetchError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # 正文转字节，按 .md 文档处理。
+    content = article.markdown.encode("utf-8")
+    file_size = len(content)
+    ext = "md"
+
+    # 文件名取标题（去非法字符、限长），并经统一文件名校验兜底。
+    filename = safe_filename_from_title(article.title)
+    try:
+        filename = validate_filename(filename)
+    except NameValidationError:
+        filename = "网页内容.md"
+
+    # 文件大小校验（与上传同一租户级上限）。
+    limits = await get_upload_limit_resolver().resolve(identity.tenant_id)
+    if file_size > limits.upload_max_file_bytes:
+        raise FileTooLargeError.from_limit(limits.upload_max_file_bytes)
+
+    store = get_object_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="对象存储不可用，无法转存内容")
+
+    doc_id = str(uuid.uuid4())
+    object_key = document_object_key(doc_id, ext)
+
+    # 按正文内容哈希去重：同一链接内容未变时命中既有文档。
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.execute(
+        select(Document).where(
+            Document.kb_id == kb_id,
+            Document.file_hash == file_hash,
+        )
+    )
+    existing_doc = existing.scalar_one_or_none()
+    if existing_doc is not None:
+        return DocumentResponse(
+            id=existing_doc.id,
+            kb_id=existing_doc.kb_id,
+            filename=existing_doc.filename,
+            file_type=existing_doc.file_type,
+            file_size=existing_doc.file_size,
+            status="duplicate",
+            error_message=f"内容已存在（与 {existing_doc.filename} 相同）",
+            chunk_count=existing_doc.chunk_count,
+            created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
+        )
+
+    # 写入 MinIO（权威存储）。
+    await store.put_bytes(object_key, content, content_type="text/markdown; charset=utf-8")
+
+    # 创建文档记录；DB 写失败时补偿删除已上传对象（与上传路径对称）。
+    try:
+        doc = Document(
+            id=doc_id,
+            kb_id=kb_id,
+            folder_id=body.folder_id,
+            filename=filename,
+            file_type=ext,
+            file_size=file_size,
+            file_hash=file_hash,
+            status="pending",
+            source_url=article.url,
+            tenant_id=kb.tenant_id,
+        )
+        db.add(doc)
+        kb.doc_count = (kb.doc_count or 0) + 1
+        await db.flush()
+        await db.refresh(doc)
+        await db.commit()
+    except Exception:
+        await _safe_remove_objects([object_key])
+        raise
+
+    # 生成缩略图：方案 A 优先用文章封面图（og:image，带 referer 绕过防盗链），
+    # 下载失败则由 _generate_and_store_thumbnail 内部回退方案 B（fitz 文字卡片）。
+    cover_bytes: bytes | None = None
+    if article.cover_image_url:
+        cover_bytes = await download_image(article.cover_image_url, referer=article.url)
+    await _generate_and_store_thumbnail(doc_id, ext, content, cover_image=cover_bytes)
+
+    # 后台触发管道处理（与上传同一入队/回退逻辑）。
+    await _enqueue_or_fallback(
+        request, object_key, doc_id, kb_id,
+        file_size=file_size, tenant_id=kb.tenant_id, object_key=object_key,
+    )
+
+    return DocumentResponse(
+        id=doc.id,
+        kb_id=doc.kb_id,
+        filename=doc.filename,
+        file_type=doc.file_type,
+        file_size=doc.file_size,
+        status=doc.status,
+        error_message=doc.error_message,
+        chunk_count=doc.chunk_count,
+        source_url=doc.source_url,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+    )
+
+
 @router.get("/api/documents/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     doc_id: str,
@@ -561,6 +748,7 @@ async def get_document(
         chunk_count=doc.chunk_count,
         progress=doc.progress or 0,
         progress_message=doc.progress_message,
+        source_url=doc.source_url,
         created_at=doc.created_at.isoformat() if doc.created_at else "",
     )
 
@@ -601,6 +789,11 @@ async def retry_document(
     doc.chunk_count = 0
     doc.progress = 0
     doc.progress_message = None
+    # 重解析图谱一致性（design.md 4.6 / Req 5.2）：先自增 graph_attempt 使在途旧抽取任务
+    # 失效（worker 陈旧守卫据此跳过），再异步清理该文档旧图；新内容入库完成后由
+    # maybe_trigger_graph_extract 再次自增 attempt 并按新内容 seed。
+    doc.graph_attempt = (doc.graph_attempt or 0) + 1
+    doc.graph_status = "none"
     await db.flush()
 
     # 重新触发管道（优先入队 Redis Stream）。源文件权威存储在 MinIO。
@@ -628,6 +821,10 @@ async def retry_document(
         asyncio.create_task(_run_pipeline_fallback(object_key, doc_id, doc.kb_id, object_key))
 
     await db.commit()
+    # 重解析：异步清理该文档旧图（在 graph_attempt 已自增、在途旧任务已失效之后）。
+    # fire-and-forget + 优雅降级，绝不阻塞 / 影响重解析主流程。Req 5.2。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_doc
+    asyncio.create_task(cleanup_graph_for_doc(doc.kb_id, doc_id))
     return DocumentResponse(
         id=doc.id,
         kb_id=doc.kb_id,
@@ -696,6 +893,11 @@ async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> No
             thumbnail_object_key(doc_id),
         ])
 
+    # 删除知识图谱中该文档贡献的实体/关系（优雅降级：图谱未启用/不可用时静默跳过，
+    # 任何 Neo4j 故障不影响主删除链路）。design.md 4.6 / Req 5.1。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_doc
+    await cleanup_graph_for_doc(kb_id, doc_id)
+
     # 清除该知识库的检索缓存
     from app.retrieval.cache import get_retrieval_cache
     cache = await get_retrieval_cache()
@@ -747,6 +949,9 @@ async def batch_retry_documents(
         doc.chunk_count = 0
         doc.progress = 0
         doc.progress_message = None
+        # 重解析图谱一致性（Req 5.2）：自增 graph_attempt 使在途旧任务失效。
+        doc.graph_attempt = (doc.graph_attempt or 0) + 1
+        doc.graph_status = "none"
         retried.append(doc)
 
     await db.flush()
@@ -787,6 +992,13 @@ async def batch_retry_documents(
             asyncio.create_task(_run_pipeline_fallback(object_key, doc.id, doc.kb_id, object_key))
 
     await db.commit()
+    # 重解析：异步清理这些文档的旧图（graph_attempt 已自增，在途旧任务失效后）。Req 5.2。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_docs
+    retry_kb_doc_map: dict[str, list[str]] = {}
+    for doc in retried:
+        retry_kb_doc_map.setdefault(doc.kb_id, []).append(doc.id)
+    for kb_id, doc_ids in retry_kb_doc_map.items():
+        asyncio.create_task(cleanup_graph_for_docs(kb_id, doc_ids))
     return {"retried_count": len(retried), "skipped_count": len(skipped), "total_requested": len(body.doc_ids)}
 
 
@@ -895,6 +1107,11 @@ async def _batch_cleanup_background(
             keys.append(document_object_key(info["id"], info["file_type"]))
             keys.append(thumbnail_object_key(info["id"]))
         await store.remove_many(keys)
+
+    # 删除知识图谱中这些文档贡献的实体/关系（按 kb 分组逐 doc 清理，优雅降级）。Req 5.1。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_docs
+    for kb_id, doc_ids in kb_doc_map.items():
+        await cleanup_graph_for_docs(kb_id, doc_ids)
 
     # 清除检索缓存
     from app.retrieval.cache import get_retrieval_cache
@@ -1250,7 +1467,9 @@ async def preview_document_file(
         )
 
     # PDF 类型：返回缩略图（上传时已预生成）
-    if doc.file_type == "pdf":
+    # PDF / Markdown / TXT 类型：返回缩略图（上传/转存时已预生成）。
+    # md/txt 的缩略图为「封面图（链接转存）或文字卡片（fitz 渲染）」，与 PDF 走同一存取链路。
+    if doc.file_type in ("pdf", "md", "txt"):
         thumb_key = thumbnail_object_key(doc_id)
         if not await store.exists(thumb_key):
             raise HTTPException(status_code=404, detail="缩略图不可用")

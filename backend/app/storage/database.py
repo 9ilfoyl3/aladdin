@@ -60,6 +60,14 @@ async def _migrate_db() -> None:
         "ALTER TABLE documents ADD COLUMN progress INTEGER DEFAULT 0",
         "ALTER TABLE documents ADD COLUMN progress_message VARCHAR",
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR",
+
+        # 链接转存（url-import）：记录网页正文转存文档的原文链接，便于溯源展示。
+        "ALTER TABLE documents ADD COLUMN source_url VARCHAR",
+
+        # 知识图谱（knowledge-graph）：文档抽取状态与权威 attempt 计数。
+        # NOT NULL 带 DEFAULT，已有行自动回填（none / 0）。
+        "ALTER TABLE documents ADD COLUMN graph_status VARCHAR NOT NULL DEFAULT 'none'",
+        "ALTER TABLE documents ADD COLUMN graph_attempt INTEGER NOT NULL DEFAULT 0",
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
         # Embedding/Rerank 配置表新增厂商（vendor）列：仅用于 UI 记忆所选服务商
@@ -125,6 +133,14 @@ async def _migrate_db() -> None:
         # 临时文件统一由 kb_chunk_cap 约束，不再补这些列（存量库残留列保持 nullable、不被读取）。
         "ALTER TABLE retrieval_configs ADD COLUMN upload_max_file_mb INTEGER",
         "ALTER TABLE platform_configs ADD COLUMN kb_chunk_cap INTEGER",
+
+        # 知识图谱（knowledge-graph）：平台级抗压参数列。模型为 nullable，
+        # 空值由 PlatformConfig.effective_from_raw 读时兜底默认值，故加列不带 DEFAULT。
+        "ALTER TABLE platform_configs ADD COLUMN graph_overview_max_nodes INTEGER",
+        "ALTER TABLE platform_configs ADD COLUMN graph_ego_max_nodes INTEGER",
+        "ALTER TABLE platform_configs ADD COLUMN graph_ego_max_depth INTEGER",
+        "ALTER TABLE platform_configs ADD COLUMN graph_retriever_hops INTEGER",
+        "ALTER TABLE platform_configs ADD COLUMN graph_retriever_max_chunks INTEGER",
         # ===== asr-config：ASR 配置表 vendor 列（存量库若已建表则补列） =====
         "ALTER TABLE asr_configs ADD COLUMN vendor VARCHAR(50)",
     ]

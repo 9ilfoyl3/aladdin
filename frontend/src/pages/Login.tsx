@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
-import Prism from '@/components/Prism'
+import PrismBackground from '@/components/PrismBackground'
 
 // 打字机效果：按 speed（毫秒/字）逐字输出 text，返回已显示文本与是否输出完成
 function useTypewriter(text: string, speed = 80) {
@@ -77,17 +77,7 @@ export default function Login() {
       {/* 左侧：Prism 动态背景 + 品牌文案（小屏隐藏） */}
       <div className="relative hidden w-1/2 overflow-hidden bg-[#070708] lg:block">
         <div className="absolute inset-0">
-          <Prism
-            animationType="rotate"
-            timeScale={0.5}
-            height={2.5}
-            baseWidth={3.5}
-            scale={2.6}
-            hueShift={0.5}
-            colorFrequency={1.5}
-            noise={0.5}
-            glow={1.5}
-          />
+          <PrismBackground />
         </div>
         {/* 底部品牌文案 */}
         <div className="absolute inset-x-0 bottom-0 z-10 p-12">

@@ -1,0 +1,17 @@
+# ============================================================
+# 知识图谱（knowledge-graph）可选依赖 —— optional extra
+#
+# Neo4j Python 驱动「按需安装」：不开图谱功能（GRAPH_ENABLE=false）则无需安装，
+# 主依赖 requirements.txt 不含 neo4j，未启用时零额外依赖与运行成本。
+# 代码对 neo4j 做惰性 import 并优雅降级（驱动缺失时图谱整体关闭，不影响主 RAG 链路）。
+#
+# 启用图谱时安装：
+#   pip install -r requirements.txt -r requirements-graph.txt
+#
+# 同时需：
+#   1) 启动 Neo4j 服务： docker compose --profile infra --profile graph up -d
+#   2) 在 .env 设      ： GRAPH_ENABLE=true（及 NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD）
+# ============================================================
+
+# Neo4j 官方异步驱动（async API）。锁定 5.x 大版本，避免 6.0 不兼容变更。
+neo4j>=5.0,<6.0

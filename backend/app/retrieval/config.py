@@ -447,6 +447,19 @@ PLATFORM_FIELD_SPECS: dict[str, FieldSpec] = {
     # 上传限制平台级（超管可配）
     # 单库 child chunk 硬上限（约束 Milvus 常驻内存），默认 100 万，范围 1 万–1000 万
     "kb_chunk_cap": FieldSpec(default=1000000, lo=10000, hi=10000000, kind=KIND_INT),
+    # ============================================================
+    # 知识图谱抗压参数（knowledge-graph，design.md 3.4）：可热调，服务端 clamp 硬上限
+    # ============================================================
+    # overview 默认返回节点上限
+    "graph_overview_max_nodes": FieldSpec(default=500, lo=50, hi=2000, kind=KIND_INT),
+    # ego 模式节点上限
+    "graph_ego_max_nodes": FieldSpec(default=300, lo=10, hi=1000, kind=KIND_INT),
+    # ego BFS 最大跳数（硬上限）
+    "graph_ego_max_depth": FieldSpec(default=2, lo=1, hi=3, kind=KIND_INT),
+    # 检索融合时邻居跳数
+    "graph_retriever_hops": FieldSpec(default=2, lo=1, hi=2, kind=KIND_INT),
+    # 图谱召回每查询最大 chunk 数
+    "graph_retriever_max_chunks": FieldSpec(default=20, lo=1, hi=100, kind=KIND_INT),
 }
 
 # 平台配置全部字段名，行 ↔ dict 转换只取这些列（忽略 id / updated_at）。
@@ -462,6 +475,12 @@ class PlatformConfig(BaseModel):
     load_cache_ttl: int = PLATFORM_FIELD_SPECS["load_cache_ttl"].default
     # 上传限制平台级（超管可配）
     kb_chunk_cap: int = PLATFORM_FIELD_SPECS["kb_chunk_cap"].default
+    # 知识图谱抗压参数（design.md 3.4）
+    graph_overview_max_nodes: int = PLATFORM_FIELD_SPECS["graph_overview_max_nodes"].default
+    graph_ego_max_nodes: int = PLATFORM_FIELD_SPECS["graph_ego_max_nodes"].default
+    graph_ego_max_depth: int = PLATFORM_FIELD_SPECS["graph_ego_max_depth"].default
+    graph_retriever_hops: int = PLATFORM_FIELD_SPECS["graph_retriever_hops"].default
+    graph_retriever_max_chunks: int = PLATFORM_FIELD_SPECS["graph_retriever_max_chunks"].default
 
     @classmethod
     def effective_from_raw(cls, raw: dict | None) -> "PlatformConfig":

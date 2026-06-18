@@ -20,6 +20,7 @@ Built around a ReAct Agent, Artoo lets the LLM autonomously orchestrate keyword 
   <a href="#-overview">Overview</a> •
   <a href="#%EF%B8%8F-architecture">Architecture</a> •
   <a href="#-feature-overview">Features</a> •
+  <a href="#-screenshots">Screenshots</a> •
   <a href="#-quick-start">Quick Start</a> •
   <a href="#-documentation">Docs</a> •
   <a href="#-developer-guide">Developer Guide</a>
@@ -31,7 +32,7 @@ Built around a ReAct Agent, Artoo lets the LLM autonomously orchestrate keyword 
 
 **Artoo** is an open-source, LLM-powered Agentic RAG knowledge base framework built for enterprise-grade document understanding and traceable Q&A.
 
-It is organized around three core capabilities: a **ReAct Agent** that autonomously decides retrieval strategy and stopping conditions within a Think → Act → Observe loop; **three-way hybrid retrieval** that recalls in parallel via dense semantic, sparse vector, and BM25 full-text search, then produces high-quality context through RRF fusion, reranking, MMR de-duplication, and parent-chunk expansion; and **structure-aware document processing** that splits by logical structure, maps parent/child chunks, and runs concurrent OCR on mixed text-and-image documents. Combined with visual multi-model management, hot-swappable Embedding / Rerank / OCR services, MCP tool integration, Agent Skills, and three-tier progressive context management, Artoo turns scattered documents into a queryable, reasoning-capable, traceable knowledge asset.
+It is organized around three core capabilities: a **ReAct Agent** that autonomously decides retrieval strategy and stopping conditions within a Think → Act → Observe loop; **three-way hybrid retrieval** that recalls in parallel via dense semantic, sparse vector, and BM25 full-text search, then produces high-quality context through RRF fusion, reranking, MMR de-duplication, and parent-chunk expansion — with an optional knowledge graph (GraphRAG) joining as a fourth route that bridges via entities to recall related content pure-vector search misses; and **structure-aware document processing** that splits by logical structure, maps parent/child chunks, and runs concurrent OCR on mixed text-and-image documents. Documents can be ingested from local multi-format uploads as well as from pasted web / WeChat article links, whose main text is fetched and saved into the knowledge base in one click. Combined with visual multi-model management, hot-swappable Embedding / Rerank / OCR services, MCP tool integration, Agent Skills, and three-tier progressive context management, Artoo turns scattered documents into a queryable, reasoning-capable, traceable knowledge asset.
 
 All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to external services, keeping the backend lightweight and easy to self-host offline with full data sovereignty. The agent's reasoning is streamed to the frontend in real time via an EventBus — thoughts, tool calls, citations, and context token usage are all observable.
 
@@ -39,7 +40,8 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 
 - **A real ReAct Agent** — the LLM autonomously calls tools, analyzes results, and decides whether to keep searching or submit an answer via function calling, rather than a fixed orchestration pipeline.
 - **Evidence-First discipline** — a built-in Progressive RAG system prompt (Assess-Reconnaissance-Plan-Execute workflow) enforces "search first, deep-read chunks, then answer" — no fabrication from parametric memory.
-- **Three-way hybrid retrieval** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion.
+- **Three-way hybrid retrieval + optional graph augmentation** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion; when the knowledge graph is enabled, GraphRAG joins RRF as a fourth route, recalling related content via entity bridging, with interactive force-directed graph browsing.
+- **Multi-source ingestion** — beyond local multi-format uploads, paste a web / WeChat article link to fetch its main text and save it as a KB document, with the source URL retained for traceability.
 - **Three-tier progressive context management** — BPE token estimation + API usage delta tracking + LLM summary consolidation + group-based truncation fallback keep long conversations within the window.
 - **Extensible tool ecosystem** — built-in knowledge search, keyword matching, deep reading, attachment reading, web search, thinking, and skill loading tools, plus remote MCP Server integration.
 - **Multi-tenancy & access governance** — RBAC with fixed roles (admin / member) + ownership axis, private / organization-visible knowledge bases plus point-to-point sharing, super admin, invite-based registration, audit logs, and three API-key credential models.
@@ -63,10 +65,11 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 │  final_answer │ MCP Tools                                    │
 ├─────────────────────────────────────────────────────────────┤
 │                      Retrieval Tool Layer                    │
-│   Dense + Sparse + BM25 → RRF → Rerank → MMR → parent expand │
+│  Dense + Sparse + BM25 (+ Graph) → RRF → Rerank → MMR → expand│
 ├─────────────────────────────────────────────────────────────┤
 │                     Index / Storage Layer                    │
 │   Milvus (dense + sparse vectors)  │  PostgreSQL (metadata)  │
+│   Neo4j (knowledge graph, optional)                          │
 ├─────────────────────────────────────────────────────────────┤
 │                     Data Processing Layer                    │
 │   Loader → OCR → Chunker → Embedder → Indexer                │
@@ -98,10 +101,12 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Capability | Details |
 |------------|---------|
 | Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images / audio |
+| Link Import | Paste a web / WeChat article link; the backend fetches and extracts the main text as Markdown and saves it into the KB, retaining the source URL and cover image — mobile-friendly |
 | Document Organization | Folder hierarchy management, rename, thumbnail preview (authenticated fetch) |
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
 | Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
 | Three-Way Hybrid Retrieval | Dense + Sparse + BM25, RRF fusion + Rerank + MMR + parent-chunk expansion |
+| Knowledge Graph (optional) | After ingestion, entities and relations are extracted asynchronously into Neo4j, joining RRF as a fourth entity-bridging route, with interactive force-directed graph browsing (overview / neighbor drill-down / type filtering / entity detail tracing); controlled by global and per-KB toggles, off by default with zero extra cost, and degrades automatically on failure without affecting the main pipeline |
 | Async Pipeline | Redis Stream task queue + independent Worker, API decoupled from processing, resumable |
 | Retrieval Testing | Dedicated retrieval-only page (no LLM generation) that visualizes the three-way recall / RRF / Rerank / MMR pipeline and multi-dimensional scores, built for tuning |
 
@@ -129,6 +134,22 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Security | JWT login + three API-key credential models (tenant / user / external-agent, SHA256 hashed, only `/v1/` paths); configurable super-admin content-visibility boundary; external MCP tool output marked untrusted |
 | Graceful Degradation | Agent error → hybrid → pure retrieval; LLM down → raw retrieved text; Reranker error → RRF results |
 | Observability | Agent thought / tool / token-usage SSE events; session history persists agent_steps |
+
+## 🖼️ Screenshots
+
+<div align="center">
+
+<img src="./docs/images/355ffa79-d70b-4d5e-a624-6a825635cdfe.png" width="90%" alt="Screenshot 1" />
+
+<br/><br/>
+
+<img src="./docs/images/0d6832dd-41a6-40a4-8cf8-ea3193dec5cb.png" width="90%" alt="Screenshot 2" />
+
+<br/><br/>
+
+<img src="./docs/images/4bc34abf-8545-4898-984d-822f28b4ee75.png" width="90%" alt="Screenshot 3" />
+
+</div>
 
 ## 🚀 Quick Start
 
@@ -252,7 +273,7 @@ docker compose -f docker-compose.yml --profile app up -d     # start app
 | Mode | Flow | Use Case |
 |------|------|----------|
 | **direct** | Dense vector ANN retrieval | Simple queries, low latency |
-| **hybrid** (Quick Q&A) | Dense + Sparse + BM25 parallel → RRF → Rerank → MMR → parent expansion | General purpose |
+| **hybrid** (Quick Q&A) | Dense + Sparse + BM25 parallel → RRF → Rerank → MMR → parent expansion (plus a Graph fourth route when the KB has the graph enabled) | General purpose |
 | **agent** (Smart Reasoning) | ReAct loop: autonomous grep / semantic search / deep read / thinking / web search, iterating until it submits an answer | Complex multi-hop queries requiring synthesis |
 
 ### Agent ReAct Loop
@@ -352,7 +373,6 @@ See [Packaging & Deployment](#-packaging--deployment-production--offline-intrane
 - [ ] End-to-end retrieval evaluation (RAGAS, quantifying recall & generation quality)
 - [ ] Chunk metadata enrichment (Enricher summaries / keywords) + filtered retrieval
 - [ ] Database migration management (Alembic)
-- [ ] Knowledge-graph-enhanced retrieval (GraphRAG)
 - [ ] Data-source connectors (Feishu / Notion)
 - [ ] Multi-worker horizontal scaling
 

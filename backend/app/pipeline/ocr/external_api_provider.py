@@ -95,12 +95,72 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
     def name(self) -> str:
         return "external_api"
 
+    @staticmethod
+    def _looks_like_paddleocr(inner) -> bool:
+        """判断是否为 PaddleOCR 原生嵌套格式。
+
+        结构特征：data[图][行] = [四点坐标框, [文本, 置信度]]
+            inner          = [ page0, page1, ... ]
+            page           = [ line0, line1, ... ]
+            line           = [ [[x,y],[x,y],[x,y],[x,y]], ["文本", score] ]
+        """
+        try:
+            line = inner[0][0]
+            return (
+                isinstance(line, list)
+                and len(line) == 2
+                and isinstance(line[0], list) and len(line[0]) == 4  # 四点框
+                and isinstance(line[1], (list, tuple)) and len(line[1]) >= 1
+                and isinstance(line[1][0], str)                      # 文本
+            )
+        except (IndexError, TypeError):
+            return False
+
+    def _parse_paddleocr(self, inner: list) -> OCRResult:
+        """解析 PaddleOCR 原生嵌套格式为统一 OCRResult。每个外层元素视为一页。"""
+        from .provider import OCRBlock, PageOCRResult
+
+        pages: list[PageOCRResult] = []
+        all_conf: list[float] = []
+        for idx, page_lines in enumerate(inner):
+            blocks: list[OCRBlock] = []
+            for line in page_lines or []:
+                try:
+                    box, (text, *rest) = line[0], line[1]
+                except (IndexError, TypeError, ValueError):
+                    continue
+                conf = float(rest[0]) if rest else 0.0
+                # 四点框 [[x,y]*4] → (x1, y1, x2, y2)
+                bbox = None
+                try:
+                    xs = [float(p[0]) for p in box]
+                    ys = [float(p[1]) for p in box]
+                    bbox = (min(xs), min(ys), max(xs), max(ys))
+                except (IndexError, TypeError, ValueError):
+                    bbox = None
+                blocks.append(OCRBlock(text=text, confidence=conf, bbox=bbox))
+                all_conf.append(conf)
+            page_text = "\n".join(b.text for b in blocks)
+            pages.append(PageOCRResult(page_num=idx + 1, blocks=blocks, full_text=page_text))
+
+        full_text = "\n\n".join(p.full_text for p in pages if p.full_text)
+        avg_conf = sum(all_conf) / len(all_conf) if all_conf else 0.0
+        return OCRResult(
+            full_text=full_text,
+            pages=pages,
+            avg_confidence=avg_conf,
+            provider_name=self.name,
+        )
+
     def _adapt_response(self, data: dict) -> OCRResult:
         from .provider import OCRBlock, PageOCRResult
 
         # 如果是包装格式 {code, data}，解包
         if "code" in data and "data" in data:
             inner = data["data"]
+            # PaddleOCR 原生嵌套格式优先识别（data[图][行]=[四点框,[文本,分数]]）
+            if isinstance(inner, list) and self._looks_like_paddleocr(inner):
+                return self._parse_paddleocr(inner)
             if isinstance(inner, str):
                 return OCRResult(
                     full_text=inner,
