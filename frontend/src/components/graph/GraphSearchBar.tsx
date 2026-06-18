@@ -32,7 +32,7 @@ export default function GraphSearchBar({ onSearch, egoActive, onBackToOverview }
   return (
     <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
       <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

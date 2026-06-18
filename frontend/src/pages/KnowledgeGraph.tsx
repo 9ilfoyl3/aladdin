@@ -15,9 +15,10 @@
 import { useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, FileText } from 'lucide-react'
 
-import { graphApi } from '@/lib/api'
+import { graphApi, knowledgeBaseApi } from '@/lib/api'
+import { Button } from '@/components/ui/button'
 import { useGraphStore } from '@/stores/graphStore'
 import GraphEmptyState from '@/components/graph/GraphEmptyState'
 import GraphView from '@/components/graph/GraphView'
@@ -49,6 +50,14 @@ function KnowledgeGraph() {
     if (kbId) setKb(kbId)
   }, [kbId, setKb])
 
+  // KB 名称（头部标题，与文件视图保持一致）。轻量查询，复用 react-query 缓存。
+  const { data: kb } = useQuery({
+    queryKey: ['knowledge-base', kbId],
+    queryFn: () => knowledgeBaseApi.get(kbId!) as Promise<{ name?: string }>,
+    enabled: !!kbId,
+  })
+  const kbName = kb?.name
+
   // —— 第三层数据态：图谱统计 ——
   // 仅在门控通过后才查询；503 不重试（图存储不可用是稳定态，重试无意义）。
   const {
@@ -67,7 +76,7 @@ function KnowledgeGraph() {
   // 门控判定中 / stats 首次加载中：渲染轻量加载占位，避免空白或闪烁。
   if (gatingLoading || (showEntry && statsLoading)) {
     return (
-      <PageShell kbId={kbId}>
+      <PageShell kbId={kbId} kbName={kbName}>
         <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
           加载中…
         </div>
@@ -83,7 +92,7 @@ function KnowledgeGraph() {
     const message = statsError instanceof Error ? statsError.message : String(statsError)
     const unavailable = message.includes(STORE_UNAVAILABLE_DETAIL)
     return (
-      <PageShell kbId={kbId}>
+      <PageShell kbId={kbId} kbName={kbName}>
         <GraphEmptyState
           variant={unavailable ? 'unavailable' : 'error'}
           message={unavailable ? null : message}
@@ -98,7 +107,7 @@ function KnowledgeGraph() {
   if (!stats || stats.entity_count === 0) {
     const building = !!stats && BUILDING_STATUSES.has(stats.status)
     return (
-      <PageShell kbId={kbId}>
+      <PageShell kbId={kbId} kbName={kbName}>
         <GraphEmptyState
           variant="empty"
           building={building}
@@ -111,23 +120,44 @@ function KnowledgeGraph() {
 
   // 有数据：渲染力导向图交互视图（GraphCanvas/Legend/Drawer/SearchBar）。
   return (
-    <PageShell kbId={kbId}>
+    <PageShell kbId={kbId} kbName={kbName}>
       <GraphView />
     </PageShell>
   )
 }
 
-// 页面外壳：统一头部（返回 KB 详情 + 标题），内容区由调用方填充。
-function PageShell({ kbId, children }: { kbId: string | undefined; children: React.ReactNode }) {
+// 页面外壳：统一头部，与文件视图（Documents）保持一致的交互：
+//   - 左上角返回按钮 → 知识库列表（与文件视图的返回按钮作用相同）；
+//   - 标题显示知识库名称；
+//   - 右上角「文件视图」按钮切回该 KB 的文档管理页，统一两视图间的来回切换。
+function PageShell({
+  kbId,
+  kbName,
+  children,
+}: {
+  kbId: string | undefined
+  kbName: string | undefined
+  children: React.ReactNode
+}) {
   return (
     <div className="relative flex h-full flex-col">
-      <div className="mb-4 flex shrink-0 items-center gap-3">
-        <Link to={kbId ? `/knowledge-bases/${kbId}` : '/knowledge-bases'}>
-          <button className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-muted">
-            <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-          </button>
-        </Link>
-        <h1 className="text-2xl font-bold tracking-tight">知识图谱</h1>
+      <div className="mb-4 flex shrink-0 items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Link to="/knowledge-bases">
+            <button className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-muted">
+              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
+            </button>
+          </Link>
+          <h1 className="text-2xl font-bold tracking-tight">{kbName || '知识图谱'}</h1>
+        </div>
+        {kbId && (
+          <Link to={`/knowledge-bases/${kbId}`}>
+            <Button variant="outline" size="sm" className="gap-1.5 cursor-pointer">
+              <FileText className="h-4 w-4" />
+              文件视图
+            </Button>
+          </Link>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
         {children}
