@@ -243,6 +243,10 @@ services:
     ports:
       - "${FRONTEND_PORT:-8888}:80"
     # nginx.conf 已在镜像内（frontend/nginx.conf），无需挂载覆盖。
+    # 运行时前端配置：只读挂载覆盖镜像内的 /config.js，部署人员改宿主机文件后刷新页面即生效，
+    # 无需重新构建镜像。可调动态背景策略（prismBackground: auto/on/off）等。
+    volumes:
+      - ./frontend/public/config.js:/usr/share/nginx/html/config.js:ro
     depends_on:
       - backend
     restart: unless-stopped

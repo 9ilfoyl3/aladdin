@@ -20,6 +20,16 @@ const FPS_DOWNGRADE_THRESHOLD = 30 // 平均 FPS 低于此值则降级
 let cachedLowEnd: boolean | null = null
 
 /**
+ * 读取部署人员在 public/config.js 中设置的动态背景策略。
+ * 读不到（文件缺失或字段未填）时默认 'auto'。
+ */
+function getPrismMode(): PrismBackgroundMode {
+  if (typeof window === 'undefined') return 'auto'
+  const mode = window.__APP_CONFIG__?.prismBackground
+  return mode === 'on' || mode === 'off' ? mode : 'auto'
+}
+
+/**
  * 检测 WebGL 是否运行在软件渲染器上（如 SwiftShader / llvmpipe / Microsoft Basic Render）。
  * 软件渲染意味着没有可用 GPU，跑 shader 会极慢。
  */
@@ -52,6 +62,17 @@ function isSoftwareWebGL(): boolean {
 export function detectLowEndDevice(): boolean {
   if (cachedLowEnd !== null) return cachedLowEnd
   if (typeof window === 'undefined') return false
+
+  // 部署人员强制指定：off 视为低端（强制降级），on 视为高端（强制开启）
+  const mode = getPrismMode()
+  if (mode === 'off') {
+    cachedLowEnd = true
+    return cachedLowEnd
+  }
+  if (mode === 'on') {
+    cachedLowEnd = false
+    return cachedLowEnd
+  }
 
   // 1. 用户明确要求减少动效
   const prefersReducedMotion =
@@ -96,6 +117,8 @@ export function useAdaptivePerf() {
   useEffect(() => {
     // 已降级则不必再监控
     if (!enableHeavyEffect) return
+    // 部署人员强制开启时，跳过 FPS 兜底降级
+    if (getPrismMode() === 'on') return
 
     let mounted = true
 
