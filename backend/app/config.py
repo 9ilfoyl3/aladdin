@@ -153,6 +153,39 @@ class Settings(BaseSettings):
     # 超管业务内容可见边界：False（默认）= Super_Admin 不可查看业务内容正文。
     content_view_boundary_open: bool = False
 
+    # ============================================================
+    # 知识图谱（knowledge-graph）：全局 env 开关与 Neo4j 连接/抽取参数
+    # ============================================================
+    # 全局总开关：不为 true 则整体关闭图谱功能（不连 Neo4j、不抽取、API 返回明确不可用），
+    # 主链路零额外成本（Req 9.3）。映射 env GRAPH_ENABLE。
+    graph_enable: bool = False
+    # Neo4j 连接配置（仅 graph_enable=true 时使用）
+    neo4j_uri: str = "bolt://neo4j:7687"
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = "password"
+    neo4j_max_pool_size: int = 50  # 连接池上限（抗压，Req 9.2）
+    neo4j_conn_timeout: float = 5.0  # 连接超时（秒）
+    # 单次图查询事务超时（秒），防恶意 depth/limit（Req 9.1）
+    graph_query_timeout: float = 10.0
+    # 抽取慢道并发信号量上限（与文档入库 worker 物理隔离，不挤占主链路）
+    graph_extract_concurrency: int = 2
+    # 抽取子任务最大重试次数（超过进 DLQ）
+    graph_extract_max_retries: int = 3
+    # housekeeping 巡检：超过此时长仍未到达终态（pending/processing）的 GraphExtractJob
+    # 视为卡死（worker 硬崩溃导致 pending_subtasks 不归零），置 failed 并零化计数器（Req 4.4）。
+    graph_job_timeout_minutes: int = 30
+    # housekeeping 巡检周期（秒）。仅 graph_enable=true 时启动巡检循环。
+    graph_housekeeping_interval_seconds: int = 300
+    # ---- 阶段 4（GraphRAG Global，可选）：GDS Louvain 社区发现 ----
+    # 社区发现需 Neo4j GDS 插件（enterprise 或社区 GDS）。GDS 不可用时社区发现优雅降级
+    # （返回空 / 跳过，warning 不 crash），不影响阶段 1~3。
+    # 社区最小成员数：小于此规模的社区不生成摘要（噪声社区过滤）。
+    graph_community_min_size: int = 3
+    # 单 KB 生成摘要的社区数上限（控制 LLM 调用成本）。
+    graph_community_max_communities: int = 100
+    # 喂给 LLM 生成单社区摘要的成员实体数上限（控制 prompt 长度）。
+    graph_community_max_members_for_summary: int = 30
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

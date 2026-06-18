@@ -21,12 +21,14 @@ import {
   RotateCcw,
   CheckSquare,
   Square,
+  Network,
   X,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
 import type { PageResult, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { useConfirm } from '@/lib/confirm-context'
+import { useGraphGating } from '@/components/graph/useGraphGating'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -132,6 +134,10 @@ function Documents() {
   // 只读访客（含管理员看他人私有库）隐藏全部写操作入口（上传/新建/删除/重试/拖拽）。
   // 后端 get 接口未返回 can_write 时（加载中）默认按只读处理，避免误显示写入口。
   const canWrite = kb?.can_write === true
+
+  // 知识图谱入口门控（design.md 5.3.1）：全局 graph_enabled 且本 KB config.graph.enabled
+  // 才显示「知识图谱」入口。未启用 → 不显示入口（而非显示后报错）。
+  const { showEntry: showGraphEntry } = useGraphGating(kbId)
 
   // 获取当前目录下的文件夹（分页 + 滚动加载）
   const PAGE_SIZE = 20
@@ -618,6 +624,16 @@ function Documents() {
 
         {/* 操作按钮（只读库隐藏全部写操作入口） */}
         <div className="flex items-center gap-2">
+          {/* 知识图谱入口：仅全局+KB 双开关均启用时出现（design.md 5.3.1）。
+              读权限用户亦可查看图谱，故不受 canWrite 限制。 */}
+          {showGraphEntry && (
+            <Link to={`/knowledge-bases/${kbId}/graph`} onClick={(e) => e.stopPropagation()}>
+              <Button variant="outline" size="sm" className="gap-1.5 cursor-pointer">
+                <Network className="h-4 w-4" />
+                知识图谱
+              </Button>
+            </Link>
+          )}
           {canWrite && (selectionMode ? (
             <>
               <Button

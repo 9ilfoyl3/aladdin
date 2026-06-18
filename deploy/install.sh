@@ -30,15 +30,22 @@ if [[ ! -f .env ]]; then
 fi
 
 echo "[3/4] 启动中间件，等待就绪..."
-docker compose -f docker-compose.yml --profile infra up -d
+# 读 .env 的 GRAPH_ENABLE 决定是否叠加 Neo4j（--profile graph）。默认 false 不起。
+GRAPH_ENABLE=$(grep -E '^GRAPH_ENABLE=' .env | cut -d= -f2 | tr -d '[:space:]' || echo false)
+INFRA_PROFILES="--profile infra"
+if [[ "$GRAPH_ENABLE" == "true" ]]; then
+  INFRA_PROFILES="$INFRA_PROFILES --profile graph"
+  echo "  GRAPH_ENABLE=true：将一并启动 Neo4j（知识图谱）"
+fi
+docker compose -f docker-compose.yml $INFRA_PROFILES up -d
 echo "  等待中间件 healthy..."
 for i in $(seq 1 30); do
-  if ! docker compose -f docker-compose.yml --profile infra ps --format '{{.Health}}' | grep -qiE 'starting|unhealthy'; then
+  if ! docker compose -f docker-compose.yml $INFRA_PROFILES ps --format '{{.Health}}' | grep -qiE 'starting|unhealthy'; then
     break
   fi
   sleep 5
 done
-docker compose -f docker-compose.yml --profile infra ps
+docker compose -f docker-compose.yml $INFRA_PROFILES ps
 
 echo "[4/4] 启动应用..."
 docker compose -f docker-compose.yml --profile app up -d
@@ -55,4 +62,4 @@ echo "后端: http://${IP}:${BACKEND_PORT:-8000}"
 echo ""
 echo "查看日志: docker compose -f docker-compose.yml --profile app logs -f"
 echo "停止应用: docker compose -f docker-compose.yml --profile app down"
-echo "停止中间件: docker compose -f docker-compose.yml --profile infra down  # 数据卷保留"
+echo "停止中间件: docker compose -f docker-compose.yml $INFRA_PROFILES down  # 数据卷保留"

@@ -169,6 +169,15 @@ make dev
 
 </details>
 
+> **可选：启用知识图谱（GraphRAG）。** 默认整体关闭、零成本。开启需三步：
+> ```bash
+> make install-graph    # 安装 Neo4j 驱动（可选依赖）
+> make infra-graph      # 起中间件 + Neo4j（替代 make infra）
+> # 在 backend/.env 设 GRAPH_ENABLE=true（NEO4J_URI 本地直连用 bolt://localhost:7687）
+> make dev              # Worker 检测到开关后自动启动图谱抽取
+> ```
+> 仅当全局开关与知识库的图谱开关同时开启时，该知识库才出现「知识图谱」入口。
+
 <details>
 <summary><b>Windows (PowerShell)</b></summary>
 
@@ -247,6 +256,13 @@ cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(i
 docker compose -f docker-compose.yml --profile infra up -d   # 起中间件，等 healthy
 docker compose -f docker-compose.yml --profile app up -d     # 起应用
 ```
+
+> **可选：部署时启用知识图谱。** 打包时加 `--with-graph`，应用镜像内会装 Neo4j 驱动、离线包额外导出 Neo4j 镜像：
+> ```bash
+> deploy/build.sh --with-graph              # 当前架构
+> deploy/build.sh --arch arm64 --with-graph # 指定架构
+> ```
+> 部署侧无需额外命令：`install.sh` 读取 `.env` 的 `GRAPH_ENABLE`，为 `true` 时自动叠加 `--profile graph` 一并拉起 Neo4j。
 
 ## 🔍 检索模式
 
@@ -331,7 +347,9 @@ make dev-backend        # 仅后端 API
 make dev-worker         # 仅 Worker
 make dev-frontend       # 仅前端
 make infra              # 启动基础设施（Milvus + Redis + PostgreSQL）
+make infra-graph        # 启动基础设施 + Neo4j（启用知识图谱时用）
 make infra-down         # 停止基础设施
+make install-graph      # 安装知识图谱可选依赖（Neo4j 驱动）
 make test               # 运行后端测试
 make build              # 构建离线部署包（deploy/build.sh）
 make build ARCH=arm64   # 指定架构构建（amd64 | arm64）
@@ -353,7 +371,7 @@ make build-app          # 仅应用镜像的更新包（不含中间件）
 - [ ] 端到端检索评测体系（RAGAS，量化召回与生成质量）
 - [ ] Chunk 元数据增强（Enricher 生成摘要 / 关键词）+ 过滤检索
 - [ ] 数据库迁移管理（Alembic）
-- [ ] 知识图谱增强检索（GraphRAG）
+- [x] 知识图谱增强检索（GraphRAG）
 - [ ] 数据源连接器（飞书 / Notion）
 - [ ] 多 Worker 水平扩展
 

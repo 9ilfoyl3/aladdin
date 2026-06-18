@@ -1,5 +1,5 @@
-.PHONY: install install-backend install-frontend dev dev-backend dev-worker dev-frontend \
-	infra infra-down test clean build build-app
+.PHONY: install install-backend install-frontend install-graph dev dev-backend dev-worker dev-frontend \
+	infra infra-graph infra-down test clean build build-app
 
 # Python 解释器（可通过 make install-backend PYTHON=python3.12 覆盖）
 PYTHON ?= python3
@@ -17,6 +17,10 @@ install-backend:
 install-frontend:
 	cd frontend && npm install
 
+# 可选：知识图谱依赖（Neo4j 驱动）。仅在需要开启图谱功能时执行。
+install-graph:
+	.venv/bin/pip install -r backend/requirements-graph.txt
+
 # ============================================================
 # 本地开发（中间件用 docker，应用跑在宿主机热重载）
 # ============================================================
@@ -28,6 +32,13 @@ infra:
 
 infra-down:
 	docker compose --profile infra down
+
+# 启动中间件 + Neo4j（知识图谱）。开图谱开发时用这条替代 infra。
+# 还需：1) make install-graph 装驱动  2) backend/.env 设 GRAPH_ENABLE=true
+infra-graph:
+	@echo "启动中间件 + Neo4j（图谱）..."
+	docker compose --profile infra --profile graph up -d
+	@echo "Neo4j: localhost:7687（Bolt） | localhost:7474（浏览器管理台）"
 
 # 同时启动后端 + Worker + 前端
 dev:

@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from app.pipeline.ocr.manager import OCRManager
     from app.pipeline.ocr.provider import OCRResult
     from app.pipeline.asr.manager import ASRManager
+    from app.pipeline.queue import TaskQueue
     from app.session_upload.limits import UploadLimits
 
 logger = logging.getLogger(__name__)
@@ -118,11 +119,15 @@ class DocumentPipeline:
         db_session_factory: async_sessionmaker[AsyncSession],
         ocr_manager: OCRManager | None = None,
         asr_manager: "ASRManager | None" = None,
+        graph_queue: "TaskQueue | None" = None,
     ):
         self.milvus = milvus_client
         self.db_session_factory = db_session_factory
         self.ocr_manager = ocr_manager
         self.asr_manager = asr_manager
+        # 知识图谱抽取慢道队列（pipeline:graph）。None 表示未启用/不可用 → 文档完成后
+        # 不触发图谱抽取（优雅降级，主链路零影响）。
+        self.graph_queue = graph_queue
         # 初始化管道各节点
         self.enricher = Enricher(llm=None, enabled=False)
         settings = get_settings()
@@ -711,6 +716,10 @@ class DocumentPipeline:
                 if bus:
                     await bus.publish("kb_data", kb_id)
 
+                # 文档入库完成后非阻塞触发知识图谱抽取（双开关 + 队列门控，任何故障不影响
+                # 主入库结果；fire-and-forget 不阻塞 process 返回）。Req 1.1 / 1.2 / 4.1。
+                self._fire_graph_extract(doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id)
+
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
 
@@ -770,6 +779,34 @@ class DocumentPipeline:
                     await err_session.commit()
                 logger.error("文档 %s 处理失败: %s", doc_id, e)
                 raise
+
+    def _fire_graph_extract(
+        self, *, doc_id: str, kb_id: str, tenant_id: str | None
+    ) -> None:
+        """非阻塞触发知识图谱抽取（fire-and-forget）。
+
+        以 ``asyncio.create_task`` 调度 :func:`maybe_trigger_graph_extract`，包一层 try/except
+        守卫，使图谱触发的任何失败（双开关关闭、队列不可用、DB 异常等）都不影响文档入库
+        主链路的返回（Req 1.1，优雅降级）。``graph_queue`` 为 None 时直接 no-op，不增加成本。
+        """
+        if self.graph_queue is None:
+            return
+
+        from app.pipeline.graph.trigger import maybe_trigger_graph_extract
+
+        async def _run() -> None:
+            try:
+                await maybe_trigger_graph_extract(
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    tenant_id=tenant_id,
+                    db_session_factory=self.db_session_factory,
+                    graph_queue=self.graph_queue,
+                )
+            except Exception as e:  # noqa: BLE001 — 图谱触发失败绝不影响主入库结果
+                logger.warning("文档 %s 触发知识图谱抽取失败（已忽略，不影响入库）: %s", doc_id, e)
+
+        asyncio.create_task(_run())
 
     async def _select_chunker(
         self, session: AsyncSession, kb_id: str, file_type: str, content: str

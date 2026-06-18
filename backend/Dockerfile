@@ -16,7 +16,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 如果下载超时，可加镜像源：
 #   -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+COPY requirements-graph.txt .
+
+# 知识图谱可选依赖（Neo4j 驱动）默认不装，保持镜像精简、不开图谱零成本。
+# 需要图谱时构建：docker build --build-arg WITH_GRAPH=true -t artoo-backend:latest .
+ARG WITH_GRAPH=false
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt && \
+    if [ "$WITH_GRAPH" = "true" ]; then \
+      pip install --no-cache-dir --prefer-binary -r requirements-graph.txt; \
+    fi
 
 # ============ 阶段二：运行镜像 ============
 FROM python:3.12-slim

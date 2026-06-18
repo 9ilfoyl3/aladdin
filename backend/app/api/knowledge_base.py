@@ -769,6 +769,10 @@ async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
             keys.append(thumbnail_object_key(info["id"]))
         await store.remove_many(keys)
 
+    # 删除整个 KB 的知识图谱（按 kb_id 批删全部实体与关系，优雅降级）。Req 5.3。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_kb
+    await cleanup_graph_for_kb(kb_id)
+
     try:
         from app.retrieval.cache import get_retrieval_cache
         cache = await get_retrieval_cache()

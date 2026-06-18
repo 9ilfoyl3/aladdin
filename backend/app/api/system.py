@@ -24,6 +24,7 @@ from app.retrieval.config import (
     validate_platform_patch,
 )
 from app.session_upload.memory import recommend_kb_chunk_cap
+from app.storage.graph_store import get_graph_store
 from app.storage.invalidation import get_invalidation_bus
 from app.storage.milvus import MilvusClient
 
@@ -596,13 +597,21 @@ class FrontendConfigResponse(BaseModel):
     """前端运行时配置（无需认证，前端启动时拉取）"""
     upload_max_concurrent: int = 3
     upload_max_file_size_mb: int = 500
+    # 知识图谱全局能力开关（knowledge-graph 5.3.1 第一层门控）：
+    # 等价于 get_graph_store() 非空，即「全局 GRAPH_ENABLE=true 且 Neo4j 可用」。
+    # 前端据此决定是否在任何 KB 详情显示「知识图谱」入口（全局关→所有 KB 都不显示）。
+    graph_enabled: bool = False
 
 
 @router.get("/frontend-config", response_model=FrontendConfigResponse)
 async def get_frontend_config():
     """获取前端配置（公开接口，前端启动时拉取）"""
     settings = get_settings()
+    # 全局图谱能力：store 非空 ⟺ 全局启用且 Neo4j 可达（design.md 5.3.1 第一层门控）。
+    # get_graph_store() 进程内单例，不会每次重连，公开接口调用零额外成本。
+    graph_store = await get_graph_store()
     return FrontendConfigResponse(
         upload_max_concurrent=settings.upload_max_concurrent,
         upload_max_file_size_mb=settings.upload_max_file_size_mb,
+        graph_enabled=graph_store is not None,
     )

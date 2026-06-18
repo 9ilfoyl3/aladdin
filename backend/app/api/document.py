@@ -601,6 +601,11 @@ async def retry_document(
     doc.chunk_count = 0
     doc.progress = 0
     doc.progress_message = None
+    # 重解析图谱一致性（design.md 4.6 / Req 5.2）：先自增 graph_attempt 使在途旧抽取任务
+    # 失效（worker 陈旧守卫据此跳过），再异步清理该文档旧图；新内容入库完成后由
+    # maybe_trigger_graph_extract 再次自增 attempt 并按新内容 seed。
+    doc.graph_attempt = (doc.graph_attempt or 0) + 1
+    doc.graph_status = "none"
     await db.flush()
 
     # 重新触发管道（优先入队 Redis Stream）。源文件权威存储在 MinIO。
@@ -628,6 +633,10 @@ async def retry_document(
         asyncio.create_task(_run_pipeline_fallback(object_key, doc_id, doc.kb_id, object_key))
 
     await db.commit()
+    # 重解析：异步清理该文档旧图（在 graph_attempt 已自增、在途旧任务已失效之后）。
+    # fire-and-forget + 优雅降级，绝不阻塞 / 影响重解析主流程。Req 5.2。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_doc
+    asyncio.create_task(cleanup_graph_for_doc(doc.kb_id, doc_id))
     return DocumentResponse(
         id=doc.id,
         kb_id=doc.kb_id,
@@ -696,6 +705,11 @@ async def _doc_cleanup_background(doc_id: str, kb_id: str, file_type: str) -> No
             thumbnail_object_key(doc_id),
         ])
 
+    # 删除知识图谱中该文档贡献的实体/关系（优雅降级：图谱未启用/不可用时静默跳过，
+    # 任何 Neo4j 故障不影响主删除链路）。design.md 4.6 / Req 5.1。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_doc
+    await cleanup_graph_for_doc(kb_id, doc_id)
+
     # 清除该知识库的检索缓存
     from app.retrieval.cache import get_retrieval_cache
     cache = await get_retrieval_cache()
@@ -747,6 +761,9 @@ async def batch_retry_documents(
         doc.chunk_count = 0
         doc.progress = 0
         doc.progress_message = None
+        # 重解析图谱一致性（Req 5.2）：自增 graph_attempt 使在途旧任务失效。
+        doc.graph_attempt = (doc.graph_attempt or 0) + 1
+        doc.graph_status = "none"
         retried.append(doc)
 
     await db.flush()
@@ -787,6 +804,13 @@ async def batch_retry_documents(
             asyncio.create_task(_run_pipeline_fallback(object_key, doc.id, doc.kb_id, object_key))
 
     await db.commit()
+    # 重解析：异步清理这些文档的旧图（graph_attempt 已自增，在途旧任务失效后）。Req 5.2。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_docs
+    retry_kb_doc_map: dict[str, list[str]] = {}
+    for doc in retried:
+        retry_kb_doc_map.setdefault(doc.kb_id, []).append(doc.id)
+    for kb_id, doc_ids in retry_kb_doc_map.items():
+        asyncio.create_task(cleanup_graph_for_docs(kb_id, doc_ids))
     return {"retried_count": len(retried), "skipped_count": len(skipped), "total_requested": len(body.doc_ids)}
 
 
@@ -895,6 +919,11 @@ async def _batch_cleanup_background(
             keys.append(document_object_key(info["id"], info["file_type"]))
             keys.append(thumbnail_object_key(info["id"]))
         await store.remove_many(keys)
+
+    # 删除知识图谱中这些文档贡献的实体/关系（按 kb 分组逐 doc 清理，优雅降级）。Req 5.1。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_docs
+    for kb_id, doc_ids in kb_doc_map.items():
+        await cleanup_graph_for_docs(kb_id, doc_ids)
 
     # 清除检索缓存
     from app.retrieval.cache import get_retrieval_cache

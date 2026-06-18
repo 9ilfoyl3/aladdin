@@ -73,10 +73,15 @@ class HybridRetriever(BaseRetriever):
         bm25_retriever: BaseRetriever | None = None,
         config_store: RetrievalConfigStore | None = None,
         platform_store: PlatformConfigStore | None = None,
+        graph_retriever: BaseRetriever | None = None,
     ):
         self.vector_retriever = vector_retriever
         self.sparse_retriever = sparse_retriever
         self.bm25_retriever = bm25_retriever
+        # 第四路：图谱召回（可选注入，design.md 4.5）。默认 None —— 未注入时 tasks 列表与
+        # RRF 行为与未引入本功能时完全一致（Property 8，零回归）。仅当全局开关开启且图存储
+        # 可用时由注入方（chat._build_hybrid_retriever）构造并传入 GraphRetriever。
+        self.graph_retriever = graph_retriever
         self.reranker = rerank_provider
         self.db_session_factory = db_session_factory
         # 延迟到实例化时取进程内单例，避免 import 期副作用。
@@ -163,6 +168,17 @@ class HybridRetriever(BaseRetriever):
         if has_bm25:
             tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs))
 
+        # 第四路：图谱召回（可选，design.md 4.5）。仅当注入了 graph_retriever 时追加该路；
+        # 未注入（None）→ tasks 与下方 RRF 输入与未引入本功能时逐字节一致（Property 8，零回归）。
+        # KB 未开启图谱 / store 不可用时由 GraphRetriever.search 自身早退返回 []（自降级），
+        # 空列表并入 RRF 不改变其余路名次（标准 RRF 仅用名次累加，空路无贡献）。
+        # 图查询异常 → 经下方 _safe 路级降级为空，其余路不受影响（Req 7.3）。
+        has_graph = self.graph_retriever is not None
+        graph_idx = -1
+        if has_graph:
+            graph_idx = len(tasks)
+            tasks.append(self.graph_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
+
         # 三路容错（H2）：return_exceptions=True 收集各路结果 / 异常，逐路经 _safe 包装。
         # 任一路抛异常 → 该路降级为空、其余路照常融合，与 search_with_trace() 行为一致
         # （把调参链路已验证的 _safe 容错下沉到生产 search()）。
@@ -191,13 +207,17 @@ class HybridRetriever(BaseRetriever):
                 return []
             return r
 
-        # 索引映射严格对齐 tasks 构建顺序：dense=0 / sparse=1 / bm25=2。
+        # 索引映射严格对齐 tasks 构建顺序：dense=0 / sparse=1 / bm25=2 / graph=graph_idx。
         dense_results = _safe(0, "dense")
         sparse_results = _safe(1, "sparse")
         bm25_results = _safe(2, "bm25") if has_bm25 else []
+        # 图谱召回（第四路）：未注入时为空，不参与融合（Property 8 零回归）。
+        graph_results = _safe(graph_idx, "graph") if has_graph else []
 
         # 三路全失败（确有降级且 dense/sparse/bm25 融合输入全空）→ 抛 RuntimeError 交上层降级，
         # 区别于"正常无结果"返回空：后者 route_degraded=False 不抛错（Req H2-4）。
+        # 注：图谱路属增强项，不纳入"全失败"判定——它本就可能因 KB 未启用/无命中而正常为空，
+        # 不应让一条空的图谱路阻止"三主路全失败应抛错"的既有语义（保持现状行为）。
         if route_degraded and not dense_results and not sparse_results and not bm25_results:
             raise RuntimeError("检索三路全部失败，无可用结果")
 
@@ -207,12 +227,17 @@ class HybridRetriever(BaseRetriever):
 
         print(f"[Retrieval] 稠密检索: {len(dense_results)} 条, "
               f"稀疏检索: {len(sparse_results)} 条, "
-              f"BM25 检索: {len(bm25_results)} 条")
+              f"BM25 检索: {len(bm25_results)} 条, "
+              f"图谱检索: {len(graph_results)} 条")
 
         # 2. RRF 融合多路结果
         all_results = [dense_results, sparse_results]
         if bm25_results:
             all_results.append(bm25_results)
+        # 图谱路仅在非空时并入融合：空列表对 RRF 名次无贡献，显式不追加可保证未命中/未启用
+        # 场景下融合输入与未引入本功能时完全一致（Property 8）。
+        if graph_results:
+            all_results.append(graph_results)
 
         fused = self._rrf_fusion(all_results, k=config.rrf_k)
         print(f"[Retrieval] RRF 融合后: {len(fused)} 条")

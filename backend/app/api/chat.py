@@ -46,6 +46,9 @@ from app.models.llm.vllm import VllmLLM
 from app.retrieval.base import RetrievalResult
 from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.filter import RetrievalFilter
+from app.retrieval.config import get_platform_config_store
+from app.retrieval.graph_retriever import GraphRetriever
+from app.storage.graph_store import get_graph_store
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.log_safety import sanitize_for_log
 from app.retrieval.multi_kb import KBRetrievalConfig, MultiKBRetriever, MultiKBSearchResult
@@ -669,22 +672,58 @@ def _get_milvus_client() -> MilvusClient:
     return get_milvus_client()
 
 
-def _build_hybrid_retriever() -> HybridRetriever:
-    """构建三路混合检索器（Dense + Sparse + BM25）
+async def _maybe_build_graph_retriever() -> "GraphRetriever | None":
+    """按门控构造图谱召回第四路（design.md 4.5，Property 8 零回归的唯一开关）。
+
+    仅当 **全局开关开启**（``settings.graph_enable``）**且图存储可用**
+    （``get_graph_store()`` 非 None）时返回 ``GraphRetriever``；任一不满足返回 ``None``。
+    返回 None 时 HybridRetriever 不追加第四路，dense/sparse/bm25 + RRF 行为与未引入本功能
+    时逐字节一致（Requirements 7.2 / Property 8）。
+
+    ``hops`` / ``max_chunks`` 取自平台配置（PlatformConfig）。``llm_provider`` 传 None：
+    实体名抽取回退为分词（GraphRetriever 自带的软降级），避免与每请求 LLM 实例耦合；
+    KB 级图谱开关与 store 非空在 GraphRetriever.search 内部再次自门控（双重保险）。
+    """
+    settings = get_settings()
+    # 第一道门控：全局开关。未开启 → 主链路零额外成本（不连 Neo4j、不构造第四路）。
+    if not settings.graph_enable:
+        return None
+    # 第二道门控：图存储可用性。None 表示 Neo4j 不可用 / 驱动未安装 → 不注入第四路。
+    store = await get_graph_store()
+    if store is None:
+        return None
+    manager = get_model_manager()
+    platform = await get_platform_config_store().get_effective()
+    return GraphRetriever(
+        store=store,
+        db_session_factory=async_session,
+        embedder=manager.embedder,
+        llm_provider=None,
+        hops=platform.graph_retriever_hops,
+        max_chunks=platform.graph_retriever_max_chunks,
+    )
+
+
+async def _build_hybrid_retriever() -> HybridRetriever:
+    """构建混合检索器（Dense + Sparse + BM25 + 可选图谱第四路）
 
     BM25 检索器对旧 schema collection 自动降级为空结果，不影响现有功能。
+    图谱第四路仅在全局开关开启且图存储可用时注入；否则 ``graph_retriever=None``，
+    检索行为与未引入图谱功能时完全一致（Property 8 零回归）。
     """
     manager = get_model_manager()
     milvus = _get_milvus_client()
     vector_retriever = VectorRetriever(manager.embedder, milvus)
     sparse_retriever = SparseRetriever(manager.embedder, milvus)
     bm25_retriever = BM25Retriever(milvus)
+    graph_retriever = await _maybe_build_graph_retriever()
     return HybridRetriever(
         vector_retriever=vector_retriever,
         sparse_retriever=sparse_retriever,
         rerank_provider=manager.reranker,
         db_session_factory=async_session,
         bm25_retriever=bm25_retriever,
+        graph_retriever=graph_retriever,
     )
 
 
@@ -772,7 +811,7 @@ async def _retrieve_multi_kb(
             )
 
     # 构建 HybridRetriever
-    hybrid_retriever = _build_hybrid_retriever()
+    hybrid_retriever = await _build_hybrid_retriever()
 
     # 使用 MultiKBRetriever 执行联合检索
     multi_kb = MultiKBRetriever(hybrid_retriever)
@@ -836,7 +875,7 @@ async def _retrieve_chunks(
 
     else:
         # hybrid 模式（默认）：混合检索 + RRF + Rerank
-        hybrid_retriever = _build_hybrid_retriever()
+        hybrid_retriever = await _build_hybrid_retriever()
         # H3：用 search_with_degraded 取真实路级降级（经返回结构承载，并发安全），不再硬编码 False。
         results, degraded = await hybrid_retriever.search_with_degraded(
             query, kb_id, top_k=10, expr=expr, tenant_id=tenant_id
@@ -943,6 +982,7 @@ def _build_agent_runtime(
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     custom_skills: list | None = None,
+    hybrid_retriever: HybridRetriever | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -973,7 +1013,18 @@ def _build_agent_runtime(
         是另一个内部 state，``final_answer`` / ``steps`` 在那上面（与既有约定一致）。
     """
     milvus = _get_milvus_client()
-    hybrid_retriever = _build_hybrid_retriever()
+    # 优先使用调用方在 async 上下文构建好的检索器（含按门控注入的图谱第四路）。
+    # 兜底：未传入时同步构建三路检索器（不含图谱，graph_retriever 默认 None），保证任何
+    # 潜在的同步调用方仍可用且行为与未引入图谱时一致（Property 8）。
+    if hybrid_retriever is None:
+        _manager = get_model_manager()
+        hybrid_retriever = HybridRetriever(
+            vector_retriever=VectorRetriever(_manager.embedder, milvus),
+            sparse_retriever=SparseRetriever(_manager.embedder, milvus),
+            rerank_provider=_manager.reranker,
+            db_session_factory=async_session,
+            bm25_retriever=BM25Retriever(milvus),
+        )
     bm25_retriever = BM25Retriever(milvus)
 
     state = AgentState()
@@ -1135,6 +1186,7 @@ async def _run_agent_nonstream(
         include_session_source=include_session_source,
         attachments=attachments,
         custom_skills=await load_user_custom_skills(owner_user_id),
+        hybrid_retriever=await _build_hybrid_retriever(),
     )
 
     steps_collected: list[dict] = []
@@ -1255,6 +1307,7 @@ async def _stream_response(
             tenant_id, session_id, include_session_source=session_has_files,
             attachments=attachments,
             custom_skills=await load_user_custom_skills(owner_user_id),
+            hybrid_retriever=await _build_hybrid_retriever(),
         )
 
         async def _event_to_queue(event: AgentEvent):
