@@ -28,7 +28,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 PLATFORM_ARG=""
-[[ -n "$ARCH" ]] && PLATFORM_ARG="--platform linux/${ARCH}"
+SAVE_PLATFORM_ARG=""   # 跨架构 save 必须指定平台，否则 containerd 存储会找不到其它架构 manifest 而报错
+[[ -n "$ARCH" ]] && PLATFORM_ARG="--platform linux/${ARCH}" && SAVE_PLATFORM_ARG="--platform linux/${ARCH}"
 
 OUT="dist"
 mkdir -p "$OUT"
@@ -42,7 +43,7 @@ docker build $PLATFORM_ARG $GRAPH_BUILD_ARG -t artoo-backend:latest backend/
 docker build $PLATFORM_ARG -t artoo-frontend:latest frontend/
 
 echo "[2/4] 导出应用镜像..."
-docker save artoo-backend:latest artoo-frontend:latest -o "$OUT/app-images.tar"
+docker save $SAVE_PLATFORM_ARG artoo-backend:latest artoo-frontend:latest -o "$OUT/app-images.tar"
 
 if [[ "$APP_ONLY" == false ]]; then
   echo "[3/4] 拉取并导出中间件镜像..."
@@ -58,7 +59,7 @@ if [[ "$APP_ONLY" == false ]]; then
   for img in "${INFRA_IMAGES[@]}"; do
     docker pull $PLATFORM_ARG "$img"
   done
-  docker save "${INFRA_IMAGES[@]}" -o "$OUT/infra-images.tar"
+  docker save $SAVE_PLATFORM_ARG "${INFRA_IMAGES[@]}" -o "$OUT/infra-images.tar"
 else
   echo "[3/4] 跳过中间件镜像（--app-only）"
 fi
@@ -70,6 +71,11 @@ mkdir -p "$OUT/deploy"
 cp deploy/milvus-user.yaml "$OUT/deploy/"
 cp deploy/install.sh "$OUT/"
 chmod +x "$OUT/install.sh"
+# 前端运行时配置：compose 把 ./frontend/public/config.js 只读挂载进容器覆盖镜像内默认。
+# 离线包必须带上此文件，否则宿主路径不存在时 Docker 会按目录创建，导致挂载失败
+# （Are you trying to mount a directory onto a file）。
+mkdir -p "$OUT/frontend/public"
+cp frontend/public/config.js "$OUT/frontend/public/config.js"
 
 echo ""
 echo "=== 完成 ==="

@@ -81,7 +81,10 @@ Copy-Item .env.example "$OUT\"
 New-Item -ItemType Directory -Force -Path "$OUT\deploy" | Out-Null
 Copy-Item deploy\milvus-user.yaml "$OUT\deploy\"
 Copy-Item deploy\install.sh "$OUT\"
-Copy-Item deploy\install-v1.sh "$OUT\"
+# 前端运行时配置：compose 把 ./frontend/public/config.js 只读挂载进容器覆盖镜像内默认。
+# 离线包必须带上此文件，否则宿主路径不存在时 Docker 会按目录创建，导致挂载失败。
+New-Item -ItemType Directory -Force -Path "$OUT\frontend\public" | Out-Null
+Copy-Item frontend\public\config.js "$OUT\frontend\public\config.js"
 
 if ($Tar) {
     Write-Host "[5/5] 生成压缩包 artoo-deploy.tar.gz..." -ForegroundColor Cyan
@@ -113,10 +116,9 @@ Write-Host ""
 Write-Host "2. 服务器端解压:" -ForegroundColor Cyan
 Write-Host "   mkdir -p artoo && tar -xzf artoo-deploy.tar.gz -C artoo && cd artoo"
 Write-Host ""
-Write-Host "3. 首次部署（脚本会自动授权）:" -ForegroundColor Cyan
-Write-Host "   Docker Compose V2:  bash install.sh"
-Write-Host "   Docker Compose V1:  bash install-v1.sh"
+Write-Host "3. 首次部署（脚本会自动授权，自动探测 Compose V1/V2）:" -ForegroundColor Cyan
+Write-Host "   bash install.sh"
 Write-Host ""
 Write-Host "4. 后续更新（替换 app-images.tar 后）:" -ForegroundColor Cyan
-Write-Host "   bash install-v1.sh update"
+Write-Host "   bash install.sh update"
 Write-Host ""
