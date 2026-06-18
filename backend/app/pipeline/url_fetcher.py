@@ -59,6 +59,7 @@ class FetchedArticle:
         site: 来源站点域名（如 ``mp.weixin.qq.com``）。
         author: 作者 / 公众号名（可能为空）。
         published: 发布时间字符串（可能为空）。
+        cover_image_url: 封面图（og:image）链接，可能为空。
     """
 
     title: str
@@ -67,6 +68,7 @@ class FetchedArticle:
     site: str
     author: str = ""
     published: str = ""
+    cover_image_url: str = ""
     extra: dict = field(default_factory=dict)
 
 
@@ -157,6 +159,7 @@ def _extract_article(html: str, url: str) -> FetchedArticle:
     author = ""
     published = ""
     sitename = ""
+    cover_image_url = ""
     try:
         meta = trafilatura.extract_metadata(html, default_url=url)
         if meta is not None:
@@ -164,8 +167,13 @@ def _extract_article(html: str, url: str) -> FetchedArticle:
             author = (meta.author or "").strip()
             published = (meta.date or "").strip()
             sitename = (meta.sitename or "").strip()
+            cover_image_url = (getattr(meta, "image", "") or "").strip()
     except Exception as e:  # noqa: BLE001 - 元数据为锦上添花，失败仅降级
         logger.warning("URL 元数据提取失败，仅使用正文: %s", e)
+
+    # 元数据无 image 时，从原始 HTML 兜底解析 og:image / twitter:image。
+    if not cover_image_url:
+        cover_image_url = _extract_og_image(html)
 
     site = urlparse(url).netloc
     if not title:
@@ -177,7 +185,7 @@ def _extract_article(html: str, url: str) -> FetchedArticle:
     )
     return FetchedArticle(
         title=title, markdown=markdown, url=url, site=site,
-        author=author, published=published,
+        author=author, published=published, cover_image_url=cover_image_url,
     )
 
 
@@ -216,6 +224,63 @@ async def fetch_article(url: str) -> FetchedArticle:
     normalized = _normalize_url(url)
     html = await _download_html(normalized)
     return _extract_article(html, normalized)
+
+
+# og:image / twitter:image 的 meta 标签匹配（容忍属性顺序与单双引号）。
+_OG_IMAGE_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*>',
+    re.IGNORECASE,
+)
+_CONTENT_ATTR_RE = re.compile(r'content=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# 封面图下载体积上限（字节）：超大图不下载，避免拖慢转存。
+_MAX_COVER_BYTES = 5 * 1024 * 1024
+
+
+def _extract_og_image(html: str) -> str:
+    """从 HTML 兜底解析封面图链接（og:image / twitter:image）。无则返回空串。"""
+    if not html:
+        return ""
+    m = _OG_IMAGE_RE.search(html)
+    if not m:
+        return ""
+    c = _CONTENT_ATTR_RE.search(m.group(0))
+    return c.group(1).strip() if c else ""
+
+
+async def download_image(image_url: str, *, referer: str | None = None) -> bytes | None:
+    """下载封面图字节（带 referer 绕过防盗链、体积上限、类型校验）。
+
+    失败返回 None（封面图为锦上添花，绝不阻断转存主流程）。``referer`` 传原文链接，
+    用于绕过微信公众号等的图片防盗链。
+    """
+    url = (image_url or "").strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+
+    headers = dict(_DEFAULT_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    try:
+        async with httpx.AsyncClient(
+            timeout=_FETCH_TIMEOUT, follow_redirects=True, headers=headers, max_redirects=5
+        ) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            return None
+        ctype = resp.headers.get("content-type", "").lower()
+        if ctype and "image" not in ctype:
+            return None
+        data = resp.content
+        if not data or len(data) > _MAX_COVER_BYTES:
+            return None
+        return data
+    except Exception as e:  # noqa: BLE001 - 封面图下载失败静默降级
+        logger.warning("封面图下载失败 %s: %s", url, e)
+        return None
 
 
 def safe_filename_from_title(title: str, *, max_len: int = 120) -> str:

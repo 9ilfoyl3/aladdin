@@ -144,41 +144,83 @@ _ALLOWED_EXTENSIONS = {
     "mp3", "wav", "m4a", "flac", "ogg",
 }
 
-async def _generate_and_store_thumbnail(doc_id: str, file_type: str, content: bytes) -> None:
-    """从上传字节生成缩略图并存入 MinIO（仅 PDF 渲染首页；图片预览直接返回原件）。
+async def _generate_and_store_thumbnail(
+    doc_id: str,
+    file_type: str,
+    content: bytes,
+    cover_image: bytes | None = None,
+) -> None:
+    """生成缩略图并存入 MinIO。失败不影响上传主流程（事件循环外渲染）。
 
-    在事件循环外渲染（to_thread），失败不影响上传主流程。
+    - PDF：fitz 渲染首页。
+    - 图片：预览直接返回原件，无需缩略图。
+    - md / txt：方案 A 优先用 ``cover_image``（链接转存抓到的封面图）转 PNG；
+      无封面图时方案 B 兜底——用 fitz 把「标题 + 正文摘要」渲染成文字卡片，
+      保证所有 md/txt 文档都有一致预览图（含用户手动上传的）。
     """
-    if file_type != "pdf":
-        return
     store = get_object_store()
     if store is None:
         return
 
-    def _render() -> bytes | None:
-        import fitz
+    if file_type == "pdf":
+        def _render_pdf() -> bytes | None:
+            import fitz
 
-        try:
-            pdf_doc = fitz.open(stream=content, filetype="pdf")
-            page = pdf_doc[0]
-            zoom = 200.0 / page.rect.width
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-            data = pix.tobytes("png")
-            pdf_doc.close()
-            return data
-        except Exception as e:  # noqa: BLE001
-            logger.warning("生成缩略图失败 doc_id=%s: %s", doc_id, e)
-            return None
+            try:
+                pdf_doc = fitz.open(stream=content, filetype="pdf")
+                page = pdf_doc[0]
+                zoom = 200.0 / page.rect.width
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                data = pix.tobytes("png")
+                pdf_doc.close()
+                return data
+            except Exception as e:  # noqa: BLE001
+                logger.warning("生成 PDF 缩略图失败 doc_id=%s: %s", doc_id, e)
+                return None
+
+        png_bytes = await asyncio.to_thread(_render_pdf)
+    elif file_type in ("md", "txt"):
+        def _render_text() -> bytes | None:
+            from app.pipeline.thumbnail import image_bytes_to_png, render_text_card
+
+            # 方案 A：封面图优先。
+            if cover_image:
+                png = image_bytes_to_png(cover_image)
+                if png:
+                    return png
+            # 方案 B：文字卡片兜底。标题取首个 markdown 一级标题或首行，正文取全文。
+            text = content.decode("utf-8", errors="ignore")
+            title, body = _split_title_body(text)
+            return render_text_card(title, body)
+
+        png_bytes = await asyncio.to_thread(_render_text)
+    else:
+        return
 
     try:
-        png_bytes = await asyncio.to_thread(_render)
         if png_bytes:
             await store.put_bytes(
                 thumbnail_object_key(doc_id), png_bytes, content_type="image/png"
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("存储缩略图失败 doc_id=%s: %s", doc_id, e)
+
+
+def _split_title_body(text: str) -> tuple[str, str]:
+    """从 markdown/纯文本中拆出标题与正文，用于文字卡片渲染。
+
+    标题取首个一级标题（``# xxx``）或首个非空行；正文为去掉该标题后的剩余文本。
+    """
+    title = ""
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        title = line.lstrip("#").strip() or line
+        break
+    return title, text
 
 
 # ============================================================
@@ -570,6 +612,7 @@ async def import_document_from_url(
     """
     from app.pipeline.url_fetcher import (
         UrlFetchError,
+        download_image,
         fetch_article,
         safe_filename_from_title,
     )
@@ -655,6 +698,13 @@ async def import_document_from_url(
     except Exception:
         await _safe_remove_objects([object_key])
         raise
+
+    # 生成缩略图：方案 A 优先用文章封面图（og:image，带 referer 绕过防盗链），
+    # 下载失败则由 _generate_and_store_thumbnail 内部回退方案 B（fitz 文字卡片）。
+    cover_bytes: bytes | None = None
+    if article.cover_image_url:
+        cover_bytes = await download_image(article.cover_image_url, referer=article.url)
+    await _generate_and_store_thumbnail(doc_id, ext, content, cover_image=cover_bytes)
 
     # 后台触发管道处理（与上传同一入队/回退逻辑）。
     await _enqueue_or_fallback(
@@ -1417,7 +1467,9 @@ async def preview_document_file(
         )
 
     # PDF 类型：返回缩略图（上传时已预生成）
-    if doc.file_type == "pdf":
+    # PDF / Markdown / TXT 类型：返回缩略图（上传/转存时已预生成）。
+    # md/txt 的缩略图为「封面图（链接转存）或文字卡片（fitz 渲染）」，与 PDF 走同一存取链路。
+    if doc.file_type in ("pdf", "md", "txt"):
         thumb_key = thumbnail_object_key(doc_id)
         if not await store.exists(thumb_key):
             raise HTTPException(status_code=404, detail="缩略图不可用")
