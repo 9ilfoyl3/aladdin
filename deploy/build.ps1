@@ -4,10 +4,10 @@
 # 产物 dist\ 目录可整体拷到内网服务器，再执行 install.sh 部署。
 #
 # 用法：
-#   .\deploy\build.ps1                  # 当前架构，含中间件+Neo4j 镜像（首次部署），仅产出 dist\
+#   .\deploy\build.ps1                  # 当前架构，含中间件镜像（首次部署），仅产出 dist\
 #   .\deploy\build.ps1 -Arch arm64      # 指定目标架构（amd64 | arm64）
 #   .\deploy\build.ps1 -AppOnly         # 只打应用镜像（迭代更新，不含中间件）
-#   .\deploy\build.ps1 -NoGraph         # 排除知识图谱（不装 Neo4j 驱动、不导出 Neo4j 镜像）
+#   .\deploy\build.ps1 -WithGraph       # 额外安装知识图谱依赖（Neo4j 驱动）并导出 Neo4j 镜像
 #   .\deploy\build.ps1 -Tar             # 打包完自动压缩为 artoo-deploy.tar.gz
 #
 # 默认只产出 dist\，不压缩——方便先改 dist\ 里的配置（如 .env.example、
@@ -16,7 +16,7 @@
 param(
     [string]$Arch = "",        # 留空 = 跟随本机架构
     [switch]$AppOnly,          # 仅应用镜像
-    [switch]$NoGraph,          # 排除知识图谱（不装 Neo4j 驱动、不导出 Neo4j 镜像）
+    [switch]$WithGraph,        # 额外安装知识图谱依赖（Neo4j 驱动）并导出 Neo4j 镜像
     [switch]$Tar               # 打包完自动压缩为 artoo-deploy.tar.gz
 )
 
@@ -36,9 +36,9 @@ Write-Host "=== Artoo 离线包构建 ($archLabel) ===" -ForegroundColor Green
 
 Write-Host "[1/4] 构建应用镜像..." -ForegroundColor Cyan
 $graphBuildArgs = @()
-if ($NoGraph) {
-    $graphBuildArgs = @("--build-arg", "WITH_GRAPH=false")
-    Write-Host "  （排除知识图谱依赖）" -ForegroundColor DarkGray
+if ($WithGraph) {
+    $graphBuildArgs = @("--build-arg", "WITH_GRAPH=true")
+    Write-Host "  （含知识图谱依赖：Neo4j 驱动）" -ForegroundColor DarkGray
 }
 docker build @platformArgs @graphBuildArgs -t artoo-backend:latest backend/
 if ($LASTEXITCODE -ne 0) { throw "后端镜像构建失败" }
@@ -57,7 +57,7 @@ if (-not $AppOnly) {
         "quay.io/coreos/etcd:v3.5.25",
         "minio/minio:RELEASE.2024-05-28T17-19-04Z"
     )
-    if (-not $NoGraph) {
+    if ($WithGraph) {
         $infraImages += "neo4j:5-community"
         Write-Host "  （含 Neo4j 镜像）" -ForegroundColor DarkGray
     }

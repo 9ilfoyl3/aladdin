@@ -5,10 +5,10 @@
 # 产物 dist/ 目录可整体拷到内网服务器，再执行 install.sh 部署。
 #
 # 用法：
-#   deploy/build.sh                  # 当前架构，含中间件+Neo4j 镜像（首次部署）
+#   deploy/build.sh                  # 当前架构，含中间件镜像（首次部署）
 #   deploy/build.sh --arch arm64     # 指定目标架构（amd64 | arm64）
 #   deploy/build.sh --app-only       # 只打应用镜像（迭代更新，不含中间件）
-#   deploy/build.sh --no-graph       # 排除知识图谱（不装 Neo4j 驱动、不导出 Neo4j 镜像）
+#   deploy/build.sh --with-graph     # 额外安装知识图谱依赖（Neo4j 驱动）并导出 Neo4j 镜像
 # ============================================================
 set -euo pipefail
 
@@ -16,13 +16,13 @@ cd "$(dirname "$0")/.."   # 切到项目根目录
 
 ARCH=""           # 留空 = 跟随本机架构
 APP_ONLY=false
-WITH_GRAPH=true   # 默认安装知识图谱依赖（Neo4j 驱动）。--no-graph 可关闭
+WITH_GRAPH=false  # 是否在后端镜像内安装知识图谱依赖（Neo4j 驱动）。--with-graph 可开启
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --app-only) APP_ONLY=true; shift ;;
-    --no-graph) WITH_GRAPH=false; shift ;;
+    --with-graph) WITH_GRAPH=true; shift ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
