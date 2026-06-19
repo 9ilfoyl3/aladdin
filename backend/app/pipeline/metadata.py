@@ -33,11 +33,9 @@ _HEADING_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
         r"^[^\S\n]*(第[一二三四五六七八九十百千\d]+[节部]分?)(?:[^\S\n]+\S[^\n]*)?$",
         re.MULTILINE,
     )),
-    # 中文条: 第X条
-    (3, re.compile(
-        r"^[^\S\n]*(第[一二三四五六七八九十百千\d]+条)(?:[^\S\n]+\S[^\n]*)?$",
-        re.MULTILINE,
-    )),
+    # 注意：「第X条」不作为标题层级（与 chunker._NONMD_HEADING_PATTERNS 保持一致）。
+    # 法条「第X条　正文…」条号与正文同行，若当标题会把整段正文吸入 section_path，
+    # 污染 context_header。与 WeKnora ChineseChapterPattern（仅 章/节/節/部分/篇）对齐。
     # 中文数字序号: 一、 二、 三、
     (2, re.compile(r"^[^\S\n]*([一二三四五六七八九十]+)、([^\n]+)$", re.MULTILINE)),
     # 带括号中文序号: （一） （二）
@@ -51,6 +49,11 @@ _HEADING_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
     # 数字加括号: 1） 2） 3）
     (4, re.compile(r"^[^\S\n]*(\d+)[）\)][^\S\n]*([^\n]+)$", re.MULTILINE)),
 ]
+
+# 章节标题文字长度上限。超过此长度的「标题」实为「序号 + 正文同行」的正文行
+# （法条款项、条文等），不应进入 section_path，否则污染 breadcrumb。
+# 取 40：章/节名与常规短标题远低于此值，正文行远高于此值，区分度足够。
+_MAX_HEADING_LEN = 40
 
 
 @dataclass
@@ -196,7 +199,15 @@ class MetadataExtractor:
         headings: list[tuple[int, int, str]] = []
         for level, pattern in _HEADING_PATTERNS:
             for match in pattern.finditer(full_text):
-                headings.append((match.start(), level, match.group(0).strip()))
+                title = match.group(0).strip()
+                # 长度护栏：真正的章节标题都很短（章/节名、短编号标题）。若匹配到的
+                # 标题文字过长，说明这是「序号 + 正文同行」的正文行（如法条款项
+                # 「（二）在保险公司被撤销时…救济；」），不应作为章节标题，否则会把
+                # 整段正文灌入 section_path 污染 breadcrumb。跳过即可（与「第X条」
+                # 不进标题层级同理，是对所有标题模式的通用防御）。
+                if len(title) > _MAX_HEADING_LEN:
+                    continue
+                headings.append((match.start(), level, title))
 
         headings.sort(key=lambda x: x[0])
         return headings

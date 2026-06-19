@@ -54,18 +54,33 @@ _MD_TABLE_LINE_RE = re.compile(r'^\|.*\|$')
 # Markdown 标题正则：匹配 # ~ ###### 开头的行
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
 
+# 「纯章/节标题 section」长度上限（用于 _is_section_heading 硬边界判定）。
+# 真正的标题行很短；超过此值的 section 多为「标题 + 一大段正文」（长篇小说常见），
+# 不应作为标题前缀，须交由尺寸切分。设 120：章/节名远低于此，正文段远高于此。
+_MAX_HEADING_SECTION = 120
+
+# 标题文字长度上限（用于 _HeaderTracker 非 Markdown 标题识别）。章/节标题文字
+# 极少超过此值；「序号 + 正文同行」的正文行（如小说「一、…一整句」、款项「（X）…」）
+# 会超过，应排除以免污染 breadcrumb。与 metadata._MAX_HEADING_LEN 取值一致。
+_MAX_HEADING_LEN = 40
+
 # 非 Markdown 章节标记识别（中/英/德），用于在「无 Markdown 标题」的文档中
 # 仍能为 child chunk 生成章节面包屑（context_header），提升检索时的上下文。
 # 每项为 (level, 正则, 是否带捕获组标题)。level 越小层级越高。
 # 设计要点：仅在文档不含 Markdown 标题时启用（见 _HeaderTracker），因此完全
 # 不影响 Markdown 文档的既有 breadcrumb 行为（零回归）。
 _NONMD_HEADING_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
-    # 中文章/编（一级）：第X章 / 第X编
-    (1, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+[章编](?:[ \t]+\S.*)?)$')),
+    # 中文章/编（一级）：第X章 / 第X编。标题文字分隔符用 [^\S\n]（任意空白除换行，
+    # 含全角空格 U+3000），法条标题常写作「第一章　总则」（全角空格分隔），
+    # 若只认半角空格/制表符会漏匹配，导致 breadcrumb 丢失章节上下文。
+    (1, re.compile(r'^[^\S\n]*(第[一二三四五六七八九十百千零〇\d]+[章编](?:[^\S\n]+\S.*)?)$')),
     # 中文节/部分（二级）：第X节 / 第X部分
-    (2, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+[节節部]分?(?:[ \t]+\S.*)?)$')),
-    # 中文条（三级）：第X条
-    (3, re.compile(r'^[ \t]*(第[一二三四五六七八九十百千零〇\d]+条(?:[ \t]+\S.*)?)$')),
+    (2, re.compile(r'^[^\S\n]*(第[一二三四五六七八九十百千零〇\d]+[节節部]分?(?:[^\S\n]+\S.*)?)$')),
+    # 注意：「第X条」不作为标题层级。法条的「条号 + 正文」同处一行（如
+    # 「第十二条　人身保险的投保人…」），一旦当标题就会把整段正文卷入
+    # breadcrumb，污染 context_header。这与 WeKnora 结构感知一致——其
+    # ChineseChapterPattern 只含 章/节/節/部分/篇，不含「条」。「条」仍作为
+    # 切分边界保留在 _STRUCTURE_PATTERNS 中，只是不进标题栈。
     # 英文章节（一级）：Chapter/Section/Part N
     (1, re.compile(r'^[ \t]*((?:Chapter|Section|Part)\s+(?:\d+|[IVXLCDM]+)\b.*)$', re.IGNORECASE)),
     # 德文章节（一级）：Kapitel/Abschnitt/Teil N
@@ -212,7 +227,13 @@ class _HeaderTracker:
             for level, pattern in _NONMD_HEADING_PATTERNS:
                 m = pattern.match(line)
                 if m:
-                    self.push(level, m.group(1).strip(), is_md=False)
+                    title = m.group(1).strip()
+                    # 长度护栏：标题文字过长说明是「序号 + 正文同行」的正文行
+                    # （如小说里「一、成数六，叫作天一生水…」一整句对话），不应
+                    # 进标题栈污染 breadcrumb。章/节标题极少超过 _MAX_HEADING_LEN。
+                    if len(title) > _MAX_HEADING_LEN:
+                        return False
+                    self.push(level, title, is_md=False)
                     return True
         return False
 
@@ -654,7 +675,12 @@ class HierarchicalChunker:
 
     def _split_child_chunks(self, text: str) -> list[str]:
         """将父块切分为子块，保护表格完整性，优先按结构标记切分"""
-        if len(text) <= self.child_size:
+        # 结构标记（如「第X条」、编号列表）检测：含结构标记时即使总长 ≤ child_size
+        # 也要按结构边界对齐切分，避免多条挤在一个子块、或子块从条中间开始。
+        # 这贯彻 WeKnora mergeUnits 的「边界优先于尺寸」原则到 child 级。
+        has_structure = bool(_STRUCTURE_RE.search(text))
+
+        if len(text) <= self.child_size and not has_structure:
             return [text]
 
         # 如果整个父块是 Markdown 表格，不再细分（loader 已按行分组）
@@ -680,24 +706,157 @@ class HierarchicalChunker:
         if _MD_TABLE_LINE_RE.match(text.strip().split('\n')[0].strip()):
             return [text]
 
-        # 如果父块内有结构标记，先按结构切分
-        has_structure = bool(_STRUCTURE_RE.search(text))
+        # 如果父块内有结构标记，按结构边界对齐切分，再贪心打包到 child_size
         if has_structure:
             sections = self._split_by_structure(text)
-            # 对过长的 section 再按字符数切分
-            chunks: list[str] = []
-            for section in sections:
-                if len(section) <= self.child_size:
-                    chunks.append(section)
-                elif self._is_md_table(section):
-                    chunks.append(section)
-                else:
-                    chunks.extend(self._split_child_by_size(section))
-            chunks = self._merge_short_chunks(chunks)
+            chunks = self._pack_child_sections(sections)
             return chunks if chunks else [text]
 
         # 无结构标记，按字符数+句子边界切分
         return self._split_child_by_size(text)
+
+    def _pack_child_sections(self, sections: list[str]) -> list[str]:
+        """将结构切分出的 section（如逐条法条）打包为子块。
+
+        贯彻「结构边界优先于尺寸」：
+        - 单个 section ≤ child_size：作为最小完整单元，绝不从中间切断；相邻的
+          短 section 贪心累积到接近 child_size 后才落块（多个短条合并，但每块
+          仍以结构标记对齐起始，不会从条中间开始）。
+        - 单个 section > child_size：先把已累积的块落盘，再对该超长 section 在
+          其内部按字符/句子边界切分（长条文内部分割，仍以该条起始对齐）。
+
+        相比旧逻辑（父块 ≤ child_size 时整块返回、多条挤一块且可能从条中间起），
+        本方法保证每个子块都从某个结构标记（条/编号）开始，提升法条等结构化文档
+        的检索对齐度。对无结构文档不会触达（调用方已用 has_structure 守卫）。
+
+        章/节标题（第X章 / 第X节 等）视为「硬边界」：标题归属其**后面**的条文，
+        与前面的条文分属不同子块。否则贪心累积会把跨章节标题吸入上一块，导致
+        _HeaderTracker 喂入后 breadcrumb 跳到下一章节、与块内容错配。连续的标题
+        （如「第二章」紧跟「第一节」）累积在一起，作为后续条文的共同前缀，不会
+        各自落成孤立碎片。
+        """
+        chunks: list[str] = []
+        current = ""
+        # current 是否已含正文（非纯标题）。用于判断遇到新标题时是否需要落盘：
+        # 仅当 current 已有正文时，新标题才开启新块；若 current 仅有标题，则把
+        # 连续标题累积在一起（章+节作为同一前缀），避免孤立标题碎片。
+        has_body = False
+
+        for section in sections:
+            if not section:
+                continue
+
+            # 超长 section 优先处理（绝对底线，先于 heading 判断）：
+            # 长篇小说等「章标题 + 一大段无内部结构正文」会被 _split_by_structure
+            # 切成单个超大 section（标题在首行，但整段达 parent_size）。必须在此
+            # 强制按尺寸切分，否则会被误当「标题前缀」整段塞入 current 永不细分，
+            # 产出等同父块大小的巨型子块。
+            if len(section) > self.child_size and not self._is_md_table(section):
+                if current and has_body:
+                    # current 是正文：落盘后再切超长 section
+                    chunks.append(current)
+                    current = ""
+                    has_body = False
+                elif current:
+                    # current 仅有标题（如「第十七章 抵押权」）：作为前缀并入超长
+                    # section 一起切，避免孤立标题碎片，且让切出的首块带章节标题。
+                    section = current + "\n" + section
+                    current = ""
+                chunks.extend(self._split_child_by_size(section))
+                continue
+
+            is_heading = self._is_section_heading(section)
+
+            # 章/节标题：硬边界。仅当 current 已累积正文时才落盘开启新块；
+            # 否则与已有标题累积成共同前缀（标题归属后文）。
+            if is_heading:
+                if has_body:
+                    # current 已有正文 → 落盘，新标题起头
+                    chunks.append(current)
+                    current = section
+                    has_body = False
+                else:
+                    # current 仅有标题：尝试与新标题累积成共同前缀，但受 child_size
+                    # 约束。目录页（连续上百个「第X章/第X节」标题）会在此累积，若
+                    # 不设上限会攒成超大块；超限则先落盘已累积的标题，再起新块。
+                    candidate = (current + "\n" + section) if current else section
+                    if len(candidate) <= self.child_size:
+                        current = candidate
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = section
+                continue
+
+            # 尝试把 section 累积到当前块（用换行拼接，保留可读边界）
+            candidate = (current + "\n" + section) if current else section
+            if len(candidate) <= self.child_size:
+                current = candidate
+                has_body = True
+            else:
+                # 当前块已接近上限，落盘并以新 section 起头（保证边界对齐）
+                if current:
+                    chunks.append(current)
+                current = section
+                has_body = True
+
+        if current:
+            chunks.append(current)
+
+        # 后处理：把残留的「过小纯标题块」并入其后一块（标题归属后文，符合
+        # 「标题作为后续内容前缀」的设计）。处理目录尾部、连续标题等边缘情形
+        # 产生的孤立短标题碎片。仅合并 < min_child_size 的块，对正常块无影响。
+        return self._merge_tiny_forward(chunks)
+
+    def _merge_tiny_forward(self, chunks: list[str]) -> list[str]:
+        """把过小的块并入其**后**一块（与 _merge_short_chunks 的向前合并相反）。
+
+        用于 _pack_child_sections：孤立的短章节标题应作为下一块的前缀，而非
+        并入上一块（那样会让标题归属错误的上文、且可能跨章节）。
+        """
+        if not chunks:
+            return chunks
+        out: list[str] = []
+        carry = ""
+        for chunk in chunks:
+            if carry:
+                chunk = carry + "\n" + chunk
+                carry = ""
+            # 过小且不是最后一块时，暂存到下一块
+            if len(chunk) < self.min_child_size:
+                carry = chunk
+            else:
+                out.append(chunk)
+        if carry:
+            # 末尾残留的过小块：并入上一块（已无后块可并）
+            if out:
+                out[-1] = out[-1] + "\n" + carry
+            else:
+                out.append(carry)
+        return out
+
+    @staticmethod
+    def _is_section_heading(section: str) -> bool:
+        """判断 section 是否为「短的纯章/节级标题」（用于 _pack_child_sections 硬边界）。
+
+        识别 Markdown 标题、以及 _NONMD_HEADING_PATTERNS 中 level ≤ 2 的章/节/编
+        标记（第X章 / 第X节 等）。注意：「第X条」已不在标题层级内（见模块顶部
+        说明），因此条文不会被判为章节标题，仅作为普通可累积单元。
+
+        长度护栏：仅当整个 section 较短时才视为标题。长篇小说常出现「章标题 +
+        一大段正文」被切到同一 section（首行是标题但整体很长），若仅凭首行判定
+        会把整段正文误当标题前缀而永不细分。要求 section 整体 ≤ _MAX_HEADING_SECTION
+        才算标题，超长者交由调用方按尺寸切分。
+        """
+        if len(section) > _MAX_HEADING_SECTION:
+            return False
+        first_line = section.lstrip().split('\n', 1)[0]
+        if _HEADING_RE.match(first_line):
+            return True
+        for level, pattern in _NONMD_HEADING_PATTERNS:
+            if level <= 2 and pattern.match(first_line):
+                return True
+        return False
 
     def _merge_short_chunks(self, chunks: list[str]) -> list[str]:
         """合并过短的子块到相邻块，避免产生无信息量的碎片"""
