@@ -42,6 +42,9 @@ _VALID_GRANULARITIES = (EXTRACT_GRANULARITY_PARENT, EXTRACT_GRANULARITY_CHILD)
 _ALIAS_SIM_THRESHOLD_LO = 0.0
 _ALIAS_SIM_THRESHOLD_HI = 1.0
 
+# 事件相关正整数字段的下界（上限不强约束，仅要求 >= 1）。
+_EVENT_INT_LO = 1
+
 # KB config 中承载图谱配置的子键。
 GRAPH_CONFIG_KEY = "graph"
 
@@ -57,6 +60,13 @@ DEFAULT_EXTRACT_MODEL_ID: str | None = None  # None 表示用 KB 默认 LLM
 DEFAULT_ENABLE_ALIAS_DEDUP = True
 DEFAULT_ALIAS_SIM_THRESHOLD = 0.92
 
+# 事件中心图谱开关与抽取/检索参数默认值（design.md 3.4）。
+DEFAULT_ENABLE_EVENTS = True            # 是否抽取事件（关闭则退回纯实体图，便于 A/B）
+DEFAULT_MAX_EVENTS_PER_CHUNK = 3        # 单 chunk 事件抽取上限
+DEFAULT_EVENT_SEED_K = 20               # 两入口各自的种子事件上限
+DEFAULT_EVENT_MAX_EXPAND = 50           # 多跳扩展事件上限
+DEFAULT_EVENT_COARSE_TOP_K = 15         # 粗排后进入回取的事件上限
+
 
 class GraphKBConfig:
     """KB 级知识图谱有效配置（design.md 3.3）。
@@ -70,6 +80,11 @@ class GraphKBConfig:
     - ``extract_model_id``：指定抽取用 LLM；None 用 KB 默认。
     - ``enable_alias_dedup``：是否启用向量别名消歧（默认 True）。
     - ``alias_sim_threshold``：别名合并相似度阈值（默认 0.92，范围 [0, 1]）。
+    - ``enable_events``：是否抽取事件（默认 True；关闭则退回纯实体图，便于 A/B）。
+    - ``max_events_per_chunk``：单 chunk 事件抽取上限（默认 3，>= 1）。
+    - ``event_seed_k``：两入口各自的种子事件上限（默认 20，>= 1）。
+    - ``event_max_expand``：多跳扩展事件上限（默认 50，>= 1）。
+    - ``event_coarse_top_k``：粗排后进入回取的事件上限（默认 15，>= 1）。
     """
 
     __slots__ = (
@@ -80,6 +95,11 @@ class GraphKBConfig:
         "extract_model_id",
         "enable_alias_dedup",
         "alias_sim_threshold",
+        "enable_events",
+        "max_events_per_chunk",
+        "event_seed_k",
+        "event_max_expand",
+        "event_coarse_top_k",
     )
 
     def __init__(
@@ -92,6 +112,11 @@ class GraphKBConfig:
         extract_model_id: str | None = DEFAULT_EXTRACT_MODEL_ID,
         enable_alias_dedup: bool = DEFAULT_ENABLE_ALIAS_DEDUP,
         alias_sim_threshold: float = DEFAULT_ALIAS_SIM_THRESHOLD,
+        enable_events: bool = DEFAULT_ENABLE_EVENTS,
+        max_events_per_chunk: int = DEFAULT_MAX_EVENTS_PER_CHUNK,
+        event_seed_k: int = DEFAULT_EVENT_SEED_K,
+        event_max_expand: int = DEFAULT_EVENT_MAX_EXPAND,
+        event_coarse_top_k: int = DEFAULT_EVENT_COARSE_TOP_K,
     ):
         self.enabled = enabled
         self.entity_types = entity_types if entity_types is not None else list(DEFAULT_ENTITY_TYPES)
@@ -100,6 +125,11 @@ class GraphKBConfig:
         self.extract_model_id = extract_model_id
         self.enable_alias_dedup = enable_alias_dedup
         self.alias_sim_threshold = alias_sim_threshold
+        self.enable_events = enable_events
+        self.max_events_per_chunk = max_events_per_chunk
+        self.event_seed_k = event_seed_k
+        self.event_max_expand = event_max_expand
+        self.event_coarse_top_k = event_coarse_top_k
 
     def to_dict(self) -> dict:
         """序列化为可写入 ``config["graph"]`` 的 dict。"""
@@ -111,6 +141,11 @@ class GraphKBConfig:
             "extract_model_id": self.extract_model_id,
             "enable_alias_dedup": self.enable_alias_dedup,
             "alias_sim_threshold": self.alias_sim_threshold,
+            "enable_events": self.enable_events,
+            "max_events_per_chunk": self.max_events_per_chunk,
+            "event_seed_k": self.event_seed_k,
+            "event_max_expand": self.event_max_expand,
+            "event_coarse_top_k": self.event_coarse_top_k,
         }
 
     def __eq__(self, other: object) -> bool:
@@ -202,6 +237,16 @@ def _coerce_threshold(value: object) -> float:
     return numeric
 
 
+def _coerce_positive_int(value: object, default: int, field: str) -> int:
+    """读出正整数字段：缺失/None 用默认；int（非 bool）且 >= 1 合法，否则回退默认并记 WARNING。"""
+    if value is _MISSING or value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value < _EVENT_INT_LO:
+        _log_fallback(field, value, default)
+        return default
+    return value
+
+
 def _log_fallback(field: str, original: object, fallback: object) -> None:
     """记录一条 KB 图谱配置字段兜底回退的 WARNING（含 field、原值、回退值）。"""
     logger.warning(
@@ -222,6 +267,9 @@ def read_graph_config(kb_config: dict | None) -> GraphKBConfig:
     - ``extract_granularity``：必须为 ``"parent"`` | ``"child"``，否则回退 ``"parent"``。
     - ``extract_model_id``：None 或非空字符串合法；其余回退 None。
     - ``alias_sim_threshold``：[0, 1] 内的数值合法；其余回退 0.92。
+    - ``enable_events``：必须为 bool，否则回退默认（True）。
+    - ``max_events_per_chunk`` / ``event_seed_k`` / ``event_max_expand`` /
+      ``event_coarse_top_k``：必须为 >= 1 的整数（非 bool），否则回退各自默认。
 
     Args:
         kb_config: ``KnowledgeBase.config`` 顶层 dict（可为 None，表示 KB 无配置）。
@@ -243,6 +291,19 @@ def read_graph_config(kb_config: dict | None) -> GraphKBConfig:
             graph.get("enable_alias_dedup", _MISSING), DEFAULT_ENABLE_ALIAS_DEDUP, "enable_alias_dedup"
         ),
         alias_sim_threshold=_coerce_threshold(graph.get("alias_sim_threshold", _MISSING)),
+        enable_events=_coerce_bool(graph.get("enable_events", _MISSING), DEFAULT_ENABLE_EVENTS, "enable_events"),
+        max_events_per_chunk=_coerce_positive_int(
+            graph.get("max_events_per_chunk", _MISSING), DEFAULT_MAX_EVENTS_PER_CHUNK, "max_events_per_chunk"
+        ),
+        event_seed_k=_coerce_positive_int(
+            graph.get("event_seed_k", _MISSING), DEFAULT_EVENT_SEED_K, "event_seed_k"
+        ),
+        event_max_expand=_coerce_positive_int(
+            graph.get("event_max_expand", _MISSING), DEFAULT_EVENT_MAX_EXPAND, "event_max_expand"
+        ),
+        event_coarse_top_k=_coerce_positive_int(
+            graph.get("event_coarse_top_k", _MISSING), DEFAULT_EVENT_COARSE_TOP_K, "event_coarse_top_k"
+        ),
     )
 
 

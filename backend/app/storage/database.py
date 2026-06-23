@@ -147,6 +147,9 @@ async def _migrate_db() -> None:
         "ALTER TABLE platform_configs ADD COLUMN graph_retriever_max_chunks INTEGER",
         # ===== asr-config：ASR 配置表 vendor 列（存量库若已建表则补列） =====
         "ALTER TABLE asr_configs ADD COLUMN vendor VARCHAR(50)",
+        # ===== event-centric-graph：抽取台账新增事件计数列（存量库补列，缺省 0） =====
+        # create_all 只建缺失整表、不给存量表补列；新增 events_count 供 worker 双写后累加。
+        "ALTER TABLE graph_extract_jobs ADD COLUMN events_count INTEGER NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:

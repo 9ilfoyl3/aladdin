@@ -82,11 +82,33 @@ class ExtractedRelation:
 
 
 @dataclass
+class ExtractedEvent:
+    """从一个 chunk 抽取的完整事件（归一化前）。
+
+    对齐 design.md 3.1.1 与 Requirements 1.1 / 1.2：事件是「主谓宾 + 时地」齐全的
+    完整语义单元，作为新的图谱检索单元。``entity_names`` 须落在本 chunk 已抽实体集合内
+    （由 ``filter_events`` 约束，无悬挂关联）。
+
+    Attributes:
+        title: 事件短标题。
+        summary: 一句话摘要。
+        content: 完整语义内容（主谓宾时地齐全），为空的事件会被 ``filter_events`` 丢弃。
+        entity_names: 关联实体名列表（须落在本 chunk 已抽实体集合内）。
+    """
+
+    title: str
+    summary: str
+    content: str
+    entity_names: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ExtractedGraph:
-    """一次抽取得到的图（实体 + 关系）。"""
+    """一次抽取得到的图（实体 + 关系 + 事件）。"""
 
     entities: list[ExtractedEntity]
     relations: list[ExtractedRelation]
+    events: list[ExtractedEvent] = field(default_factory=list)
 
 
 class GraphExtractError(Exception):
@@ -300,6 +322,42 @@ def _coerce_confidence(value: object) -> float:
     return c
 
 
+def parse_events(text: str) -> list[ExtractedEvent]:
+    """从事件抽取步骤的 LLM 输出文本解析事件列表（容错，不抛错；解析不到返回 []）。
+
+    复用与实体/关系一致的宽松解析（剥 fence、宽松定位 JSON、容忍数组/单对象包裹）。
+
+    字段兜底：
+    - ``content`` 缺失/空则丢弃该条（事件无完整语义内容则无意义；与 ``filter_events``
+      的空 content 丢弃语义一致，这里提前剔除）。
+    - ``title``/``summary`` 缺失回退空字符串。
+    - 关联实体名键兼容 ``entities`` 与 ``entity_names`` 两种写法，兜底为字符串列表。
+      实体名是否落在已抽实体集合内由 ``filter_events`` 负责约束。
+    """
+    parsed = _loads_lenient(text)
+    if parsed is None:
+        return []
+    events: list[ExtractedEvent] = []
+    for rec in _coerce_records(parsed, "events"):
+        content = str(rec.get("content", "")).strip()
+        if not content:
+            continue
+        title = str(rec.get("title", "")).strip()
+        summary = str(rec.get("summary", "")).strip()
+        raw_names = rec.get("entities")
+        if raw_names is None:
+            raw_names = rec.get("entity_names")
+        events.append(
+            ExtractedEvent(
+                title=title,
+                summary=summary,
+                content=content,
+                entity_names=_as_str_list(raw_names),
+            )
+        )
+    return events
+
+
 # ---------------------------------------------------------------------------
 # 白名单过滤与悬挂边丢弃（纯函数，可单测）
 # ---------------------------------------------------------------------------
@@ -335,6 +393,61 @@ def drop_dangling_relations(
     """丢弃端点（source/target）不在实体集合内的关系（无悬挂边，Property 3）。"""
     names = {e.name for e in entities}
     return [r for r in relations if r.source in names and r.target in names]
+
+
+# 单 chunk 事件抽取数量上限的默认值（与 GraphKBConfig.max_events_per_chunk 默认一致）。
+_DEFAULT_MAX_EVENTS_PER_CHUNK = 3
+
+
+def filter_events(
+    events: list[ExtractedEvent],
+    entity_names: list[str],
+    *,
+    max_events: int = _DEFAULT_MAX_EVENTS_PER_CHUNK,
+) -> list[ExtractedEvent]:
+    """过滤事件：关联实体须落在已抽实体集合内、空 content 丢弃、按上限封顶。
+
+    对齐 design.md 3.1.2 与 Requirements 1.2 / 1.3、Property 1（无悬挂边）：
+
+    - **空 content 丢弃**：``content`` 为空（或纯空白）的事件无完整语义内容，丢弃。
+    - **关联实体对齐**：逐事件把 ``entity_names`` 收敛为「落在 ``entity_names`` 集合内」
+      的子集（缺失的关联被丢弃，无悬挂关联）；保序去重。
+    - **封顶**：保留前 ``max_events`` 个事件（``max_events <= 0`` 视为不封顶）。
+
+    注意：仅过滤关联实体、不要求事件至少关联一个实体——一个事件即便关联实体全部缺失，
+    只要 content 非空仍保留（其向量召回入口仍有效），仅其 ``MENTIONS`` 边为空。
+
+    Args:
+        events: 待过滤事件列表。
+        entity_names: 本 chunk 已抽实体名集合（白名单）。
+        max_events: 单 chunk 事件数上限，<=0 表示不封顶。
+
+    Returns:
+        过滤并封顶后的事件列表（新对象，不修改入参）。
+    """
+    allowed = {n for n in entity_names if isinstance(n, str) and n.strip()}
+    out: list[ExtractedEvent] = []
+    for ev in events:
+        content = ev.content.strip() if ev.content else ""
+        if not content:
+            continue
+        aligned: list[str] = []
+        seen: set[str] = set()
+        for name in ev.entity_names:
+            if name in allowed and name not in seen:
+                aligned.append(name)
+                seen.add(name)
+        out.append(
+            ExtractedEvent(
+                title=ev.title,
+                summary=ev.summary,
+                content=ev.content,
+                entity_names=aligned,
+            )
+        )
+        if max_events > 0 and len(out) >= max_events:
+            break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +499,8 @@ class GraphExtractor:
         3. 无实体 → 返回空图（无实体则无从抽关系）。
         4. 第二步 LLM 抽关系（注入已抽实体名清单）→ 容错解析 → 白名单过滤 →
            丢弃悬挂边（端点须在实体集合内）。
+        5. 第三步 LLM 抽事件（注入已抽实体名清单约束关联）→ 容错解析 →
+           ``filter_events`` 过滤（空 content 丢弃、关联实体对齐、按上限封顶）。
 
         Raises:
             GraphExtractError: 当某步 LLM 返回了**非空文本但完全无法解析出 JSON**时抛出，
@@ -419,7 +534,13 @@ class GraphExtractor:
         relations = filter_relations(relations, relation_types)
         relations = drop_dangling_relations(relations, entities)
 
-        return ExtractedGraph(entities=entities, relations=relations)
+        # ---- 第三步：事件抽取（注入已抽实体名约束关联）----
+        event_messages = prompts.build_event_messages(text, entity_names)
+        event_raw = await self._call_llm(event_messages, step="事件抽取")
+        events = self._parse_or_raise(event_raw, parse_events, step="事件抽取")
+        events = filter_events(events, entity_names)
+
+        return ExtractedGraph(entities=entities, relations=relations, events=events)
 
     async def _call_llm(self, messages: list[dict], *, step: str) -> str:
         """调用 LLM 做一次结构化抽取（低温度、关闭思考），返回原始文本。

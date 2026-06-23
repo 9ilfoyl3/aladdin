@@ -34,6 +34,10 @@ async def cleanup_graph_for_doc(kb_id: str, doc_id: str) -> None:
 
     优雅降级：``get_graph_store()`` 为 None（图谱未启用 / Neo4j 不可用）时静默跳过；
     Neo4j 异常被吞掉并记 warning，绝不影响主删除流程。应以 fire-and-forget 调用。
+
+    事件中心图谱（event-centric-graph，Req 2.3 / 2.4）：Neo4j 的 ``delete_by_doc`` 已连带删除
+    ``:Event`` 节点与 ``MENTIONS`` 边；此处再按 ``doc_id`` 删除 Milvus 事件向量，与 Neo4j 对称，
+    保证重处理「先删后写」幂等、删库无孤儿。Milvus 删除独立 try/except 降级，不影响 Neo4j 清理。
     """
     try:
         from app.storage.graph_store import get_graph_store
@@ -48,6 +52,25 @@ async def cleanup_graph_for_doc(kb_id: str, doc_id: str) -> None:
         )
     except Exception as e:  # noqa: BLE001 — 图谱清理失败不得影响主删除链路（优雅降级）
         logger.warning("[graph-cleanup] 删除文档图谱失败 kb=%s doc=%s: %s", kb_id, doc_id, e)
+
+    # 删除该文档的 Milvus 事件向量（与 Neo4j 事件节点删除对称；独立降级）。
+    await _delete_event_vectors_for_doc(kb_id, doc_id)
+
+
+async def _delete_event_vectors_for_doc(kb_id: str, doc_id: str) -> None:
+    """按 doc_id 删除 Milvus 事件向量（事件中心图谱重处理 / 删除一致性）。
+
+    优雅降级：事件集合不存在 / Milvus 不可用时静默跳过；任何异常被吞掉记 warning，
+    绝不影响主删除 / 重解析链路。
+    """
+    try:
+        from app.storage.milvus_event_store import get_milvus_event_store
+
+        event_store = get_milvus_event_store()
+        await event_store.delete_by_doc(kb_id=kb_id, doc_id=doc_id)
+        logger.info("[graph-cleanup] 文档事件向量清理完成 kb=%s doc=%s", kb_id, doc_id)
+    except Exception as e:  # noqa: BLE001 — 事件向量清理失败不得影响主链路（优雅降级）
+        logger.warning("[graph-cleanup] 删除文档事件向量失败 kb=%s doc=%s: %s", kb_id, doc_id, e)
 
 
 async def cleanup_graph_for_docs(kb_id: str, doc_ids: list[str]) -> None:
@@ -71,6 +94,8 @@ async def cleanup_graph_for_docs(kb_id: str, doc_ids: list[str]) -> None:
                 logger.warning(
                     "[graph-cleanup] 批量删除文档图谱失败 kb=%s doc=%s: %s", kb_id, doc_id, e
                 )
+            # 删除该文档事件向量（与 Neo4j 事件节点删除对称；单 doc 失败不影响其余）。
+            await _delete_event_vectors_for_doc(kb_id, doc_id)
         logger.info("[graph-cleanup] 批量文档图谱清理完成 kb=%s（%d 个文档）", kb_id, len(doc_ids))
     except Exception as e:  # noqa: BLE001
         logger.warning("[graph-cleanup] 批量删除文档图谱失败 kb=%s: %s", kb_id, e)
@@ -80,6 +105,9 @@ async def cleanup_graph_for_kb(kb_id: str) -> None:
     """删除整个 KB 的图（KB 删除时调用，Req 5.3）。
 
     优雅降级同 :func:`cleanup_graph_for_doc`。应以 fire-and-forget 调用。
+
+    事件中心图谱（Req 2.4）：删除 Neo4j 图后再删整个 Milvus 事件集合 ``kb_event_<kb_id>``，
+    不留事件向量孤儿。两者独立降级。
     """
     try:
         from app.storage.graph_store import get_graph_store
@@ -91,6 +119,15 @@ async def cleanup_graph_for_kb(kb_id: str) -> None:
         logger.info("[graph-cleanup] KB 图谱整库清理完成 kb=%s", kb_id)
     except Exception as e:  # noqa: BLE001 — 图谱清理失败不得影响主删库链路（优雅降级）
         logger.warning("[graph-cleanup] 删除 KB 图谱失败 kb=%s: %s", kb_id, e)
+
+    # 删除整个 KB 的事件向量集合（与 Neo4j 整库清理对称；独立降级）。
+    try:
+        from app.storage.milvus_event_store import get_milvus_event_store
+
+        await get_milvus_event_store().delete_by_kb(kb_id=kb_id)
+        logger.info("[graph-cleanup] KB 事件向量集合清理完成 kb=%s", kb_id)
+    except Exception as e:  # noqa: BLE001 — 事件向量清理失败不得影响主删库链路（优雅降级）
+        logger.warning("[graph-cleanup] 删除 KB 事件向量集合失败 kb=%s: %s", kb_id, e)
 
 
 async def sweep_stuck_graph_jobs(

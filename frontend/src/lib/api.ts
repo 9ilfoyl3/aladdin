@@ -184,6 +184,17 @@ export const kbShareLinkApi = {
     ),
 }
 
+// 文档抽取出的事件（事件中心图谱，对应后端 DocumentEventResponse）。
+export interface DocumentEvent {
+  id: string
+  title: string
+  summary: string
+  content: string
+  chunk_id: string
+  /** 关联实体规范名列表 */
+  entity_names: string[]
+}
+
 // 文档相关接口
 export const documentApi = {
   list: (
@@ -273,6 +284,10 @@ export const documentApi = {
     request<PageResult<unknown>>(
       `/documents/${id}/chunks?page=${params?.page ?? 1}&page_size=${params?.page_size ?? 20}`
     ),
+  // 文档抽取出的事件列表（事件中心图谱，title/summary + 关联实体）。
+  // 图谱未启用 / 无事件时后端返回 []，前端按空态处理。
+  events: (id: string) =>
+    request<DocumentEvent[]>(`/documents/${id}/events`),
   // 拉取文档缩略图：preview 接口需 Authorization 头，原生 <img> 无法携带，
   // 故用 fetch 带 token 取回 blob 并生成本地 objectURL 供 <img src> 使用。
   // 调用方负责在不再使用时 URL.revokeObjectURL 释放。
@@ -1128,6 +1143,8 @@ export interface GraphNode {
   type: string
   /** 度数（入边+出边），用于映射节点大小 */
   degree: number
+  /** 节点大类：entity（实体，默认）| event（事件）。用于可视化区分两层节点。 */
+  node_type?: 'entity' | 'event'
 }
 
 /** 力导向图边（对应后端 edges[]）。source/target 为实体 id。 */
@@ -1216,6 +1233,8 @@ export interface GraphQueryParams {
   types?: string[]
   /** 节点数上限（0/省略=用平台默认上限，后端 clamp） */
   limit?: number
+  /** 是否把事件作为一类节点并入返回（node_type 区分，默认 false） */
+  include_events?: boolean
 }
 
 // config.graph 缺省值（KB 详情未显式配置 graph 时的兜底，与后端默认对齐）。
@@ -1238,6 +1257,7 @@ export const graphApi = {
     if (params?.depth != null) qs.set('depth', String(params.depth))
     if (params?.types && params.types.length > 0) qs.set('types', params.types.join(','))
     if (params?.limit != null) qs.set('limit', String(params.limit))
+    if (params?.include_events) qs.set('include_events', 'true')
     return request<GraphSubset>(`/kb/${kbId}/graph?${qs.toString()}`)
   },
   // 图谱统计：实体/关系数、类型分布、孤立数、状态。

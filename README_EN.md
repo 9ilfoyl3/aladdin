@@ -32,7 +32,7 @@ Built around a ReAct Agent, Artoo lets the LLM autonomously orchestrate keyword 
 
 **Artoo** is an open-source, LLM-powered Agentic RAG knowledge base framework built for enterprise-grade document understanding and traceable Q&A.
 
-It is organized around three core capabilities: a **ReAct Agent** that autonomously decides retrieval strategy and stopping conditions within a Think → Act → Observe loop; **three-way hybrid retrieval** that recalls in parallel via dense semantic, sparse vector, and BM25 full-text search, then produces high-quality context through RRF fusion, reranking, MMR de-duplication, and parent-chunk expansion — with an optional knowledge graph (GraphRAG) joining as a fourth route that bridges via entities to recall related content pure-vector search misses; and **structure-aware document processing** that splits by logical structure, maps parent/child chunks, and runs concurrent OCR on mixed text-and-image documents. Documents can be ingested from local multi-format uploads as well as from pasted web / WeChat article links, whose main text is fetched and saved into the knowledge base in one click. Combined with visual multi-model management, hot-swappable Embedding / Rerank / OCR services, MCP tool integration, Agent Skills, and three-tier progressive context management, Artoo turns scattered documents into a queryable, reasoning-capable, traceable knowledge asset.
+It is organized around three core capabilities: a **ReAct Agent** that autonomously decides retrieval strategy and stopping conditions within a Think → Act → Observe loop; **three-way hybrid retrieval** that recalls in parallel via dense semantic, sparse vector, and BM25 full-text search, then produces high-quality context through RRF fusion, reranking, MMR de-duplication, and parent-chunk expansion — with an optional event-centric knowledge graph (GraphRAG) joining as a fourth route: it extracts events (subject-verb-object + time/place) from each chunk as a first-class retrieval unit, then seeds them via dual entry points (event vector recall + entity bridging), expands multi-hop, coarsely ranks, and back-fetches related chunks to recall multi-hop content pure-vector search misses; and **structure-aware document processing** that splits by logical structure, maps parent/child chunks, and runs concurrent OCR on mixed text-and-image documents. Documents can be ingested from local multi-format uploads as well as from pasted web / WeChat article links, whose main text is fetched and saved into the knowledge base in one click. Combined with visual multi-model management, hot-swappable Embedding / Rerank / OCR services, MCP tool integration, Agent Skills, and three-tier progressive context management, Artoo turns scattered documents into a queryable, reasoning-capable, traceable knowledge asset.
 
 All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to external services, keeping the backend lightweight and easy to self-host offline with full data sovereignty. The agent's reasoning is streamed to the frontend in real time via an EventBus — thoughts, tool calls, citations, and context token usage are all observable.
 
@@ -40,7 +40,7 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 
 - **A real ReAct Agent** — the LLM autonomously calls tools, analyzes results, and decides whether to keep searching or submit an answer via function calling, rather than a fixed orchestration pipeline.
 - **Evidence-First discipline** — a built-in Progressive RAG system prompt (Assess-Reconnaissance-Plan-Execute workflow) enforces "search first, deep-read chunks, then answer" — no fabrication from parametric memory.
-- **Three-way hybrid retrieval + optional graph augmentation** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion; when the knowledge graph is enabled, GraphRAG joins RRF as a fourth route, recalling related content via entity bridging, with interactive force-directed graph browsing.
+- **Three-way hybrid retrieval + optional graph augmentation** — Dense + Sparse + BM25 parallel recall, with RRF fusion + reranking + composite scoring + MMR de-duplication + parent-chunk expansion; when the knowledge graph is enabled, the event-centric GraphRAG joins RRF as a fourth route, seeding events via dual entry points (event vector recall + entity bridging), expanding multi-hop, coarsely ranking, then back-fetching related chunks — well suited for cross-document multi-hop QA — with interactive force-directed graph browsing.
 - **Multi-source ingestion** — beyond local multi-format uploads, paste a web / WeChat article link to fetch its main text and save it as a KB document, with the source URL retained for traceability.
 - **Three-tier progressive context management** — BPE token estimation + API usage delta tracking + LLM summary consolidation + group-based truncation fallback keep long conversations within the window.
 - **Extensible tool ecosystem** — built-in knowledge search, keyword matching, deep reading, attachment reading, web search, thinking, and skill loading tools, plus remote MCP Server integration.
@@ -106,7 +106,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
 | Structure-Aware Chunking | Splits by logical structure, protects tables as whole blocks, parent (context) / child (precise) chunk mapping |
 | Three-Way Hybrid Retrieval | Dense + Sparse + BM25, RRF fusion + Rerank + MMR + parent-chunk expansion |
-| Knowledge Graph (optional) | After ingestion, entities and relations are extracted asynchronously into Neo4j, joining RRF as a fourth entity-bridging route, with interactive force-directed graph browsing (overview / neighbor drill-down / type filtering / entity detail tracing); controlled by global and per-KB toggles, off by default with zero extra cost, and degrades automatically on failure without affecting the main pipeline |
+| Knowledge Graph (optional) | A "three-step extraction" pipeline (entities → relations → events) runs asynchronously after ingestion, joining RRF as a fourth route. Event-centric recall treats each chunk's full events (subject-verb-object + time/place) as a first-class retrieval unit, dual-written to Neo4j event nodes (strong multi-hop traversal) and a dedicated Milvus event vector collection (`kb_event_<kb_id>`, vector recall), aligned by `event_id`. Seeds come from dual entry points (A: event vector ANN; B: query → entity → `(:Entity)<-[:MENTIONS]-(:Event)`), then multi-hop expand → coarse rank → back-fetch related chunks — well suited for cross-document multi-hop QA. An `enable_events` toggle switches between the new "event-centric" and the legacy "entity-bridge" recall for A/B benchmarking. The force-directed graph supports an entity/event dual-layer (`include_events=true`, distinguished by `node_type`) with overview / neighbor drill-down / type filtering / entity detail tracing, and the document detail page lists extracted events (title / summary / related entities). Controlled by global and per-KB toggles, off by default with zero extra cost; degrades gracefully (graph store unavailable → empty; event collection unavailable → skip entry A and use B only; no seed events → community summaries may still return alone) without affecting the main pipeline |
 | Async Pipeline | Redis Stream task queue + independent Worker, API decoupled from processing, resumable |
 | Retrieval Testing | Dedicated retrieval-only page (no LLM generation) that visualizes the three-way recall / RRF / Rerank / MMR pipeline and multi-dimensional scores, built for tuning |
 
@@ -273,8 +273,30 @@ docker compose -f docker-compose.yml --profile app up -d     # start app
 | Mode | Flow | Use Case |
 |------|------|----------|
 | **direct** | Dense vector ANN retrieval | Simple queries, low latency |
-| **hybrid** (Quick Q&A) | Dense + Sparse + BM25 parallel → RRF → Rerank → MMR → parent expansion (plus a Graph fourth route when the KB has the graph enabled) | General purpose |
+| **hybrid** (Quick Q&A) | Dense + Sparse + BM25 parallel → RRF → Rerank → MMR → parent expansion (plus the event-centric Graph fourth route when the KB has the graph enabled: dual-entry seed events → multi-hop expand → coarse rank → back-fetch related chunks) | General purpose |
 | **agent** (Smart Reasoning) | ReAct loop: autonomous grep / semantic search / deep read / thinking / web search, iterating until it submits an answer | Complex multi-hop queries requiring synthesis |
+
+### Event-Centric Graph Recall (GraphRAG Fourth Route)
+
+When the knowledge graph is enabled, the fourth route is upgraded from the legacy "entity → neighbor subgraph → related chunk" **entity bridging** to an **event-centric** flow that recalls multi-hop content pure-vector search misses:
+
+```
+query
+  │
+  ├─ Entry A (event vector recall): query vector ANN over the Milvus event collection → recall events
+  │   (skipped when the event store is unavailable; falls back to entry B only, progressive availability)
+  ├─ Entry B (entity-bridged events): query → extract entity names → match entities → (:Entity)<-[:MENTIONS]-(:Event)
+  │
+  ├─ Seed events (each entry capped at seed_k, deduplicated)
+  ├─ Multi-hop expand: (:Event)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(:Event2), configurable hops
+  ├─ Coarse rank → take top-k events and back-fetch their related source chunks
+  └─ RetrievalResult(match_type='graph'), merged into the RRF fourth route (score 1/(1+rank), consistent scale)
+```
+
+- **Event as a first-class retrieval unit**: extraction treats full semantic units (subject-verb-object + time/place) as events, dual-written to Neo4j (event nodes + `MENTIONS` entity edges, strong multi-hop traversal) and a dedicated Milvus event vector collection `kb_event_<kb_id>` (vector recall), aligned by `event_id`.
+- **A/B toggle**: when the KB graph is on but `enable_events=false`, this route falls back to the legacy pure entity-bridging logic, so the two recall modes can be benchmarked on the same KB.
+- **Degradation matrix**: graph store unavailable → return empty; event collection unavailable → skip entry A and use B only; no seed events → event results empty, community summaries may still return alone. Any degradation leaves the other three routes unaffected.
+- **Visualization**: the force-directed graph adds an "event" node layer (`include_events=true`, distinguished by `node_type` = `entity` / `event`); the document processing result page shows the events extracted per chunk (title / summary / related entities).
 
 ### Agent ReAct Loop
 

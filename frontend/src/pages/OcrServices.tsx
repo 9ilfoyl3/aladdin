@@ -253,7 +253,10 @@ function OcrServices() {
               <div className="flex items-center gap-2 mb-3">
                 <h3 className="font-semibold text-base truncate">{config.name}</h3>
                 <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                  {config.provider_type === 'textin' ? 'TextIn' : '外部 API'}
+                  {config.provider_type === 'textin' ? 'TextIn'
+                    : config.provider_type === 'external_api_paddle' ? 'PaddleOCR'
+                    : config.provider_type === 'external_api_vl' ? 'VL 模型'
+                    : '外部 API'}
                 </Badge>
               </div>
 
@@ -348,7 +351,9 @@ function OcrServices() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="textin">TextIn</SelectItem>
-                  <SelectItem value="external_api">外部 API（通用）</SelectItem>
+                  <SelectItem value="external_api">外部 API（通用/自动探测）</SelectItem>
+                  <SelectItem value="external_api_paddle">外部 API（PaddleOCR）</SelectItem>
+                  <SelectItem value="external_api_vl">外部 API（VL 模型）</SelectItem>
                 </SelectContent>
               </Select>
             </div>

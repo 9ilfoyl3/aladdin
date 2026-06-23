@@ -87,8 +87,8 @@ def _validate_ocr_config(name: str, provider_type: str, api_url: str, timeout: f
         raise HTTPException(status_code=422, detail="名称不能为空")
     if len(name) > 100:
         raise HTTPException(status_code=422, detail="名称过长，最大 100 字符")
-    if provider_type not in ("external_api", "textin"):
-        raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api 或 textin")
+    if provider_type not in ("external_api", "external_api_paddle", "external_api_vl", "textin"):
+        raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api / external_api_paddle / external_api_vl / textin")
     if not api_url or not api_url.strip():
         raise HTTPException(status_code=422, detail="API 地址不能为空")
     if timeout < 1 or timeout > 300:
@@ -167,7 +167,7 @@ async def _perform_ocr_test(provider_type: str, api_url: str, api_key: Optional[
     """执行 OCR 连通性测试的核心逻辑"""
     start = time.time()
     try:
-        if provider_type in ("external_api", "textin"):
+        if provider_type in ("external_api", "external_api_paddle", "external_api_vl", "textin"):
             headers: dict[str, str] = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -244,8 +244,8 @@ async def update_ocr_config(config_id: str, body: OCRConfigUpdate, db: AsyncSess
         update_data["name"] = name.strip()
 
     if "provider_type" in update_data:
-        if update_data["provider_type"] not in ("external_api", "textin"):
-            raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api 或 textin")
+        if update_data["provider_type"] not in ("external_api", "external_api_paddle", "external_api_vl", "textin"):
+            raise HTTPException(status_code=422, detail="类型无效，仅支持 external_api / external_api_paddle / external_api_vl / textin")
 
     if "api_url" in update_data:
         if not update_data["api_url"] or not update_data["api_url"].strip():

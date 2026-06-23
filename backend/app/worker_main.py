@@ -160,10 +160,19 @@ async def main():
         elif graph_store is None:
             print("[Worker] ⚠️ GRAPH_ENABLE=true 但 Neo4j 不可用，跳过图谱 worker")
         else:
+            # 事件中心图谱：注入 Milvus 事件向量集合存储（双写 Neo4j + Milvus）。
+            # 取单例失败时传 None，worker 内事件向量写入降级（仅写 Neo4j 事件节点）。
+            try:
+                from app.storage.milvus_event_store import get_milvus_event_store
+                graph_event_store = get_milvus_event_store()
+            except Exception as e:  # noqa: BLE001
+                print(f"[Worker] ⚠️ 事件向量集合存储不可用，事件向量写入将降级：{e}")
+                graph_event_store = None
             graph_worker = GraphExtractWorker(
                 queue=graph_queue,
                 store=graph_store,
                 db_session_factory=async_session,
+                event_store=graph_event_store,
                 max_concurrent=settings.graph_extract_concurrency,
                 max_retries=settings.graph_extract_max_retries,
             )

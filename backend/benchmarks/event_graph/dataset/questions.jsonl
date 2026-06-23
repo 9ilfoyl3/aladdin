@@ -1,0 +1,22 @@
+{"id": "q01", "question": "青舟科技的创始人本科就读于哪所大学？", "answer": "浙江大学", "gold_doc_ids": ["lin_yuan_profile.md", "qingzhou_company.md"], "hop_type": "跨段落桥接"}
+{"id": "q02", "question": "主导研发灵眸相机核心缺陷检测算法的人，现在担任青舟科技的什么职位？", "answer": "首席技术官", "gold_doc_ids": ["su_qing_profile.md", "lingmou_product.md"], "hop_type": "实体共现"}
+{"id": "q03", "question": "北斗物流项目的技术总负责人是从哪所研究机构获得博士学位的？", "answer": "中国科学院计算技术研究所", "gold_doc_ids": ["beidou_project.md", "su_qing_profile.md"], "hop_type": "跨文档多跳"}
+{"id": "q04", "question": "与青舟科技合作北斗物流项目的公司，其创始人是谁？", "answer": "周岚", "gold_doc_ids": ["beidou_project.md", "yunqi_partner.md"], "hop_type": "实体共现"}
+{"id": "q05", "question": "灵眸相机的视觉算法在 2022 年被应用到哪个项目？", "answer": "北斗物流项目", "gold_doc_ids": ["lingmou_product.md", "beidou_project.md"], "hop_type": "跨段落桥接"}
+{"id": "q06", "question": "青舟科技的创始人创业前在哪家公司担任高级研究员？", "answer": "硅谷的视觉先锋公司", "gold_doc_ids": ["lin_yuan_profile.md"], "hop_type": "单文档多跳"}
+{"id": "q07", "question": "北斗物流项目落地的仓库位于哪个城市，由哪家公司运营？", "answer": "江苏苏州，由云栖智能运营", "gold_doc_ids": ["beidou_project.md", "yunqi_partner.md"], "hop_type": "时间地点关联"}
+{"id": "q08", "question": "青舟科技完成 B 轮融资是在公司迁往未来科技城的同一年吗？那一年是哪一年？", "answer": "是同一年，2019 年", "gold_doc_ids": ["qingzhou_company.md"], "hop_type": "时间地点关联"}
+{"id": "q09", "question": "苏晴加入青舟科技时是公司的第几名员工？", "answer": "第二十名员工", "gold_doc_ids": ["su_qing_profile.md"], "hop_type": "单文档事实"}
+{"id": "q10", "question": "青舟科技的创始人和云栖智能的创始人分别是谁？", "answer": "青舟科技创始人是林远，云栖智能创始人是周岚", "gold_doc_ids": ["lin_yuan_profile.md", "yunqi_partner.md", "qingzhou_company.md"], "hop_type": "多实体聚合"}
+{"id": "q11", "question": "第二代灵眸相机新增了对哪些材料的检测能力？", "answer": "金属件和玻璃件", "gold_doc_ids": ["lingmou_product.md"], "hop_type": "单文档事实"}
+{"id": "q12", "question": "青舟科技首次进入物流行业是通过哪个项目，合作方是谁？", "answer": "通过北斗物流项目，合作方是云栖智能", "gold_doc_ids": ["qingzhou_company.md", "beidou_project.md", "yunqi_partner.md"], "hop_type": "跨文档多跳"}
+{"id": "q13", "question": "青舟科技的首席技术官在北斗物流项目中担任什么角色？", "answer": "技术总负责人", "gold_doc_ids": ["su_qing_profile.md", "beidou_project.md"], "hop_type": "实体共现"}
+{"id": "q14", "question": "灵眸相机第一代产品发布当年主要拿下了哪个地区代工厂的订单？", "answer": "珠三角地区", "gold_doc_ids": ["lingmou_product.md"], "hop_type": "时间地点关联"}
+{"id": "q15", "question": "在浙江大学设立远航奖学金的人创办了哪家公司？", "answer": "青舟科技", "gold_doc_ids": ["lin_yuan_profile.md", "qingzhou_company.md"], "hop_type": "跨段落桥接"}
+{"id": "q16", "question": "云栖智能的总部和它运营的智慧仓储基地分别在哪个城市？", "answer": "总部在江苏南京，智慧仓储基地在江苏苏州", "gold_doc_ids": ["yunqi_partner.md"], "hop_type": "时间地点关联"}
+{"id": "q17", "question": "青舟科技成立于哪一年，最初的办公地点在哪里？", "answer": "2015 年，杭州市余杭区的联合办公空间", "gold_doc_ids": ["qingzhou_company.md"], "hop_type": "时间地点关联"}
+{"id": "q18", "question": "北斗物流项目上线后，仓库的分拣错误率下降了多少？", "answer": "百分之四十以上", "gold_doc_ids": ["beidou_project.md"], "hop_type": "单文档事实"}
+{"id": "q19", "question": "苏晴推动青舟科技建立了什么机构？", "answer": "算法研究院", "gold_doc_ids": ["su_qing_profile.md"], "hop_type": "单文档事实"}
+{"id": "q20", "question": "灵眸相机核心算法的研发者本科毕业于哪所大学？", "answer": "清华大学", "gold_doc_ids": ["lingmou_product.md", "su_qing_profile.md"], "hop_type": "跨文档多跳"}
+{"id": "q21", "question": "青舟科技的创始人是哪一年回到浙江的，又在次年做了什么？", "answer": "2014 年底回到浙江，次年（2015 年）在杭州创立青舟科技", "gold_doc_ids": ["lin_yuan_profile.md"], "hop_type": "时间地点关联"}
+{"id": "q22", "question": "周岚为什么选择与青舟科技合作？", "answer": "看中青舟科技在计算机视觉领域的技术积累，尤其是灵眸相机验证过的检测能力", "gold_doc_ids": ["yunqi_partner.md", "lingmou_product.md"], "hop_type": "跨段落桥接"}
