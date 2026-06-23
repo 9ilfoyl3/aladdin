@@ -1,11 +1,11 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
 import { toast } from 'sonner'
-import { FileText, Copy } from 'lucide-react'
+import { FileText, Copy, Sparkles, Tag } from 'lucide-react'
 import { documentApi } from '@/lib/api'
-import type { PageResult } from '@/lib/api'
+import type { PageResult, DocumentEvent } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -104,6 +104,13 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
   const chunks = data?.pages.flatMap((p) => p.items) ?? []
   const total = data?.pages[0]?.total ?? 0
 
+  // 文档抽取出的事件（事件中心图谱）。图谱未启用 / 无事件时后端返回 []，按空态隐藏。
+  const { data: events = [] } = useQuery({
+    queryKey: ['doc-events', documentId],
+    queryFn: () => documentApi.events(documentId!) as Promise<DocumentEvent[]>,
+    enabled: !!documentId,
+  })
+
   // 弹窗内滚动容器的触底哨兵
   const sentinelRef = useInfiniteScroll(fetchNextPage, {
     hasMore: !!hasNextPage,
@@ -127,6 +134,47 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
 
         {/* 切片列表 */}
         <div className="flex-1 overflow-auto px-6 py-4">
+          {/* 抽取事件（事件中心图谱）：有事件时展示在切片列表上方，无则隐藏 */}
+          {events.length > 0 && (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-sm font-semibold">抽取事件</span>
+                <span className="text-xs text-muted-foreground">共 {events.length} 个</span>
+              </div>
+              <div className="space-y-2.5">
+                {events.map((event) => (
+                  <div
+                    key={event.id}
+                    className="rounded-xl border border-border/60 bg-card px-4 py-3"
+                  >
+                    <div className="text-sm font-medium text-foreground">
+                      {event.title || '（无标题）'}
+                    </div>
+                    {event.summary && (
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        {event.summary}
+                      </p>
+                    )}
+                    {event.entity_names.length > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <Tag className="h-3 w-3 text-muted-foreground/70" />
+                        {event.entity_names.map((name) => (
+                          <span
+                            key={name}
+                            className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-xs text-primary"
+                          >
+                            {name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {isLoading ? (
             <ChunkListSkeleton count={4} />
           ) : chunks.length === 0 ? (

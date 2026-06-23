@@ -38,6 +38,16 @@ _RELATION_SCHEMA = (
     '}'
 )
 
+# 第三步事件抽取的 JSON 输出 schema（仅 events）。
+_EVENT_SCHEMA = (
+    '{\n'
+    '  "events": [\n'
+    '    {"title": "事件短标题", "summary": "一句话摘要", '
+    '"content": "完整事件内容（主谓宾时地齐全）", "entities": ["关联实体名1", "关联实体名2"]}\n'
+    '  ]\n'
+    '}'
+)
+
 
 def _format_whitelist(types: list[str]) -> str:
     """把类型白名单格式化为 prompt 内联的、用顿号分隔的字符串。
@@ -123,6 +133,43 @@ RELATION_USER_PROMPT = """已抽取的实体清单（source/target 只能取其�
 
 
 # ---------------------------------------------------------------------------
+# 第三步：事件抽取（给定已抽取实体，约束关联实体取值）
+# ---------------------------------------------------------------------------
+
+EVENT_SYSTEM_PROMPT = """你是一个专业的知识图谱事件抽取引擎。你的任务是：基于给定的\
+文本和已抽取的实体清单，抽取出文本中「主谓宾 + 时间地点」相对齐全的完整事件，并以\
+严格的 JSON 格式输出。事件是比单个实体更完整的语义单元，用于后续检索召回完整语义。
+
+## 抽取要求
+1. 只抽取文本中明确表达的事件，不要臆造、不要推断文本中不存在的事件。
+2. 每个事件包含四个字段：
+   - title：事件的短标题（不超过 20 字），概括「谁做了什么」。
+   - summary：一句话摘要，简要说明事件经过。
+   - content：完整的事件内容，尽量包含主体、动作、客体、时间、地点等要素，保持文本原意。
+   - entities：该事件关联的实体名列表，**必须**取自下面「已抽取的实体清单」，逐字一致；
+     清单之外的实体名不要出现；若某事件未关联任何清单内实体，则 entities 取空数组 []。
+3. 一段文本可能包含多个事件，请逐个抽取；语义高度重复的事件只保留一个。
+4. content 为空的事件没有意义，请不要输出空 content 的事件。
+5. 只输出 JSON，不要输出任何解释、说明或 markdown 代码块标记。
+
+## 输出格式（严格遵守，仅输出该 JSON 对象）
+{schema}
+
+## 若文本中没有任何可抽取的完整事件
+返回：{{"events": []}}"""
+
+EVENT_USER_PROMPT = """已抽取的实体清单（entities 只能取其中的 name）：
+{entities}
+
+请基于下面的文本，抽取其中的完整事件，仅输出符合要求的 JSON：
+
+文本：
+\"\"\"
+{text}
+\"\"\""""
+
+
+# ---------------------------------------------------------------------------
 # 组装函数（供 GraphExtractor 调用）
 # ---------------------------------------------------------------------------
 
@@ -168,6 +215,26 @@ def build_relation_messages(
     # 实体清单以逐行编号呈现，便于模型逐字对齐 source/target。
     entities_block = "\n".join(f"- {name}" for name in entity_names) or "（无）"
     user = RELATION_USER_PROMPT.format(entities=entities_block, text=text)
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_event_messages(text: str, entity_names: list[str]) -> list[dict]:
+    """构造第三步「事件抽取」的对话消息列表。
+
+    Args:
+        text: 待抽取的文本块内容（与前两步同一文本）。
+        entity_names: 已抽取并过滤后的实体名清单（约束事件关联实体取值，须逐字一致）。
+
+    Returns:
+        OpenAI 风格消息列表 ``[{"role": "system", ...}, {"role": "user", ...}]``。
+    """
+    system = EVENT_SYSTEM_PROMPT.format(schema=_EVENT_SCHEMA)
+    # 实体清单以逐行呈现，便于模型逐字对齐 entities 取值。
+    entities_block = "\n".join(f"- {name}" for name in entity_names) or "（无）"
+    user = EVENT_USER_PROMPT.format(entities=entities_block, text=text)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

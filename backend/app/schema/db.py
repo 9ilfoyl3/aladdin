@@ -676,6 +676,8 @@ class GraphExtractJob(Base, TenantScopedMixin):
     total_subtasks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     entities_count: Mapped[int] = mapped_column(Integer, default=0)
     relations_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 事件中心图谱：本次抽取写入的事件数（event-centric-graph，worker 双写 Neo4j+Milvus 后累加）。
+    events_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

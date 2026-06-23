@@ -28,6 +28,7 @@ import asyncio
 import logging
 import socket
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
@@ -44,8 +45,13 @@ if TYPE_CHECKING:
 
     from app.pipeline.queue import TaskQueue
     from app.storage.graph_store import GraphStore
+    from app.storage.milvus_event_store import MilvusEventStore
 
 logger = logging.getLogger("pipeline.graph.worker")
+
+# 单 chunk 事件抽取数量上限的默认值（与 extractor._DEFAULT_MAX_EVENTS_PER_CHUNK /
+# GraphKBConfig.max_events_per_chunk 默认保持一致；config 字段缺失时的兜底）。
+_DEFAULT_MAX_EVENTS_PER_CHUNK = 3
 
 
 class GraphExtractWorker:
@@ -62,6 +68,7 @@ class GraphExtractWorker:
         store: "GraphStore | None",
         db_session_factory: "async_sessionmaker[AsyncSession]",
         *,
+        event_store: "MilvusEventStore | None" = None,
         max_concurrent: int = 2,
         max_retries: int = 3,
     ) -> None:
@@ -71,11 +78,14 @@ class GraphExtractWorker:
             queue: ``pipeline:graph`` 慢道队列（``GraphTaskQueue``，消费产出 ``GraphTaskMessage``）。
             store: 图存储；None 表示图谱未启用 / 不可用 → worker 不消费。
             db_session_factory: 异步会话工厂。
+            event_store: 事件向量集合存储（Milvus ``kb_event_<kb_id>``）；None 时事件向量
+                双写降级（仅写 Neo4j 事件节点），记 WARNING，不阻断实体 / 关系主写入。
             max_concurrent: 独立并发信号量上限（抽取慢道，物理隔离于主链路）。
             max_retries: 单子任务应用层最大重试次数，超过进 DLQ。
         """
         self._queue = queue
         self._store = store
+        self._event_store = event_store
         self._db_session_factory = db_session_factory
         self._max_concurrent = max(1, max_concurrent)
         self._max_retries = max_retries
@@ -221,6 +231,11 @@ class GraphExtractWorker:
 
         抽取 / 消歧 / 写库任一步异常向上抛出，由 ``_process_task`` 走重试 / DLQ。chunk 已被
         新 attempt 删除（载入为空）时按正常终态处理（不抛错，由调用方 ack + 递减）。
+
+        事件中心图谱（event-centric-graph，task 7）：在实体 / 关系写入后，把抽取出的事件
+        关联实体名对齐 resolver 规范名、预生成 ``event_id``、挂 ``chunk_id`` / ``doc_id``，
+        双写 Neo4j 事件节点（``upsert_events``）与 Milvus 事件向量（``_get_embedder`` 向量化 +
+        ``MilvusEventStore.upsert``）。``enable_events=False`` 时整体跳过事件抽取与写入。
         """
         chunk = await self._load_chunk(msg.chunk_id, msg.kb_id)
         if chunk is None:
@@ -229,6 +244,8 @@ class GraphExtractWorker:
             return
 
         content, cfg = chunk
+        # 事件开关（task 8 在 config 增字段；缺失时防御式默认开启，对齐 design.md 3.4）。
+        enable_events = getattr(cfg, "enable_events", True)
         llm = await self._get_extract_llm(cfg)
 
         graph = await GraphExtractor(llm).extract(
@@ -259,11 +276,104 @@ class GraphExtractWorker:
             entities=resolved.entities,
             relations=resolved.relations,
         )
-        await self._accumulate_job_counts(msg.job_id, msg.attempt, ne, nr)
+
+        # ---- 事件双写（Neo4j 事件节点 + Milvus 事件向量）----
+        nv = 0
+        if enable_events and graph.events:
+            nv = await self._write_events(
+                msg, embedder, graph.events, resolved.entities
+            )
+
+        await self._accumulate_job_counts(msg.job_id, msg.attempt, ne, nr, nv)
         logger.info(
-            "[graph-worker] ✅ chunk %s 抽取完成：实体 %d、关系 %d",
-            msg.chunk_id, ne, nr,
+            "[graph-worker] ✅ chunk %s 抽取完成：实体 %d、关系 %d、事件 %d",
+            msg.chunk_id, ne, nr, nv,
         )
+
+    async def _write_events(
+        self,
+        msg: GraphTaskMessage,
+        embedder,
+        events,
+        resolved_entities,
+    ) -> int:
+        """事件双写：对齐规范名 → 预生成 event_id → Neo4j upsert_events + Milvus 向量。
+
+        步骤（对齐 design.md 3.1.3）：
+
+        1. **关联实体名对齐规范名**：resolver 已把实体 ``name`` 消歧为 ``normalized_name``；
+           构造 ``name_map = {name: normalized_name or name}``，把每个事件的 ``entity_names``
+           过滤（仅保留命中 map 的原始名）并映射到规范名，保证 ``MENTIONS`` 端点对齐实体
+           合并键、无悬挂关联。
+        2. **预生成 event_id + 挂来源**：每个事件生成稳定 uuid，挂 ``chunk_id`` / ``doc_id``。
+        3. **Neo4j 写事件节点 + MENTIONS 边**（``upsert_events``）。
+        4. **Milvus 写事件 content 向量**（``_get_embedder`` 向量化 + ``MilvusEventStore.upsert``）。
+
+        Returns:
+            写入 Neo4j 的事件数（计入 job 事件计数）。Milvus 向量写入失败不回滚 Neo4j，
+            仅记 WARNING（向量召回入口可降级，Neo4j 事件节点 + 实体桥接仍可用）。
+        """
+        # 1) 关联实体名对齐 resolver 规范名（端点缺失的关联被过滤，无悬挂关联）。
+        name_map = {
+            e.name: (e.normalized_name or e.name) for e in resolved_entities
+        }
+        # 2) 预生成 event_id、挂 chunk/doc 来源，组装事件行。
+        event_rows: list[dict] = []
+        for ev in events:
+            aligned_names: list[str] = []
+            seen: set[str] = set()
+            for n in ev.entity_names:
+                mapped = name_map.get(n)
+                if mapped and mapped not in seen:
+                    seen.add(mapped)
+                    aligned_names.append(mapped)
+            event_rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "title": ev.title,
+                    "summary": ev.summary,
+                    "content": ev.content,
+                    "chunk_id": msg.chunk_id,
+                    "doc_id": msg.doc_id,
+                    "entity_names": aligned_names,
+                }
+            )
+
+        if not event_rows:
+            return 0
+
+        # 3) Neo4j 写事件节点 + MENTIONS 边。
+        nv = await self._store.upsert_events(  # type: ignore[union-attr]
+            kb_id=msg.kb_id,
+            tenant_id=msg.tenant_id,
+            doc_id=msg.doc_id,
+            events=event_rows,
+        )
+
+        # 4) Milvus 写事件 content 向量（向量召回入口；失败降级不阻断 Neo4j 写入）。
+        await self._upsert_event_vectors(msg.kb_id, embedder, event_rows)
+
+        return nv
+
+    async def _upsert_event_vectors(self, kb_id: str, embedder, event_rows: list[dict]) -> None:
+        """向量化事件 content 并写入 Milvus 事件集合（失败降级记 WARNING，不抛出）。
+
+        embedder 不可用（``_get_embedder`` 返回 None）或 event_store 未注入时跳过向量写入：
+        Neo4j 事件节点与实体桥接仍可用，仅事件向量召回入口暂缺（design.md Error Handling
+        「Milvus event 集合不可用 → 入口A 跳过」的写侧对称降级）。
+        """
+        event_store = self._get_event_store()
+        if event_store is None:
+            logger.warning("[graph-worker] 事件向量集合不可用，跳过事件向量写入 kb=%s", kb_id)
+            return
+        if embedder is None:
+            logger.warning("[graph-worker] embedder 不可用，跳过事件向量写入 kb=%s", kb_id)
+            return
+        try:
+            vectors = await embedder.embed([row["content"] for row in event_rows])
+            await event_store.upsert(kb_id=kb_id, rows=event_rows, vectors=vectors)
+        except Exception as e:  # noqa: BLE001 - 向量写入失败不回滚 Neo4j，降级记 WARNING
+            logger.warning("[graph-worker] 事件向量写入失败 kb=%s: %s", kb_id, e)
 
     # ------------------------------------------------------------------
     # 一致性守卫与数据载入
@@ -340,6 +450,23 @@ class GraphExtractWorker:
             logger.warning("[graph-worker] 获取 embedder 失败，别名消歧将降级：%s", e)
             return None
 
+    def _get_event_store(self) -> "MilvusEventStore | None":
+        """取事件向量集合存储：优先用注入的 ``_event_store``，否则取进程内单例。
+
+        注入优先便于测试替身；未注入时回落 ``get_milvus_event_store()`` 进程单例
+        （worker 进程持有独立实例，连接 / 加载缓存复用）。取不到返回 None → 向量写入降级。
+        """
+        if self._event_store is not None:
+            return self._event_store
+        try:
+            from app.storage.milvus_event_store import get_milvus_event_store
+
+            self._event_store = get_milvus_event_store()
+            return self._event_store
+        except Exception as e:  # noqa: BLE001 - 取不到则降级（仅写 Neo4j 事件节点）
+            logger.warning("[graph-worker] 获取事件向量集合存储失败，事件向量写入降级：%s", e)
+            return None
+
     # ------------------------------------------------------------------
     # 终态递减与计数（原子 SQL，带 attempt 条件）
     # ------------------------------------------------------------------
@@ -393,10 +520,10 @@ class GraphExtractWorker:
             logger.warning("[graph-worker] 终态递减失败 job=%s: %s", job_id, e)
 
     async def _accumulate_job_counts(
-        self, job_id: str, attempt: int, entities: int, relations: int
+        self, job_id: str, attempt: int, entities: int, relations: int, events: int = 0
     ) -> None:
-        """原子累加 job 的实体 / 关系计数（带 attempt 条件，陈旧任务不累加）。"""
-        if entities <= 0 and relations <= 0:
+        """原子累加 job 的实体 / 关系 / 事件计数（带 attempt 条件，陈旧任务不累加）。"""
+        if entities <= 0 and relations <= 0 and events <= 0:
             return
         try:
             async with self._db_session_factory() as session:
@@ -409,6 +536,7 @@ class GraphExtractWorker:
                     .values(
                         entities_count=GraphExtractJob.entities_count + entities,
                         relations_count=GraphExtractJob.relations_count + relations,
+                        events_count=GraphExtractJob.events_count + events,
                     )
                 )
                 await session.commit()

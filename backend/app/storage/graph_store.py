@@ -106,20 +106,55 @@ class GraphEntityDTO:
 
 
 @dataclass
+class GraphEventDTO:
+    """事件数据传输对象（事件中心检索的一等检索单元，对齐 design.md 3.2.1）。
+
+    既用于实体桥接召回（``events_by_entities``）、事件多跳扩展（``expand_events``），
+    也用于按 id 批量取详情（``events_by_ids``）。事件的「文本与关系」存 Neo4j（多跳遍历），
+    「向量召回」走 Milvus（event 集合），两者用 ``id`` 对齐。
+
+    Attributes:
+        id: 事件 id（全局唯一，由 worker 预生成 UUID）。
+        title: 事件短标题。
+        summary: 一句话摘要。
+        content: 完整语义内容（主谓宾时地齐全，挂向量做召回）。
+        chunk_id: 来源 chunk id（回取原文用）。
+        doc_id: 来源文档 id（按 doc 删除 / 重处理用）。
+        entity_ids: 事件 MENTIONS 的实体 id 列表（桥接多跳用）。
+        entity_names: 事件 MENTIONS 的实体规范名列表（文档详情展示用，默认空；
+            仅 ``events_by_doc`` 等需要直接展示名称的查询填充，其它查询留空）。
+        score: 召回 / 排序得分（实体桥接入口为被提及次数，向量入口为相似度；默认 0.0）。
+    """
+
+    id: str
+    title: str = ""
+    summary: str = ""
+    content: str = ""
+    chunk_id: str = ""
+    doc_id: str = ""
+    entity_ids: list[str] = field(default_factory=list)
+    entity_names: list[str] = field(default_factory=list)
+    score: float = 0.0
+
+
+@dataclass
 class GraphNodeDTO:
     """子图中的一个节点（``GraphSubsetDTO.nodes`` 元素，对应可视化 API 的 node）。
 
     Attributes:
-        id: 实体 id。
-        name: 实体规范名。
-        type: 实体类型。
+        id: 节点 id（实体 id 或事件 id）。
+        name: 节点显示名（实体规范名或事件标题）。
+        type: 节点细分类型（实体类型，或事件节点的 ``event``）。
         degree: 物化度数（节点大小映射用）。
+        node_type: 节点大类，``entity``（默认）或 ``event``，供可视化区分两层节点
+            （事件中心图谱，Requirements 4.3）。
     """
 
     id: str
     name: str
     type: str
     degree: int = 0
+    node_type: str = "entity"
 
 
 @dataclass
@@ -312,6 +347,108 @@ class GraphStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def upsert_events(
+        self,
+        *,
+        kb_id: str,
+        tenant_id: str | None,
+        doc_id: str,
+        events: list[dict],
+    ) -> int:
+        """幂等写入事件节点与 ``(:Event)-[:MENTIONS]->(:Entity)`` 边（事件中心图谱）。
+
+        事件按 ``id`` 合并（id 由 worker 预生成、跨重处理稳定）；MENTIONS 端点实体须存在
+        （按 ``(kb_id, name)`` 对齐实体合并键），端点缺失的关联在写入时被丢弃（无悬挂边，
+        Correctness Property 1 / Requirements 1.2、2.1）。读写强制带 ``kb_id`` 隔离，
+        写入带 ``tenant_id``（Requirements 2.5）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            tenant_id: 租户 id（可为 None，仅 ON CREATE 写入）。
+            doc_id: 来源文档 id（写入事件 ``doc_id``，供按 doc 删除 / 重处理）。
+            events: 事件行字典列表，每行含
+                ``id`` / ``title`` / ``summary`` / ``content`` / ``chunk_id`` /
+                ``entity_names``（关联实体规范名列表，对齐实体合并键）。
+
+        Returns:
+            写入（入参）的事件数。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def events_by_entities(
+        self, *, kb_id: str, entity_ids: list[str], limit: int,
+    ) -> list[GraphEventDTO]:
+        """实体桥接入口：取这些实体被 ``MENTIONS`` 的事件（去重，按被提及次数降序）。
+
+        强制带 ``kb_id`` 隔离。``score`` 取命中实体数（被多少个输入实体提及），由检索层
+        再做评分归一。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            entity_ids: 桥接实体 id 列表。
+            limit: 返回事件数上限。
+
+        Returns:
+            事件 DTO 列表（按被提及次数降序）；无命中时 []。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def expand_events(
+        self, *, kb_id: str, event_ids: list[str], hops: int, max_events: int,
+    ) -> list[GraphEventDTO]:
+        """事件多跳扩展：``(:Event)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(:Event2)`` 路径。
+
+        从种子事件出发，沿共享实体桥接到关联事件，做可配置跳数扩展（默认 1 跳）。强制带
+        ``kb_id`` 隔离；结果去重、排除种子集合自身、截断到 ``max_events``。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_ids: 种子事件 id 列表。
+            hops: 事件层扩展跳数（一次「事件→共享实体→关联事件」算一跳）。
+            max_events: 返回扩展事件数上限。
+
+        Returns:
+            扩展得到的事件 DTO 列表（不含种子自身）；无扩展时 []。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def events_by_ids(
+        self, *, kb_id: str, event_ids: list[str],
+    ) -> list[GraphEventDTO]:
+        """按 id 批量取事件详情（``title`` / ``summary`` / ``content`` / ``chunk_id`` / 关联实体）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_ids: 事件 id 列表。
+
+        Returns:
+            事件 DTO 列表（顺序不保证，调用方按需重排）；无命中时 []。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def events_by_doc(
+        self, *, kb_id: str, doc_id: str, limit: int,
+    ) -> list[GraphEventDTO]:
+        """取某文档抽取的全部事件（文档详情展示用，Requirements 4.2）。
+
+        强制带 ``kb_id`` + ``doc_id`` 双重隔离。返回的事件 DTO 额外填充 ``entity_names``
+        （关联实体规范名列表，供前端直接展示，无需二次反查实体）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            doc_id: 文档 id（隔离键）。
+            limit: 返回事件数上限。
+
+        Returns:
+            事件 DTO 列表（按 chunk_id / title 稳定排序）；无命中 / 无效入参时 []。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def find_entities_by_names(
         self, *, kb_id: str, names: list[str], limit: int,
     ) -> list[GraphEntityDTO]:
@@ -439,6 +576,13 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     # 按 name 做 CONTAINS 模糊匹配（实体桥接召回 + 图搜索框）
     "CREATE INDEX entity_name_idx IF NOT EXISTS "
     "FOR (e:Entity) ON (e.name)",
+    # ---- 事件节点（事件中心图谱，对齐 design.md 3.2.1）----
+    # 事件唯一性：事件 id 全局唯一（事件按 (kb_id, id) 合并，id 由 worker 预生成）
+    "CREATE CONSTRAINT event_id_unique IF NOT EXISTS "
+    "FOR (ev:Event) REQUIRE ev.id IS UNIQUE",
+    # 按 kb_id 过滤（事件读写强制带 kb_id 隔离，Requirements 2.5）
+    "CREATE INDEX event_kb_idx IF NOT EXISTS "
+    "FOR (ev:Event) ON (ev.kb_id)",
 )
 
 
@@ -488,6 +632,102 @@ _REFRESH_DEGREE_CYPHER = (
     "   SET e.degree = COUNT { (e)-[:REL]-() }',"
     "  {batchSize: 1000, params: {names: $names, kb_id: $kb_id}}"
     ")"
+)
+
+
+# ---------------------------------------------------------------------------
+# 事件节点与边相关 Cypher（事件中心图谱，对齐 design.md 2.1/3.2.1）
+# ---------------------------------------------------------------------------
+# 事件读写全部强制带 kb_id 隔离（写入再带 tenant_id，Requirements 2.5），大批量写入
+# 复用 apoc.periodic.iterate 分批（batchSize 1000）+ graph_query_timeout，风格与实体/
+# 关系 upsert 段一致。MENTIONS 端点实体须存在（内层 MATCH 无匹配则丢弃，无悬挂边）。
+
+# 事件详情统一 RETURN 片段：取本体属性 + 经 MENTIONS 关联的实体 id 列表（pattern
+# comprehension，端点必为已存在的 :Entity）。所有字段 coalesce 兜底，避免历史脏数据 None。
+_EVENT_RETURN_FIELDS = (
+    "ev.id AS id, coalesce(ev.title, '') AS title, coalesce(ev.summary, '') AS summary, "
+    "coalesce(ev.content, '') AS content, coalesce(ev.chunk_id, '') AS chunk_id, "
+    "coalesce(ev.doc_id, '') AS doc_id, "
+    "[(ev)-[:MENTIONS]->(me:Entity) | me.id] AS entity_ids"
+)
+
+# 1) 事件节点幂等 MERGE：按 id 合并（id 由 worker 预生成、跨重处理稳定）。
+#    kb_id/tenant_id 仅 ON CREATE 写入（隔离键不可变）；正文字段每次 SET（重处理覆盖最新）。
+_UPSERT_EVENTS_CYPHER = (
+    "CALL apoc.periodic.iterate("
+    "  'UNWIND $events AS row RETURN row',"
+    "  'MERGE (ev:Event {id: row.id}) "
+    "   ON CREATE SET ev.kb_id = $kb_id, ev.tenant_id = $tenant_id, "
+    "                 ev.created_at = datetime() "
+    "   SET ev.doc_id = $doc_id, ev.chunk_id = row.chunk_id, ev.title = row.title, "
+    "       ev.summary = row.summary, ev.content = row.content, "
+    "       ev.updated_at = datetime()',"
+    "  {batchSize: 1000, params: {events: $events, kb_id: $kb_id, "
+    "                             tenant_id: $tenant_id, doc_id: $doc_id}}"
+    ")"
+)
+
+# 2) MENTIONS 边幂等 MERGE：事件关联实体名对齐实体合并键 (kb_id, name)；端点实体缺失
+#    （内层 MATCH 无匹配）则该边不写入 → 无悬挂边（Property 1 / Requirements 1.2、2.1）。
+_UPSERT_EVENT_MENTIONS_CYPHER = (
+    "CALL apoc.periodic.iterate("
+    "  'UNWIND $events AS row UNWIND row.entity_names AS nm "
+    "   RETURN row.id AS event_id, nm AS name',"
+    "  'MATCH (ev:Event {id: event_id, kb_id: $kb_id}) "
+    "   MATCH (e:Entity {kb_id: $kb_id, name: name}) "
+    "   MERGE (ev)-[:MENTIONS]->(e)',"
+    "  {batchSize: 1000, params: {events: $events, kb_id: $kb_id}}"
+    ")"
+)
+
+# events_by_entities（实体桥接入口）：取这些实体被 MENTIONS 的事件，按被提及（命中实体）
+# 次数降序去重、截断到 limit。score 取命中实体数（与现状评分量纲解耦，检索层再归一）。
+_EVENTS_BY_ENTITIES_CYPHER = (
+    "UNWIND $entity_ids AS eid "
+    "MATCH (e:Entity {kb_id: $kb_id, id: eid})<-[:MENTIONS]-(ev:Event {kb_id: $kb_id}) "
+    "WITH ev, count(DISTINCT eid) AS mention_count "
+    "RETURN " + _EVENT_RETURN_FIELDS + ", mention_count AS score "
+    "ORDER BY mention_count DESC "
+    "LIMIT $limit"
+)
+
+# expand_events（事件多跳）：种子事件经共享实体桥接到关联事件
+# （(:Event)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(:Event2)）。用 apoc.path.expandConfig
+# 沿 MENTIONS 无向扩展，labelFilter '/Event' 仅返回以事件为终点的路径；maxLevel=2*hops
+# （一来一回算一跳），minLevel=2 跳过中间实体与种子，过滤掉种子集合自身，截断到 max_events。
+# 注意：必须用 expandConfig 而非 subgraphNodes —— 后者要求 minLevel ∈ {0,1}，而事件多跳的
+# 「事件→实体→事件」单跳对应底层 2 个 MENTIONS（minLevel=2），故只能用支持任意 minLevel 的
+# expandConfig。uniqueness=NODE_GLOBAL 保证每个事件全局仅访问一次（去重 + 抗膨胀）。
+_EXPAND_EVENTS_CYPHER = (
+    "MATCH (seed:Event {kb_id: $kb_id}) WHERE seed.id IN $event_ids "
+    "CALL apoc.path.expandConfig(seed, "
+    "  {relationshipFilter: 'MENTIONS', labelFilter: '/Event', "
+    "   minLevel: 2, maxLevel: $max_level, uniqueness: 'NODE_GLOBAL'}) YIELD path "
+    "WITH last(nodes(path)) AS ev "
+    "WITH DISTINCT ev "
+    "WHERE ev.kb_id = $kb_id AND NOT ev.id IN $event_ids "
+    "RETURN " + _EVENT_RETURN_FIELDS + " "
+    "LIMIT $max_events"
+)
+
+# events_by_ids：按 id 批量取事件详情（kb 内）。
+_EVENTS_BY_IDS_CYPHER = (
+    "MATCH (ev:Event {kb_id: $kb_id}) WHERE ev.id IN $event_ids "
+    "RETURN " + _EVENT_RETURN_FIELDS
+)
+
+# events_by_doc（文档详情事件展示，Requirements 4.2）：取某文档抽取的全部事件，
+# 附带关联实体「规范名」列表（前端直接展示，无需二次反查实体）。按 chunk_id / title
+# 稳定排序，截断到 limit。强制带 kb_id + doc_id 双重隔离。
+_EVENTS_BY_DOC_CYPHER = (
+    "MATCH (ev:Event {kb_id: $kb_id, doc_id: $doc_id}) "
+    "RETURN ev.id AS id, coalesce(ev.title, '') AS title, "
+    "coalesce(ev.summary, '') AS summary, coalesce(ev.content, '') AS content, "
+    "coalesce(ev.chunk_id, '') AS chunk_id, coalesce(ev.doc_id, '') AS doc_id, "
+    "[(ev)-[:MENTIONS]->(me:Entity) | me.id] AS entity_ids, "
+    "[(ev)-[:MENTIONS]->(me:Entity) | me.name] AS entity_names "
+    "ORDER BY ev.chunk_id, ev.title "
+    "LIMIT $limit"
 )
 
 
@@ -558,6 +798,28 @@ _DELETE_KB_CYPHER = (
     "CALL apoc.periodic.iterate("
     "  'MATCH (e:Entity {kb_id: $kb_id}) RETURN e',"
     "  'DETACH DELETE e',"
+    "  {batchSize: 1000, params: {kb_id: $kb_id}}"
+    ")"
+)
+
+# 删该 doc 贡献的事件节点（事件中心图谱，Requirements 2.3/2.4，Property 3 幂等重处理）。
+# 事件 doc_id 归属单一来源文档（重处理走「先按 doc_id 删后写」），故按 (kb_id, doc_id)
+# 精确删除；DETACH DELETE 连带删除其 (:Event)-[:MENTIONS]->(:Entity) 边（无孤儿边残留）。
+# 实体节点不在此删除——实体可能被其它事件 / 关系共享，其生命周期由实体侧删除逻辑管理。
+_DELETE_DOC_EVENTS_CYPHER = (
+    "CALL apoc.periodic.iterate("
+    "  'MATCH (ev:Event {kb_id: $kb_id, doc_id: $doc_id}) RETURN ev',"
+    "  'DETACH DELETE ev',"
+    "  {batchSize: 1000, params: {kb_id: $kb_id, doc_id: $doc_id}}"
+    ")"
+)
+
+# 按 kb_id 批量删除整个 KB 的事件节点（DETACH DELETE 连带其全部 MENTIONS 边）。
+# 与 _DELETE_KB_CYPHER 配套：删 KB 时实体与事件均清空，不留孤儿（Requirements 2.4/5.3）。
+_DELETE_KB_EVENTS_CYPHER = (
+    "CALL apoc.periodic.iterate("
+    "  'MATCH (ev:Event {kb_id: $kb_id}) RETURN ev',"
+    "  'DETACH DELETE ev',"
     "  {batchSize: 1000, params: {kb_id: $kb_id}}"
     ")"
 )
@@ -1010,7 +1272,9 @@ class Neo4jGraphStore(GraphStore):
         3. 删除该 doc 贡献的关系（``DELETE r``）；
         4. 从实体 ``doc_ids`` 摘除本 doc（共享实体保留，仅剔除本 doc 贡献）；
         5. ``DETACH DELETE`` ``doc_ids`` 摘空后的实体（不再被任何文档引用）；
-        6. 按 id 刷新仍存活的受影响实体 degree（已删实体匹配不到自动跳过）。
+        6. 按 id 刷新仍存活的受影响实体 degree（已删实体匹配不到自动跳过）；
+        7. ``DETACH DELETE`` 该 doc 贡献的 ``:Event`` 节点（连带其 ``MENTIONS`` 边，
+           事件中心图谱重处理「先删后写」的删旧步骤，Requirements 2.3/2.4）。
 
         删除完成后保证无 ``doc_id`` 残留：任何实体 ``doc_ids`` 与任何边 ``doc_id`` 都不
         再包含本 ``doc_id``；被多文档共享的实体仅在 ``doc_ids`` 变空时才删除（Property 7）。
@@ -1080,13 +1344,25 @@ class Neo4jGraphStore(GraphStore):
                     timeout=timeout,
                 )
 
+            # 7) 删除该 doc 贡献的事件节点（连带 MENTIONS 边，事件中心图谱）。
+            #    事件 doc_id 归属单一来源文档，按 (kb_id, doc_id) 精确删除即可；
+            #    重处理走「先删后写」，删旧事件保证幂等无孤儿（Requirements 2.3/2.4）。
+            await session.run(
+                _DELETE_DOC_EVENTS_CYPHER,
+                kb_id=kb_id,
+                doc_id=doc_id,
+                timeout=timeout,
+            )
+
         return deleted_relations
 
     async def delete_by_kb(self, *, kb_id: str) -> None:
         """删除整个 KB 的图（KB 删除时调用，design.md 4.6 / Requirements 5.3）。
 
         按 ``kb_id`` ``DETACH DELETE`` 全部 ``Entity`` 即连带删除其全部关系（``:REL``
-        仅存在于同 KB 实体之间），apoc.periodic.iterate 分批（batchSize 1000）抗压。
+        仅存在于同 KB 实体之间），并 ``DETACH DELETE`` 全部 ``:Event`` 节点（连带其
+        ``MENTIONS`` 边），保证实体与事件均清空、不留孤儿（Requirements 2.4）。
+        两段均用 apoc.periodic.iterate 分批（batchSize 1000）抗压。
 
         Args:
             kb_id: 待清空的知识库 id。
@@ -1100,8 +1376,256 @@ class Neo4jGraphStore(GraphStore):
                 kb_id=kb_id,
                 timeout=timeout,
             )
+            # 连带删除该 KB 的事件节点（含 MENTIONS 边），不留孤儿（事件中心图谱）。
+            await session.run(
+                _DELETE_KB_EVENTS_CYPHER,
+                kb_id=kb_id,
+                timeout=timeout,
+            )
 
     # ------------------------------------------------------------------
+    # 事件节点与边（事件中心图谱，design.md 3.2.1，Requirements 2.1/2.5）
+    # ------------------------------------------------------------------
+
+    async def upsert_events(
+        self,
+        *,
+        kb_id: str,
+        tenant_id: str | None,
+        doc_id: str,
+        events: list[dict],
+    ) -> int:
+        """幂等写入事件节点 + ``(:Event)-[:MENTIONS]->(:Entity)`` 边（design.md 3.2.1）。
+
+        两段 apoc.periodic.iterate（分批 1000）+ ``graph_query_timeout``，风格与
+        ``upsert_graph`` 一致：
+
+        1. 事件节点按 ``id`` MERGE（id 由 worker 预生成、跨重处理稳定）；``kb_id`` /
+           ``tenant_id`` 仅 ON CREATE 写入（隔离键不可变），正文字段每次 SET（重处理覆盖）。
+        2. MENTIONS 边：事件关联实体名对齐实体合并键 ``(kb_id, name)``；端点实体缺失
+           （内层 MATCH 无匹配）则该边不写入 → 无悬挂边（Property 1 / Requirements 1.2、2.1）。
+
+        入参防御：``id`` 缺失的事件行跳过（无 id 无法合并）；``entity_names`` 去空白去重，
+        缺失时按空列表处理（仅写事件节点、无 MENTIONS 边）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            tenant_id: 租户 id（可为 None，仅 ON CREATE 写入）。
+            doc_id: 来源文档 id。
+            events: 事件行字典列表（``id`` / ``title`` / ``summary`` / ``content`` /
+                ``chunk_id`` / ``entity_names``）。
+
+        Returns:
+            写入（入参有效）的事件数。
+        """
+        # ---- 构造事件行字典（防御式读取，缺 id 跳过）----
+        event_rows: list[dict] = []
+        for ev in events or []:
+            ev_id = ev.get("id")
+            if not ev_id:
+                # 无 id 无法按 id 合并，跳过（防脏数据生成无意义节点）。
+                continue
+            # 关联实体名去空白、去空、去重（保持顺序），对齐实体合并键。
+            raw_names = ev.get("entity_names") or []
+            seen: set[str] = set()
+            entity_names: list[str] = []
+            for n in raw_names:
+                name = (n or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    entity_names.append(name)
+            event_rows.append(
+                {
+                    "id": ev_id,
+                    "title": ev.get("title") or "",
+                    "summary": ev.get("summary") or "",
+                    "content": ev.get("content") or "",
+                    "chunk_id": ev.get("chunk_id") or "",
+                    "entity_names": entity_names,
+                }
+            )
+
+        if not event_rows:
+            return 0
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        async with self._driver.session() as session:
+            # 1) 事件节点幂等 MERGE（apoc.periodic.iterate 分批）。
+            await session.run(
+                _UPSERT_EVENTS_CYPHER,
+                events=event_rows,
+                kb_id=kb_id,
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                timeout=timeout,
+            )
+            # 2) MENTIONS 边幂等 MERGE（端点缺失自动丢弃 → 无悬挂边）。
+            #    仅当存在待挂关联实体时才发查询（省一次空写）。
+            if any(row["entity_names"] for row in event_rows):
+                await session.run(
+                    _UPSERT_EVENT_MENTIONS_CYPHER,
+                    events=event_rows,
+                    kb_id=kb_id,
+                    timeout=timeout,
+                )
+
+        return len(event_rows)
+
+    async def events_by_entities(
+        self, *, kb_id: str, entity_ids: list[str], limit: int,
+    ) -> list[GraphEventDTO]:
+        """实体桥接入口：取这些实体被 MENTIONS 的事件（去重，按被提及次数降序）。
+
+        强制带 ``kb_id`` 隔离（Property 1）。空 id 过滤后无有效 id、或 limit<=0 直接返回空。
+        ``score`` 取命中实体数（被多少个输入实体提及），检索层再归一。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            entity_ids: 桥接实体 id 列表。
+            limit: 返回事件数上限。
+
+        Returns:
+            事件 DTO 列表（按被提及次数降序）；无命中 / 无有效入参时 []。
+        """
+        ids = [i for i in (entity_ids or []) if i]
+        safe_limit = max(0, int(limit))
+        if not ids or safe_limit == 0:
+            return []
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        events: list[GraphEventDTO] = []
+        async with self._driver.session() as session:
+            result = await session.run(
+                _EVENTS_BY_ENTITIES_CYPHER,
+                kb_id=kb_id,
+                entity_ids=ids,
+                limit=safe_limit,
+                timeout=timeout,
+            )
+            async for record in result:
+                events.append(self._record_to_event_dto(record))
+        return events
+
+    async def expand_events(
+        self, *, kb_id: str, event_ids: list[str], hops: int, max_events: int,
+    ) -> list[GraphEventDTO]:
+        """事件多跳：``(:Event)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(:Event2)`` 扩展。
+
+        强制带 ``kb_id`` 隔离（Property 1）。用 APOC ``expandConfig`` 沿 MENTIONS 无向
+        扩展、取以 ``:Event`` 为终点的路径终点；``hops`` 是事件层跳数（一次「事件→共享实体
+        →关联事件」为一跳，对应底层 2 个 MENTIONS 关系），故 ``maxLevel = 2 * hops``、
+        ``minLevel = 2`` 跳过中间实体与种子自身。结果去重、排除种子集合、截断到 ``max_events``。
+
+        实现说明：用 ``expandConfig`` 而非 ``subgraphNodes`` —— 后者要求 ``minLevel ∈ {0,1}``，
+        无法表达「跳过中间实体」的 ``minLevel = 2``；``expandConfig`` 支持任意 minLevel，
+        并以 ``uniqueness=NODE_GLOBAL`` 保证每个事件全局仅访问一次（去重 + 抗膨胀）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_ids: 种子事件 id 列表。
+            hops: 事件层扩展跳数（至少 1）。
+            max_events: 返回扩展事件数上限。
+
+        Returns:
+            扩展事件 DTO 列表（不含种子）；无种子 / 无扩展 / 上限为 0 时 []。
+        """
+        ids = [i for i in (event_ids or []) if i]
+        safe_hops = max(1, int(hops))
+        safe_max = max(0, int(max_events))
+        if not ids or safe_max == 0:
+            return []
+
+        max_level = 2 * safe_hops  # 事件→实体→事件 为一跳（两个 MENTIONS）
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        events: list[GraphEventDTO] = []
+        async with self._driver.session() as session:
+            result = await session.run(
+                _EXPAND_EVENTS_CYPHER,
+                kb_id=kb_id,
+                event_ids=ids,
+                max_level=max_level,
+                max_events=safe_max,
+                timeout=timeout,
+            )
+            async for record in result:
+                events.append(self._record_to_event_dto(record))
+        return events
+
+    async def events_by_ids(
+        self, *, kb_id: str, event_ids: list[str],
+    ) -> list[GraphEventDTO]:
+        """按 id 批量取事件详情（kb 内，强制带 ``kb_id`` 隔离，Property 1）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_ids: 事件 id 列表。
+
+        Returns:
+            事件 DTO 列表（顺序不保证）；无有效入参 / 无命中时 []。
+        """
+        ids = [i for i in (event_ids or []) if i]
+        if not ids:
+            return []
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        events: list[GraphEventDTO] = []
+        async with self._driver.session() as session:
+            result = await session.run(
+                _EVENTS_BY_IDS_CYPHER,
+                kb_id=kb_id,
+                event_ids=ids,
+                timeout=timeout,
+            )
+            async for record in result:
+                events.append(self._record_to_event_dto(record))
+        return events
+
+    # ------------------------------------------------------------------
+
+    async def events_by_doc(
+        self, *, kb_id: str, doc_id: str, limit: int,
+    ) -> list[GraphEventDTO]:
+        """取某文档抽取的全部事件（kb_id + doc_id 双重隔离，Property 1 / Requirements 4.2）。
+
+        额外填充 ``entity_names``（关联实体规范名），供文档详情前端直接展示。空入参 /
+        limit<=0 直接返回空。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            doc_id: 文档 id（隔离键）。
+            limit: 返回事件数上限。
+
+        Returns:
+            事件 DTO 列表（按 chunk_id / title 排序）；无命中 / 无效入参时 []。
+        """
+        safe_limit = max(0, int(limit))
+        if not kb_id or not doc_id or safe_limit == 0:
+            return []
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        events: list[GraphEventDTO] = []
+        async with self._driver.session() as session:
+            result = await session.run(
+                _EVENTS_BY_DOC_CYPHER,
+                kb_id=kb_id,
+                doc_id=doc_id,
+                limit=safe_limit,
+                timeout=timeout,
+            )
+            async for record in result:
+                events.append(self._record_to_event_with_names_dto(record))
+        return events
     # 平台硬上限读取（服务端 clamp 用，Property 9 / Requirements 9.1）
     # ------------------------------------------------------------------
 
@@ -1414,13 +1938,52 @@ class Neo4jGraphStore(GraphStore):
 
     @staticmethod
     def _dict_to_node_dto(node: dict) -> GraphNodeDTO:
-        """把 Cypher 返回的节点 map 解析为 ``GraphNodeDTO``。"""
+        """把 Cypher 返回的节点 map 解析为 ``GraphNodeDTO``（实体节点，node_type=entity）。"""
         return GraphNodeDTO(
             id=node["id"],
             name=node["name"],
             type=node["type"],
             degree=int(node.get("degree") or 0),
+            node_type="entity",
         )
+
+    @staticmethod
+    def _record_to_event_dto(record) -> GraphEventDTO:
+        """把 Neo4j record（事件本体字段 + 关联实体 id 列表）解析为 ``GraphEventDTO``。
+
+        所有字段对 list / 数值 / 字符串做兜底，避免历史脏数据或缺省 None。``score`` 仅在
+        events_by_entities 返回中存在（命中实体数），其它查询无该字段时回退 0.0。
+        """
+        try:
+            score = float(record["score"])
+        except (KeyError, TypeError, ValueError):
+            score = 0.0
+        return GraphEventDTO(
+            id=record["id"],
+            title=record["title"] or "",
+            summary=record["summary"] or "",
+            content=record["content"] or "",
+            chunk_id=record["chunk_id"] or "",
+            doc_id=record["doc_id"] or "",
+            entity_ids=list(record["entity_ids"] or []),
+            score=score,
+        )
+
+    @staticmethod
+    def _record_to_event_with_names_dto(record) -> GraphEventDTO:
+        """同 ``_record_to_event_dto``，但额外解析 ``entity_names``（文档详情展示用）。
+
+        ``entity_names`` 去 None / 去空白后保留（保持 Cypher 返回顺序）；缺失时回退空列表。
+        """
+        dto = Neo4jGraphStore._record_to_event_dto(record)
+        try:
+            raw_names = record["entity_names"] or []
+        except (KeyError, TypeError):
+            raw_names = []
+        dto.entity_names = [
+            n for n in (str(x).strip() for x in raw_names if x is not None) if n
+        ]
+        return dto
 
     async def _fetch_internal_edges(
         self, session, *, kb_id: str, node_ids: list[str], timeout: float,

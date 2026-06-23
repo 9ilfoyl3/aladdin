@@ -132,7 +132,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (!kbId) return
     set({ loading: true, error: null, unavailable: false, mode: 'overview', center: null })
     try {
-      const subset = await graphApi.getGraph(kbId, { mode: 'overview', types, limit })
+      const subset = await graphApi.getGraph(kbId, { mode: 'overview', types, limit, include_events: true })
       set({ nodes: subset.nodes, edges: subset.edges, meta: subset.meta, loading: false })
     } catch (err) {
       const { unavailable, message } = classifyError(err)
@@ -153,7 +153,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       depth: effDepth,
     })
     try {
-      const subset = await graphApi.getGraph(kbId, { mode: 'ego', center, depth: effDepth, types })
+      const subset = await graphApi.getGraph(kbId, { mode: 'ego', center, depth: effDepth, types, include_events: true })
       set({ nodes: subset.nodes, edges: subset.edges, meta: subset.meta, loading: false })
     } catch (err) {
       const { unavailable, message } = classifyError(err)
@@ -200,7 +200,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set({ loading: true, error: null, unavailable: false })
     try {
       // 取该节点 depth=1 邻居子图，并入当前画布（不替换、不开抽屉）。
-      const subset = await graphApi.getGraph(kbId, { mode: 'ego', center, depth: 1, types })
+      const subset = await graphApi.getGraph(kbId, { mode: 'ego', center, depth: 1, types, include_events: true })
       const { nodes, edges } = get()
       // 按 id / source-target-type 去重并入，保留已有节点的力学坐标。
       const nodeIds = new Set(nodes.map((n) => n.id))

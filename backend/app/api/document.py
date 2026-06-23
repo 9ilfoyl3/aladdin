@@ -260,6 +260,21 @@ class ChunkResponse(BaseModel):
     children: list[str] = []  # 子块内容列表，用于前端高亮
 
 
+class DocumentEventResponse(BaseModel):
+    """文档抽取事件响应（文档详情事件展示，Requirements 4.2）。
+
+    事件中心图谱从每个 chunk 抽取的完整语义单元，含标题/摘要/正文及关联实体名，
+    供文档处理结果页展示。
+    """
+
+    id: str
+    title: str
+    summary: str
+    content: str
+    chunk_id: str
+    entity_names: list[str] = []
+
+
 # ============================================================
 # 辅助函数
 # ============================================================
@@ -1591,3 +1606,56 @@ async def list_document_chunks(
         page_size=page_size,
         has_more=offset + len(items) < total,
     )
+
+
+# 文档详情事件列表单次返回上限（避免大文档一次拉爆，前端展示足够）。
+_DOC_EVENTS_MAX_LIMIT = 200
+
+
+@router.get("/api/documents/{doc_id}/events", response_model=list[DocumentEventResponse])
+async def list_document_events(
+    doc_id: str,
+    limit: int = _DOC_EVENTS_MAX_LIMIT,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """查看文档抽取出的事件列表（title/summary + 关联实体，Requirements 4.2）。
+
+    事件中心图谱从文档各 chunk 抽取的完整语义单元，供文档处理结果页展示。强制带
+    ``kb_id`` + ``doc_id`` 双重隔离（事件读取经 GraphStore）。
+
+    降级：图存储未启用 / Neo4j 不可用 / 该文档无事件时返回空列表 ``[]``（不报错，
+    与图谱整体「可选展示」语义一致，不影响文档详情主链路）。
+    """
+    _ensure_not_super_admin_content(identity)  # 内容边界：超管默认不可查看事件正文
+    # 验证文档存在（contextvar 兜底确保仅本租户文档可见 -> 跨租户 404）。
+    doc_result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = doc_result.scalar_one_or_none()
+    if doc is None:
+        raise CrossTenantError()
+
+    safe_limit = max(1, min(limit, _DOC_EVENTS_MAX_LIMIT))
+
+    # 图存储不可用（未启用 / Neo4j 故障）时干净降级为空列表。
+    from app.storage.graph_store import get_graph_store
+
+    store = await get_graph_store()
+    if store is None:
+        return []
+    try:
+        events = await store.events_by_doc(kb_id=doc.kb_id, doc_id=doc_id, limit=safe_limit)
+    except Exception as e:  # noqa: BLE001 — 图查询故障不影响文档详情主链路，降级为空
+        logger.warning("[doc-events] doc_id=%s 事件查询失败，降级为空: %s", doc_id, e)
+        return []
+
+    return [
+        DocumentEventResponse(
+            id=ev.id,
+            title=ev.title,
+            summary=ev.summary,
+            content=ev.content,
+            chunk_id=ev.chunk_id,
+            entity_names=ev.entity_names,
+        )
+        for ev in events
+    ]

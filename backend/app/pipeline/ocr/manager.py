@@ -74,7 +74,7 @@ class OCRManager:
         Returns:
             OCRProvider 实例，或 None（类型不支持时）
         """
-        from .external_api_provider import ExternalAPIProvider
+        from .external_api_provider import ExternalAPIProvider, PaddleOCRProvider, VLOCRProvider
         from .textin_provider import TextInProvider
 
         if config.provider_type == "textin":
@@ -85,6 +85,18 @@ class OCRManager:
             )
         elif config.provider_type == "external_api":
             return ExternalAPIProvider(
+                api_url=config.api_url,
+                api_key=config.api_key or "",
+                timeout=config.timeout,
+            )
+        elif config.provider_type == "external_api_paddle":
+            return PaddleOCRProvider(
+                api_url=config.api_url,
+                api_key=config.api_key or "",
+                timeout=config.timeout,
+            )
+        elif config.provider_type == "external_api_vl":
+            return VLOCRProvider(
                 api_url=config.api_url,
                 api_key=config.api_key or "",
                 timeout=config.timeout,

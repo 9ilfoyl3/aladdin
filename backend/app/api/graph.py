@@ -41,7 +41,9 @@ from app.retrieval.config import get_platform_config_store
 from app.schema.db import Document, GraphExtractJob, KnowledgeBase
 from app.storage.database import async_session
 from app.storage.graph_store import (
+    GraphEdgeDTO,
     GraphEntityDTO,
+    GraphNodeDTO,
     GraphStatsDTO,
     GraphStore,
     GraphSubsetDTO,
@@ -141,7 +143,13 @@ def _subset_to_dict(subset: GraphSubsetDTO) -> dict:
         meta["depth"] = subset.meta.depth
     return {
         "nodes": [
-            {"id": n.id, "name": n.name, "type": n.type, "degree": n.degree}
+            {
+                "id": n.id,
+                "name": n.name,
+                "type": n.type,
+                "degree": n.degree,
+                "node_type": n.node_type,
+            }
             for n in subset.nodes
         ],
         "edges": [
@@ -150,6 +158,51 @@ def _subset_to_dict(subset: GraphSubsetDTO) -> dict:
         ],
         "meta": meta,
     }
+
+
+async def _augment_subset_with_events(
+    store: GraphStore, kb_id: str, subset: GraphSubsetDTO, limit: int
+) -> None:
+    """把事件作为一类节点并入子图（``include_events=true`` 时，Requirements 4.3）。
+
+    复用实体桥接查询 ``events_by_entities``：取当前子图中**可见实体**所提及的事件，
+    追加为 ``node_type='event'`` 的节点，并对每条 ``(:Event)-[:MENTIONS]->(:Entity)``
+    生成一条边（仅当实体端点在当前节点集合内，无悬挂边）。事件节点与实体节点用
+    ``node_type`` 字段区分，供前端探索。
+
+    就地修改 ``subset.nodes`` / ``subset.edges``；任何异常由调用方 ``_query_or_503`` 兜底。
+    事件数据缺失或图未含事件时为 no-op（不影响原实体子图）。
+    """
+    entity_ids = [n.id for n in subset.nodes if n.node_type == "entity"]
+    if not entity_ids or limit <= 0:
+        return
+    events = await store.events_by_entities(kb_id=kb_id, entity_ids=entity_ids, limit=limit)
+    if not events:
+        return
+
+    entity_id_set = {n.id for n in subset.nodes if n.node_type == "entity"}
+    existing_ids = {n.id for n in subset.nodes}
+    for ev in events:
+        if ev.id in existing_ids:
+            continue
+        # 事件节点：name 取标题（缺失回退 summary），type/node_type 标记为 event。
+        display_name = ev.title or ev.summary or ev.content[:30] or ev.id
+        subset.nodes.append(
+            GraphNodeDTO(
+                id=ev.id,
+                name=display_name,
+                type="event",
+                degree=len(ev.entity_ids),
+                node_type="event",
+            )
+        )
+        existing_ids.add(ev.id)
+        # MENTIONS 边：仅连到当前子图内的实体（无悬挂边）。
+        for ent_id in ev.entity_ids:
+            if ent_id in entity_id_set:
+                subset.edges.append(
+                    GraphEdgeDTO(source=ev.id, target=ent_id, type="MENTIONS", weight=1)
+                )
 
 
 def _stats_to_dict(stats: GraphStatsDTO) -> dict:
@@ -223,6 +276,10 @@ async def get_graph(
     depth: int = Query(default=1, description="ego BFS 跳数（被 clamp 到平台硬上限）"),
     types: str | None = Query(default=None, description="逗号分隔的类型过滤"),
     limit: int = Query(default=0, description="节点数上限（0=用平台默认上限，被 clamp）"),
+    include_events: bool = Query(
+        default=False,
+        description="是否把事件作为一类节点并入返回（node_type 区分，默认 false 不改变现有行为）",
+    ),
     identity: IdentityContext = Depends(require_authenticated()),
 ) -> dict:
     """图谱总览 / ego 邻居子图（design.md 5.1）。
@@ -230,6 +287,9 @@ async def get_graph(
     - ``mode=overview``：返回度数最高的 top-N 节点及其内部边（Requirements 6.1）。
     - ``mode=ego``：以 ``center``（entity_id 或 name）为中心做 BFS 邻居子图，
       ``depth`` / ``limit`` 被 clamp 到平台硬上限（Requirements 6.2 / 9.1）。
+    - ``include_events=true``（可选，opt-in）：把当前子图中可见实体所提及的事件作为
+      ``node_type='event'`` 节点并入返回，实体节点 ``node_type='entity'``，供前端探索
+      事件中心图谱（Requirements 4.3）。默认 false，不改变现有可视化行为。
 
     所有返回节点的 ``kb_id`` 由 store 强制等于请求 ``kb_id``（Property 1 / Req 8.2）。
     """
@@ -272,6 +332,10 @@ async def get_graph(
                 types=type_filter,
             )
         )
+        if include_events:
+            await _query_or_503(
+                _augment_subset_with_events(store, kb_id, subset, eff_limit)
+            )
         return _subset_to_dict(subset)
 
     # 默认 overview（含未知 mode 兜底为 overview）
@@ -283,6 +347,10 @@ async def get_graph(
     subset = await _query_or_503(
         store.overview(kb_id=kb_id, limit=eff_limit, types=type_filter)
     )
+    if include_events:
+        await _query_or_503(
+            _augment_subset_with_events(store, kb_id, subset, eff_limit)
+        )
     return _subset_to_dict(subset)
 
 
@@ -454,6 +522,7 @@ def _job_to_dict(job: GraphExtractJob) -> dict:
         "total_subtasks": job.total_subtasks,
         "entities_count": job.entities_count,
         "relations_count": job.relations_count,
+        "events_count": job.events_count,
         "error_message": job.error_message,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
