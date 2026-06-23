@@ -141,6 +141,57 @@ async def main():
         "tenant_config": _handle_tenant_config,
     })
 
+    # 知识图谱抽取慢道 worker（仅 graph_enable 开启时启动，避免未启用成本 —— Req 9.3）。
+    # 独立队列 + 独立并发信号量，与文档入库 worker 物理隔离，绝不挤占主链路（Req 1.2）。
+    graph_worker = None
+    graph_worker_task = None
+    graph_housekeeping_task = None
+    graph_housekeeping_stop = None
+    if settings.graph_enable:
+        from app.pipeline.graph.cleanup import run_graph_housekeeping_loop
+        from app.pipeline.graph.trigger import create_graph_queue
+        from app.pipeline.graph.worker import GraphExtractWorker
+        from app.storage.graph_store import get_graph_store
+
+        graph_queue = await create_graph_queue(settings.redis_url)
+        graph_store = await get_graph_store()
+        if graph_queue is None:
+            print("[Worker] ⚠️ GRAPH_ENABLE=true 但 Redis 慢道队列不可用，跳过图谱 worker")
+        elif graph_store is None:
+            print("[Worker] ⚠️ GRAPH_ENABLE=true 但 Neo4j 不可用，跳过图谱 worker")
+        else:
+            # 事件中心图谱：注入 Milvus 事件向量集合存储（双写 Neo4j + Milvus）。
+            # 取单例失败时传 None，worker 内事件向量写入降级（仅写 Neo4j 事件节点）。
+            try:
+                from app.storage.milvus_event_store import get_milvus_event_store
+                graph_event_store = get_milvus_event_store()
+            except Exception as e:  # noqa: BLE001
+                print(f"[Worker] ⚠️ 事件向量集合存储不可用，事件向量写入将降级：{e}")
+                graph_event_store = None
+            graph_worker = GraphExtractWorker(
+                queue=graph_queue,
+                store=graph_store,
+                db_session_factory=async_session,
+                event_store=graph_event_store,
+                max_concurrent=settings.graph_extract_concurrency,
+                max_retries=settings.graph_extract_max_retries,
+            )
+            # 与主入库 worker 并行运行（独立事件循环任务），互不阻塞。
+            graph_worker_task = asyncio.create_task(graph_worker.start())
+            print(f"[Worker] 🕸️ 知识图谱抽取 worker 已启动（并发={settings.graph_extract_concurrency}）")
+
+        # housekeeping 巡检：周期性把卡死（worker 硬崩溃 pending_subtasks 不归零）的
+        # GraphExtractJob 置 failed 并零化计数器（Req 4.4）。即使 Neo4j 不可用也启动——
+        # 它只读写 PG 台账，不依赖 Neo4j，保证卡死 job 总能到达终态。
+        if graph_queue is not None:
+            graph_housekeeping_stop = asyncio.Event()
+            graph_housekeeping_task = asyncio.create_task(
+                run_graph_housekeeping_loop(async_session, stop_event=graph_housekeeping_stop)
+            )
+            print(f"[Worker] 🧹 知识图谱 housekeeping 巡检已启动"
+                  f"（间隔={settings.graph_housekeeping_interval_seconds}s, "
+                  f"超时阈值={settings.graph_job_timeout_minutes}min）")
+
     # 优雅关闭（仅 Unix 支持 signal handler）
     if sys.platform != "win32":
         loop = asyncio.get_event_loop()
@@ -151,6 +202,10 @@ async def main():
             async def _graceful_shutdown():
                 try:
                     await asyncio.wait_for(worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
+                    if graph_worker is not None:
+                        await asyncio.wait_for(graph_worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
+                    if graph_housekeeping_stop is not None:
+                        graph_housekeeping_stop.set()
                 except asyncio.TimeoutError:
                     print(f"[Worker] ⚠️ 优雅关闭超时（{_SHUTDOWN_TIMEOUT}s），强制退出")
                     logger.warning("Graceful shutdown timed out after %ds", _SHUTDOWN_TIMEOUT)
@@ -162,6 +217,17 @@ async def main():
 
     # 启动 Worker
     await worker.start()
+
+    # 主 worker 循环退出后，停止图谱 worker 并回收其后台任务。
+    if graph_worker is not None:
+        await graph_worker.stop()
+    if graph_worker_task is not None:
+        await asyncio.gather(graph_worker_task, return_exceptions=True)
+    # 停止 housekeeping 巡检循环并回收。
+    if graph_housekeeping_stop is not None:
+        graph_housekeeping_stop.set()
+    if graph_housekeeping_task is not None:
+        await asyncio.gather(graph_housekeeping_task, return_exceptions=True)
 
     print("[Worker] Worker 已停止")
 

@@ -8,7 +8,7 @@
 // 选中的 vendor / thinking_control 显式写入配置存库，运行时后端据此精确分派，
 // 不再依赖 base_url 猜测。自定义（generic）服务商不填 URL，由用户手填。
 
-export type ModelCategory = 'chat' | 'embedding' | 'rerank'
+export type ModelCategory = 'chat' | 'embedding' | 'rerank' | 'asr'
 
 // 思考模式参数格式（与后端 thinking_dialect._EXPLICIT_CONTROLS 对齐）
 export type ThinkingControlValue =
@@ -36,9 +36,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     value: 'generic',
     label: '自定义 (OpenAI 兼容接口)',
-    description: '通用 OpenAI 兼容端点 / 自建 vLLM·SGLang·TEI·Infinity',
+    description: '通用 OpenAI 兼容端点 / 自建 vLLM·SGLang·TEI·Infinity·Whisper',
     defaultUrls: {},
-    categories: ['chat', 'embedding', 'rerank'],
+    categories: ['chat', 'embedding', 'rerank', 'asr'],
   },
   {
     value: 'ollama',
@@ -53,13 +53,14 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     value: 'aliyun',
     label: '阿里云 DashScope',
-    description: 'qwen-plus、tongyi-embedding、qwen3-rerank 等',
+    description: 'qwen-plus、tongyi-embedding、qwen3-rerank、paraformer 等',
     defaultUrls: {
       chat: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       embedding: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       rerank: 'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank',
+      asr: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     },
-    categories: ['chat', 'embedding', 'rerank'],
+    categories: ['chat', 'embedding', 'rerank', 'asr'],
   },
   {
     value: 'volcengine',
@@ -93,23 +94,25 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     value: 'siliconflow',
     label: '硅基流动 SiliconFlow',
-    description: 'deepseek-ai/DeepSeek-V3.1、BAAI/bge-m3 等',
+    description: 'deepseek-ai/DeepSeek-V3.1、BAAI/bge-m3、SenseVoiceSmall 等',
     defaultUrls: {
       chat: 'https://api.siliconflow.cn/v1',
       embedding: 'https://api.siliconflow.cn/v1',
       rerank: 'https://api.siliconflow.cn/v1',
+      asr: 'https://api.siliconflow.cn/v1',
     },
-    categories: ['chat', 'embedding', 'rerank'],
+    categories: ['chat', 'embedding', 'rerank', 'asr'],
   },
   {
     value: 'openai',
     label: 'OpenAI',
-    description: 'gpt-5.2、text-embedding-3 等',
+    description: 'gpt-5.2、text-embedding-3、whisper-1 等',
     defaultUrls: {
       chat: 'https://api.openai.com/v1',
       embedding: 'https://api.openai.com/v1',
+      asr: 'https://api.openai.com/v1',
     },
-    categories: ['chat', 'embedding'],
+    categories: ['chat', 'embedding', 'asr'],
   },
   {
     value: 'openrouter',

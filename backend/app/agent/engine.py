@@ -22,7 +22,7 @@ from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
 from app.agent.tools.base import ToolResult
-from app.agent.tools.final_answer_parse import parse_final_answer_args
+from app.agent.tools.final_answer_parse import extract_inline_answer, parse_final_answer_args
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.text_sanitize import strip_think_blocks
 from app.models.provider import ChatResponse, LLMProvider, LLMToolCall, TokenUsage
@@ -771,6 +771,13 @@ class AgentEngine:
 
         # 无 tool_calls 的情况
         content = strip_think_blocks(response.content or "")
+
+        # 落库前的最终兜底：流式路由器若漏判内联 final_answer（如出现未覆盖的新前缀
+        # 变体），content 可能仍是整段原始 JSON（含 `final_answer` 前缀）。此处统一
+        # 再做一次内联答案提取，保证 natural_stop 落库与展示的是答案正文而非原始 JSON。
+        inline = extract_inline_answer(content)
+        if inline is not None:
+            content = inline
 
         # stuck loop 检测：连续相同 content 且无 tool call
         # REQ-7: 连续 3 轮相同 content 且无 tool call 时自动终止并返回最后内容

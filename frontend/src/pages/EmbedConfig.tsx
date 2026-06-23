@@ -161,12 +161,16 @@ function EmbedConfig() {
     setShowDialog(true)
   }
 
-  // 选服务商：自动回填 base_url（仅当前为空时）。运行时仍走后端 URL 格式自动检测。
+  // 选服务商：自动回填 base_url。运行时仍走后端 URL 格式自动检测。
+  // 地址为空、或仍是上一个服务商的预设地址（用户未手改）时跟随切换；用户手填的地址保留。
   function handleVendorChange(vendor: string) {
     setForm((prev) => {
-      const url = defaultBaseUrl(vendor, prev.config_type as ModelCategory)
+      const category = prev.config_type as ModelCategory
+      const prevDefault = defaultBaseUrl(prev.vendor, category)
+      const newUrl = defaultBaseUrl(vendor, category)
       const next = { ...prev, vendor }
-      if (url && !prev.base_url.trim()) next.base_url = url
+      const current = prev.base_url.trim()
+      if (!current || current === prevDefault) next.base_url = newUrl
       return next
     })
   }

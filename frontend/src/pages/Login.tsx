@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { authApi } from '@/lib/api'
@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
-import Prism from '@/components/Prism'
+import PrismBackground from '@/components/PrismBackground'
 
 // 打字机效果：按 speed（毫秒/字）逐字输出 text，返回已显示文本与是否输出完成
 function useTypewriter(text: string, speed = 80) {
@@ -37,6 +37,7 @@ export default function Login() {
     '连接数据源，沉淀团队知识，让智能问答触手可及。',
   )
   const navigate = useNavigate()
+  const location = useLocation()
   const { login } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -57,8 +58,13 @@ export default function Login() {
     setSubmitting(true)
     try {
       await login(username, password)
-      // 强制改密由路由守卫接管；否则进首页
-      navigate('/', { replace: true })
+      // 登录后跳回来源页（含 query，如分享链接 ?share=token）；无来源则进首页。
+      // 强制改密场景由路由守卫接管。
+      const from = (location.state as { from?: { pathname?: string; search?: string } } | null)?.from
+      const target = from?.pathname
+        ? `${from.pathname}${from.search || ''}`
+        : '/'
+      navigate(target, { replace: true })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '登录失败')
     } finally {
@@ -71,17 +77,7 @@ export default function Login() {
       {/* 左侧：Prism 动态背景 + 品牌文案（小屏隐藏） */}
       <div className="relative hidden w-1/2 overflow-hidden bg-[#070708] lg:block">
         <div className="absolute inset-0">
-          <Prism
-            animationType="rotate"
-            timeScale={0.5}
-            height={2.5}
-            baseWidth={3.5}
-            scale={2.6}
-            hueShift={0.5}
-            colorFrequency={1.5}
-            noise={0.5}
-            glow={1.5}
-          />
+          <PrismBackground />
         </div>
         {/* 底部品牌文案 */}
         <div className="absolute inset-x-0 bottom-0 z-10 p-12">

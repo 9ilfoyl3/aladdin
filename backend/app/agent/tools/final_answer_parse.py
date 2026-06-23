@@ -26,6 +26,43 @@ _ANSWER_REGEX = re.compile(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"')
 # JSON 合法转义字母
 _VALID_ESCAPE_CHARS = set('"\\/bfnrtu')
 
+# 内联 final_answer 的工具名前缀（弱 function-calling 模型偶发写进正文）。
+_INLINE_TOOL_NAME = "final_answer"
+# 工具名与 `{` 之间允许出现的分隔符（空白、冒号、括号、等号、引号）。
+_INLINE_PREFIX_SEPARATORS = " \t\n\r:(=\""
+
+
+def extract_inline_answer(text: str) -> str | None:
+    """从一段完整文本中识别并提取「内联 final_answer」的答案正文。
+
+    用于落库前的最终兜底：弱 function-calling 模型（千问等）有时不发标准
+    tool_call，而是把 final_answer 调用写成纯文本 JSON 输出到正文，偶发还会
+    在 JSON 前带上 `final_answer` 工具名前缀，例如::
+
+        {"answer": "..."}
+        final_answer {"answer": "..."}
+        final_answer({"answer": "..."})
+
+    若 text（strip 并剥除可选工具名前缀后）以 `{` 开头且含 "answer" 键，则用
+    三级容错解析提取 answer 正文返回；否则返回 None（表示不是内联答案，调用方
+    应保持原文不变）。
+    """
+    if not text:
+        return None
+    s = text.strip()
+    if not s:
+        return None
+
+    # 剥除可选的 `final_answer` 工具名前缀（大小写不敏感）。
+    if s[: len(_INLINE_TOOL_NAME)].lower() == _INLINE_TOOL_NAME:
+        s = s[len(_INLINE_TOOL_NAME):].lstrip(_INLINE_PREFIX_SEPARATORS)
+
+    if not s.startswith("{") or '"answer"' not in s:
+        return None
+
+    answer, ok = parse_final_answer_args(s)
+    return answer if ok else None
+
 
 def parse_final_answer_args(raw: str) -> tuple[str, bool]:
     """从 final_answer 的原始 arguments 中提取 answer 字段。

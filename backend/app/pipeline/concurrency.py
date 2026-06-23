@@ -52,6 +52,9 @@ _embed_global = _LoopBoundSemaphore(
 _ocr_global = _LoopBoundSemaphore(
     lambda: get_settings().pipeline_ocr_concurrency
 )
+_asr_global = _LoopBoundSemaphore(
+    lambda: get_settings().pipeline_asr_concurrency
+)
 
 
 def get_embed_semaphore() -> asyncio.Semaphore:
@@ -64,9 +67,16 @@ def get_ocr_semaphore() -> asyncio.Semaphore:
     return _ocr_global.get()
 
 
+def get_asr_semaphore() -> asyncio.Semaphore:
+    """获取进程级全局 ASR 并发信号量（所有文档共享）。"""
+    return _asr_global.get()
+
+
 def reset_for_tests() -> None:
     """测试辅助：清空缓存的信号量，强制下次按当前配置/循环重建。"""
     _embed_global._sem = None
     _embed_global._loop = None
     _ocr_global._sem = None
     _ocr_global._loop = None
+    _asr_global._sem = None
+    _asr_global._loop = None

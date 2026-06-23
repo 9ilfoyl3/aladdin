@@ -251,7 +251,7 @@ async def rewrite_prompt(
         raise HTTPException(status_code=400, detail="请描述你想要的角色与特性")
 
     # 使用默认模型（model_config_id=None → 走数据库默认配置 → 全局配置兜底）
-    llm, _, _, _ = await _get_llm_for_request(None)
+    llm, _, _ = await _get_llm_for_request(None)
 
     meta_system = (
         "你是一名提示词写作助手，负责为「知识库问答助手」编写一段【自定义指令】。"

@@ -50,12 +50,42 @@ def normalize_embed_base_url(base_url: str) -> str:
     return url
 
 
+def detect_embed_format(base_url: str) -> str:
+    """检测 Embedding API 格式（基于归一化后的 base_url），参照 rerank 的检测策略。
+
+    Returns:
+        "standard" - OpenAI 兼容（裸 host:port / 以 /v1 结尾 / DashScope），拼接 /embeddings，
+                     请求体 {input, model, encoding_format}
+        "custom"   - URL 含其他具体路径（如自建 /get_embedding），直接 POST 到完整 URL，
+                     请求体 {text_list: [...]}，且不提供 sparse
+
+    约定：仅在用户把 base_url 填到具体推理端点路径时才判为 custom，
+    不影响裸 host:port、/v1 结尾、DashScope 等既有路径。
+    """
+    normalized = normalize_embed_base_url(base_url)
+    path = normalized.split("://", 1)[-1]  # 去掉协议
+    segments = path.split("/")
+    # 仅 host[:port] 或以 / 结尾 → standard
+    if len(segments) <= 1 or segments[-1] == "":
+        return "standard"
+    # 以 /v1 结尾 → OpenAI 兼容（DashScope 等），仍走 standard 拼 /embeddings
+    if segments[-1] == "v1":
+        return "standard"
+    return "custom"
+
+
 def embeddings_url(base_url: str) -> str:
-    """由 base_url 推导实际的 embeddings 推理端点（归一化 + 拼 /embeddings）。
+    """由 base_url 推导实际的 embeddings 推理端点。
+
+    - standard：归一化后拼 /embeddings（OpenAI 兼容，行为不变）。
+    - custom：直接使用用户填写的完整 URL（如 .../get_embedding）。
 
     供 RemoteEmbedder 与「测试连通性」接口共用，保证两条路径拼出的 URL 完全一致。
     """
-    return f"{normalize_embed_base_url(base_url)}/embeddings"
+    normalized = normalize_embed_base_url(base_url)
+    if detect_embed_format(normalized) == "custom":
+        return normalized
+    return f"{normalized}/embeddings"
 
 
 class RemoteEmbedder(EmbedProvider):
@@ -89,11 +119,16 @@ class RemoteEmbedder(EmbedProvider):
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
-        self.sparse_enabled = sparse_enabled
+        # custom 格式（URL 含具体路径，如自建 /get_embedding）不支持 sparse，强制关闭。
+        self._format = detect_embed_format(self.base_url)
+        self.sparse_enabled = sparse_enabled and self._format != "custom"
         self.max_connections = max_connections
         self._client: httpx.AsyncClient | None = None
         # sparse 端点可用性缓存：None=未探测, True=可用, False=不可用
         self._sparse_available: bool | None = None
+        if self._format == "custom":
+            # custom 端点不支持 sparse，直接标记不可用，避免无谓探测。
+            self._sparse_available = False
 
     def _get_client(self) -> httpx.AsyncClient:
         """获取复用的 httpx 客户端，支持连接池"""
@@ -135,7 +170,11 @@ class RemoteEmbedder(EmbedProvider):
         headers = self._get_headers()
         client = self._get_client()
         url = embeddings_url(self.base_url)
-        payload = {"input": texts, "model": self.model, "encoding_format": "float"}
+        if self._format == "custom":
+            # 自建端点（如 /get_embedding）：直接 POST 到完整 URL，请求体用 text_list。
+            payload = {"text_list": texts}
+        else:
+            payload = {"input": texts, "model": self.model, "encoding_format": "float"}
 
         print(f"[RemoteEmbedder] Dense 请求: {len(texts)} 个文本, url={url}")
         sys.stdout.flush()

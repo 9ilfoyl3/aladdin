@@ -446,6 +446,10 @@ async def _folder_cleanup_background(
         await store.remove_many(keys)
         logger.info("文件夹删除 - MinIO 源文件清理完成，共 %d 个文档", len(doc_info_list))
 
+    # 删除知识图谱中这些文档贡献的实体/关系（优雅降级，Req 5.1）。
+    from app.pipeline.graph.cleanup import cleanup_graph_for_docs
+    await cleanup_graph_for_docs(kb_id, doc_ids)
+
     # 清除检索缓存
     try:
         from app.retrieval.cache import get_retrieval_cache

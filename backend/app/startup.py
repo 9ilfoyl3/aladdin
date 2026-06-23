@@ -12,7 +12,7 @@ from sqlalchemy import select, func
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
-from app.schema.db import EmbedConfig, OCRConfig
+from app.schema.db import ASRConfig, EmbedConfig, OCRConfig
 from app.storage.database import async_session
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,28 @@ async def load_ocr_manager() -> OCRManager | None:
         return None
 
 
+async def load_asr_manager():
+    """从数据库加载 ASR 配置并创建 ASRManager
+
+    Returns:
+        ASRManager 实例，如果没有配置则返回 None
+    """
+    from app.pipeline.asr.manager import ASRManager
+
+    try:
+        async with async_session() as session:
+            result = await session.execute(select(ASRConfig))
+            configs = result.scalars().all()
+        if configs:
+            logger.info("load_asr_manager: 找到 %d 条 ASR 配置", len(configs))
+            return ASRManager(configs)
+        logger.info("load_asr_manager: 数据库中无 ASR 配置")
+        return None
+    except Exception as e:
+        logger.warning("加载 ASR 配置失败: %s", e)
+        return None
+
+
 async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
     """初始化并启动 InvalidationBus 后台订阅（subOnce 防重）。
 
@@ -187,3 +209,22 @@ async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
         # 后台协程，不阻塞启动
         asyncio.create_task(bus.subscribe_loop(handlers))
         logger.info("InvalidationBus 后台订阅已启动")
+
+
+async def init_graph_store() -> None:
+    """启动时初始化进程内 GraphStore 单例（图谱存储连接 + schema 幂等创建）。
+
+    失败仅记 warning 不阻断启动：全局未启用 / Neo4j 不可用 / 驱动未安装时
+    get_graph_store() 返回 None，图谱功能整体降级关闭，主链路零影响
+    （Requirements 9.3 / 7.2）。
+    """
+    try:
+        from app.storage.graph_store import get_graph_store
+
+        store = await get_graph_store()
+        if store is not None:
+            logger.info("知识图谱存储已就绪（Neo4j 连接成功，约束/索引已创建）")
+        else:
+            logger.info("知识图谱功能未启用或不可用，已降级关闭（不影响主链路）")
+    except Exception as e:
+        logger.warning("初始化知识图谱存储失败（降级关闭，不阻断启动）: %s", e)

@@ -176,7 +176,7 @@ async def generate_skill(
     if not instruction:
         raise HTTPException(status_code=400, detail="请描述你想要的技能")
 
-    llm, _, _, _ = await _get_llm_for_request(None)
+    llm, _, _ = await _get_llm_for_request(None)
 
     meta_system = (
         "你是一名 Agent 技能设计助手，为「知识库问答助手」设计一个可复用的【技能】。"

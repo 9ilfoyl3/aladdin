@@ -16,6 +16,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { authApi, type MeProfile } from './api'
 import {
+  TOKEN_KEY,
   clearToken,
   loadToken,
   registerUnauthorizedHandler,
@@ -112,6 +113,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshIdentity()
   }, [refreshIdentity])
+
+  // 跨标签登录态同步（单点登录）：localStorage 的 token 在其它标签页变化时，
+  // 本标签页随之同步——他处登录则本页加载身份，他处登出则本页转未登录并跳登录页。
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      // 仅响应 token 键（key 为 null 表示 clear()，也需处理）
+      if (e.key !== null && e.key !== TOKEN_KEY) return
+      const current = localStorage.getItem(TOKEN_KEY)
+      // 同步内存缓存到最新值
+      setToken(current)
+      if (current) {
+        void refreshIdentity()
+      } else {
+        setState({ ...initialState, ready: true })
+        navigate('/login', { replace: true })
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [refreshIdentity, navigate])
 
   const login = useCallback(
     async (username: string, password: string) => {

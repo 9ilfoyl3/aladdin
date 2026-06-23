@@ -1,11 +1,11 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
 import { toast } from 'sonner'
-import { FileText, Copy } from 'lucide-react'
+import { FileText, Copy, Sparkles, Tag } from 'lucide-react'
 import { documentApi } from '@/lib/api'
-import type { PageResult } from '@/lib/api'
+import type { PageResult, DocumentEvent } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -25,21 +25,59 @@ interface ChunkViewerProps {
 }
 
 /**
- * 在父块内容中用 <mark> 标签高亮子块文本
+ * 在父块内容中用 <mark> 标签高亮子块文本。
+ *
+ * 子块文本未必是父块文本的「精确」子串：切分器在拼接子块时会对空白做归一化
+ * （例如把段落间的双换行压成单换行、用 \n 连接多个结构段），导致字符级 indexOf
+ * 失败。因此这里采用「空白无关」匹配：把子块按空白拆成 token，token 之间允许
+ * 任意空白（含全角空格、换行），在父块原文中定位后高亮**原文**片段，保证视觉
+ * 高亮与原文一致，且对历史/新切分数据都生效。
  */
 function highlightChildren(parentContent: string, children: string[]): string {
   if (!children || children.length === 0) return parentContent
 
-  let result = parentContent
-  const sorted = [...children].sort((a, b) => b.length - a.length)
+  // 记录已高亮区间，避免重叠（长子块优先占位）
+  const ranges: Array<[number, number]> = []
+  const sorted = [...children]
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => b.c.length - a.c.length)
 
-  for (const child of sorted) {
-    if (!child) continue
-    const escaped = child.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const regex = new RegExp(escaped)
-    result = result.replace(regex, `<mark>${child}</mark>`)
+  const overlaps = (s: number, e: number) =>
+    ranges.some(([rs, re]) => s < re && e > rs)
+
+  for (const { c } of sorted) {
+    if (!c || !c.trim()) continue
+    // 按空白拆 token，每个 token 转义后用 \s* 连接，允许空白差异
+    const tokens = c.trim().split(/\s+/).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    if (tokens.length === 0) continue
+    const pattern = tokens.join('\\s*')
+    let regex: RegExp
+    try {
+      regex = new RegExp(pattern, 'g')
+    } catch {
+      continue
+    }
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(parentContent)) !== null) {
+      const s = m.index
+      const e = m.index + m[0].length
+      if (m[0].length === 0) { regex.lastIndex++; continue }
+      if (!overlaps(s, e)) {
+        ranges.push([s, e])
+        break // 每个子块只高亮第一处不重叠的匹配
+      }
+    }
   }
 
+  if (ranges.length === 0) return parentContent
+
+  // 按起点升序，从后往前插入 <mark>，避免位移影响索引
+  ranges.sort((a, b) => a[0] - b[0])
+  let result = parentContent
+  for (let k = ranges.length - 1; k >= 0; k--) {
+    const [s, e] = ranges[k]
+    result = result.slice(0, s) + '<mark>' + result.slice(s, e) + '</mark>' + result.slice(e)
+  }
   return result
 }
 
@@ -66,6 +104,13 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
   const chunks = data?.pages.flatMap((p) => p.items) ?? []
   const total = data?.pages[0]?.total ?? 0
 
+  // 文档抽取出的事件（事件中心图谱）。图谱未启用 / 无事件时后端返回 []，按空态隐藏。
+  const { data: events = [] } = useQuery({
+    queryKey: ['doc-events', documentId],
+    queryFn: () => documentApi.events(documentId!) as Promise<DocumentEvent[]>,
+    enabled: !!documentId,
+  })
+
   // 弹窗内滚动容器的触底哨兵
   const sentinelRef = useInfiniteScroll(fetchNextPage, {
     hasMore: !!hasNextPage,
@@ -89,6 +134,47 @@ function ChunkViewer({ documentId, onClose }: ChunkViewerProps) {
 
         {/* 切片列表 */}
         <div className="flex-1 overflow-auto px-6 py-4">
+          {/* 抽取事件（事件中心图谱）：有事件时展示在切片列表上方，无则隐藏 */}
+          {events.length > 0 && (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-sm font-semibold">抽取事件</span>
+                <span className="text-xs text-muted-foreground">共 {events.length} 个</span>
+              </div>
+              <div className="space-y-2.5">
+                {events.map((event) => (
+                  <div
+                    key={event.id}
+                    className="rounded-xl border border-border/60 bg-card px-4 py-3"
+                  >
+                    <div className="text-sm font-medium text-foreground">
+                      {event.title || '（无标题）'}
+                    </div>
+                    {event.summary && (
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        {event.summary}
+                      </p>
+                    )}
+                    {event.entity_names.length > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <Tag className="h-3 w-3 text-muted-foreground/70" />
+                        {event.entity_names.map((name) => (
+                          <span
+                            key={name}
+                            className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-xs text-primary"
+                          >
+                            {name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {isLoading ? (
             <ChunkListSkeleton count={4} />
           ) : chunks.length === 0 ? (

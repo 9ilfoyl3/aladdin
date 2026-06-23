@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, Database, FileText, FolderOpen, Share2, Globe, Lock, Search, ArrowUpDown, X, Link2, Copy } from 'lucide-react'
-import { authApi, knowledgeBaseApi, kbShareLinkApi } from '@/lib/api'
+import { authApi, knowledgeBaseApi, kbShareLinkApi, graphApi, systemApi } from '@/lib/api'
 import { copyToClipboard } from '@/lib/clipboard'
 import type { PageResult, KnowledgeBaseListParams, KBCapacity } from '@/lib/api'
 import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
@@ -40,8 +40,12 @@ interface KnowledgeBaseItem {
   owner_username?: string | null
   tenant_name?: string | null
   share_count?: number | null
+  // 当前身份与该库的关系（后端唯一判定源）：mine|shared|org|others。前端标签/分组按此渲染。
+  relation?: 'mine' | 'shared' | 'org' | 'others' | null
   // 容量进度条（session-file-upload Req 7）。后端列表/详情按需填充，未计算时为 null。
   capacity?: KBCapacity | null
+  // KB 配置（含 config.graph，用于编辑时回填图谱开关）。列表接口可能不返回，编辑时按需读取。
+  config?: { graph?: { enabled?: boolean } | null } | null
 }
 
 // 表单数据类型
@@ -49,6 +53,8 @@ interface FormData {
   name: string
   description: string
   visibility: VisibilityChoice
+  // 知识图谱开关（仅全局 graph_enabled 时在对话框显示；提交后经 updateGraphConfig 落库）
+  graphEnabled: boolean
 }
 
 // 可见性三档：私有 / 组织·只读 / 组织·读写
@@ -83,7 +89,15 @@ function KnowledgeBase() {
   const { isOwner, isAdmin } = useAuth()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<KnowledgeBaseItem | null>(null)
-  const [form, setForm] = useState<FormData>({ name: '', description: '', visibility: 'private' })
+  const [form, setForm] = useState<FormData>({ name: '', description: '', visibility: 'private', graphEnabled: false })
+
+  // 全局图谱能力开关（后端 GRAPH_ENABLE + Neo4j 可用）。关闭时对话框不显示图谱选项。
+  const { data: frontendConfig } = useQuery({
+    queryKey: ['frontend-config'],
+    queryFn: () => systemApi.getFrontendConfig(),
+    staleTime: 60000,
+  })
+  const graphGloballyEnabled = frontendConfig?.graph_enabled === true
 
   // 列表筛选/排序/搜索状态
   const [relation, setRelation] = useState<RelationFilter>('all')
@@ -118,32 +132,34 @@ function KnowledgeBase() {
     return isOwner(kb.owner_user_id)
   }
 
-  // 列表关系标签：我的（蓝）/ 组织公共（灰）/ 共享给我（绿）/ 他人私有·管理员只读（琥珀）
+  // 列表关系标签：我的（蓝）/ 共享给我（绿）/ 组织公共（灰）/ 他人私有·管理员只读（琥珀）。
+  // 关系判定收口到后端 kb.relation（唯一源），前端只负责把档位映射成展示样式，不再用
+  // owner/visibility/is_admin 自行重算（修复管理员领取的分享被误判为「他人私有」的问题）。
   // detail：共享给我 -> 「谁分享的」；组织公共 -> 来源租户名；管理员只读 -> 归属人。
-  // 「我的」库的当前状态以可点击 chip 单独渲染（见卡片底部），不走 detail。
   function relationBadge(kb: KnowledgeBaseItem): { text: string; cls: string; detail?: string } {
-    if (isOwner(kb.owner_user_id)) {
-      return { text: '我的', cls: 'bg-blue-100 text-blue-700 border-blue-200' }
-    }
-    if (kb.visibility === 'organization') {
-      return {
-        text: '组织公共',
-        cls: 'bg-muted text-muted-foreground',
-        detail: kb.tenant_name ? `来自 ${kb.tenant_name}` : undefined,
-      }
-    }
-    // 非自己、非组织公共的私有库：管理员是监管只读可见，普通成员则是被共享
-    if (isAdmin) {
-      return {
-        text: '他人私有 · 只读',
-        cls: 'bg-amber-100 text-amber-700 border-amber-200',
-        detail: kb.owner_username ? `归属 ${kb.owner_username}` : undefined,
-      }
-    }
-    return {
-      text: '共享给我',
-      cls: 'bg-green-100 text-green-700 border-green-200',
-      detail: kb.owner_username ? `来自 ${kb.owner_username}` : undefined,
+    // 向后兼容：旧接口/详情未透出 relation 时，回退按 owner 兜底（其余统一当共享给我）
+    const relation = kb.relation ?? (isOwner(kb.owner_user_id) ? 'mine' : 'shared')
+    switch (relation) {
+      case 'mine':
+        return { text: '我的', cls: 'bg-blue-100 text-blue-700 border-blue-200' }
+      case 'org':
+        return {
+          text: '组织公共',
+          cls: 'bg-muted text-muted-foreground',
+          detail: kb.tenant_name ? `来自 ${kb.tenant_name}` : undefined,
+        }
+      case 'others':
+        return {
+          text: '他人私有 · 只读',
+          cls: 'bg-amber-100 text-amber-700 border-amber-200',
+          detail: kb.owner_username ? `归属 ${kb.owner_username}` : undefined,
+        }
+      default: // shared
+        return {
+          text: '共享给我',
+          cls: 'bg-green-100 text-green-700 border-green-200',
+          detail: kb.owner_username ? `来自 ${kb.owner_username}` : undefined,
+        }
     }
   }
 
@@ -204,16 +220,21 @@ function KnowledgeBase() {
 
   // 创建知识库
   const createMutation = useMutation({
-    mutationFn: (data: FormData) => {
+    mutationFn: async (data: FormData) => {
       const visibility = data.visibility === 'private' ? 'private' : 'organization'
       const org_permission =
         data.visibility === 'org_write' ? 'write' : data.visibility === 'org_read' ? 'read' : undefined
-      return knowledgeBaseApi.create({
+      const created = await knowledgeBaseApi.create({
         name: data.name,
         description: data.description,
         visibility,
         org_permission,
-      })
+      }) as { id: string }
+      // 全局开启图谱时，按对话框选择落 KB 级图谱开关（关闭为默认值，无需额外请求）。
+      if (graphGloballyEnabled && data.graphEnabled && created?.id) {
+        await graphApi.updateGraphConfig(created.id, { enabled: true })
+      }
+      return created
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['knowledge-bases'] })
@@ -221,7 +242,8 @@ function KnowledgeBase() {
     },
   })
 
-  // 更新知识库（仅改名称/描述；可见性由专门的可见性对话框处理）
+  // 更新知识库（仅改名称/描述；可见性由专门的可见性对话框处理）。
+  // 图谱类型是建库时定型的属性，编辑不允许切换，故此处不触碰 graph 配置。
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: FormData }) =>
       knowledgeBaseApi.update(id, { name: data.name, description: data.description }),
@@ -246,6 +268,8 @@ function KnowledgeBase() {
     onSuccess: () => {
       toast.success('已共享')
       if (shareKb) queryClient.invalidateQueries({ queryKey: ['kb-shares', shareKb.id] })
+      // 同步刷新列表，使卡片上的「分享给 N 人」人数即时更新
+      queryClient.invalidateQueries({ queryKey: ['knowledge-bases'] })
       setSelectedUserIds([])
     },
     onError: (e: Error) => toast.error(e.message || '共享失败'),
@@ -258,6 +282,8 @@ function KnowledgeBase() {
     onSuccess: (_data, vars) => {
       toast.success('已撤销共享')
       queryClient.invalidateQueries({ queryKey: ['kb-shares', vars.kbId] })
+      // 同步刷新列表，使卡片上的「分享给 N 人」人数即时更新
+      queryClient.invalidateQueries({ queryKey: ['knowledge-bases'] })
     },
     onError: (e: Error) => toast.error(e.message || '撤销失败'),
   })
@@ -291,7 +317,7 @@ function KnowledgeBase() {
 
   function openCreate() {
     setEditingItem(null)
-    setForm({ name: '', description: '', visibility: 'private' })
+    setForm({ name: '', description: '', visibility: 'private', graphEnabled: false })
     setShowDialog(true)
   }
 
@@ -303,7 +329,8 @@ function KnowledgeBase() {
           ? 'org_write'
           : 'org_read'
         : 'private'
-    setForm({ name: item.name, description: item.description || '', visibility: vis })
+    // 图谱类型建库时定型、编辑不可切换，graphEnabled 仅占位（编辑对话框不渲染该项）。
+    setForm({ name: item.name, description: item.description || '', visibility: vis, graphEnabled: false })
     setShowDialog(true)
   }
 
@@ -672,6 +699,41 @@ function KnowledgeBase() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground mt-1.5">创建后也可在卡片上随时调整可见性。</p>
+              </div>
+            )}
+            {/* 知识图谱类型（仿运行模式双按钮）：仅「新建」时可选，且需全局图谱能力开启。
+                图谱类型是建库时定型的属性，创建后不可切换，故编辑对话框不显示本项。
+                开启后该 KB 的文档入库会触发实体/关系抽取，详情页出现「知识图谱」入口。 */}
+            {!editingItem && graphGloballyEnabled && (
+              <div>
+                <Label className="mb-2 block">知识库类型</Label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, graphEnabled: false })}
+                    className={`flex-1 px-3 py-2 rounded-md text-xs border cursor-pointer transition-colors ${
+                      !form.graphEnabled
+                        ? 'bg-primary/10 border-primary/30 text-primary'
+                        : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
+                    }`}
+                  >
+                    普通知识库
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, graphEnabled: true })}
+                    className={`flex-1 px-3 py-2 rounded-md text-xs border cursor-pointer transition-colors ${
+                      form.graphEnabled
+                        ? 'bg-primary/10 border-primary/30 text-primary'
+                        : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
+                    }`}
+                  >
+                    知识图谱（抽取实体关系）
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  知识图谱类型在文档入库时自动构建实体与关系，详情页提供图谱浏览入口。创建后不可切换。
+                </p>
               </div>
             )}
             <DialogFooter>

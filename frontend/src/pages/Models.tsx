@@ -75,13 +75,15 @@ function Models() {
   // 用户是否手动改过思考参数格式（改过则不再随服务商/模型名自动覆盖）
   const [thinkingManual, setThinkingManual] = useState(false)
 
-  // 选服务商：自动回填 base_url（仅当前为空时），并按服务商+模型重选思考格式
+  // 选服务商：自动回填 base_url，并按服务商+模型重选思考格式。
+  // 地址为空、或仍是上一个服务商的预设地址（用户未手改）时跟随切换；用户手填的地址保留。
   function handleVendorChange(vendor: string) {
     setForm((prev) => {
-      const url = defaultBaseUrl(vendor, 'chat')
+      const prevDefault = defaultBaseUrl(prev.vendor, 'chat')
+      const newUrl = defaultBaseUrl(vendor, 'chat')
       const next = { ...prev, vendor }
-      // 仅在地址为空时自动填充，避免覆盖用户已手填的地址
-      if (url && !prev.base_url.trim()) next.base_url = url
+      const current = prev.base_url.trim()
+      if (!current || current === prevDefault) next.base_url = newUrl
       if (!thinkingManual) next.thinking_control = defaultThinkingControl(vendor, prev.model)
       return next
     })

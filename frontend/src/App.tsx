@@ -3,12 +3,14 @@ import type { ReactNode } from 'react'
 import Layout from './components/Layout'
 import KnowledgeBase from './pages/KnowledgeBase'
 import Documents from './pages/Documents'
+import KnowledgeGraph from './pages/KnowledgeGraph'
 import Chat from './pages/Chat'
 import Retrieval from './pages/Retrieval'
 import ApiKeys from './pages/ApiKeys'
 import Models from './pages/Models'
 import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
+import AsrServices from './pages/AsrServices'
 import AgentConfig from './pages/AgentConfig'
 import Skills from './pages/Skills'
 import Landing from './pages/Landing'
@@ -40,10 +42,10 @@ function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 // 登录后默认落地页：超管为纯平台管理身份（无知识库/对话），落到"租户管理"；
-// 其余身份落到知识库。避免超管落到一个其菜单里并不存在的知识库页（右侧内容与左侧菜单不一致）。
+// 其余身份落到对话页。
 function DefaultLanding() {
   const { isSuperAdmin } = useAuth()
-  return <Navigate to={isSuperAdmin ? '/tenants' : '/knowledge-bases'} replace />
+  return <Navigate to={isSuperAdmin ? '/tenants' : '/chat'} replace />
 }
 
 // 根路径入口：未登录展示炫酷落地页；已登录则按身份跳转到对应首页。
@@ -73,6 +75,7 @@ function App() {
       >
         <Route path="knowledge-bases" element={<KnowledgeBase />} />
         <Route path="knowledge-bases/:id" element={<Documents />} />
+        <Route path="knowledge-bases/:id/graph" element={<KnowledgeGraph />} />
         <Route path="chat" element={<Chat />} />
         <Route path="retrieval" element={<Retrieval />} />
         <Route path="models" element={<Models />} />
@@ -80,6 +83,7 @@ function App() {
         <Route path="skills" element={<Skills />} />
         <Route path="embed-config" element={<EmbedConfig />} />
         <Route path="ocr-services" element={<OcrServices />} />
+        <Route path="asr-services" element={<AsrServices />} />
         <Route path="api-keys" element={<ApiKeys />} />
         <Route path="tenants" element={<Tenants />} />
         <Route path="users" element={<Users />} />

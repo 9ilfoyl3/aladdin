@@ -35,6 +35,9 @@ python-docx>=1.1.2
 openpyxl>=3.1.5
 python-pptx>=1.0.2
 
+# 网页正文提取（链接转存：抓取网页 / 微信公众号图文链接，提取正文为 Markdown）
+trafilatura>=1.12.0
+
 # 中文分词（MMR 去冗余的词级 Jaccard；缺失时退化字符 bigram，不强依赖）
 jieba>=0.42.1
 

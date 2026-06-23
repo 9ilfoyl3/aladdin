@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from app.pipeline.embedder import EmbedResult
     from app.pipeline.ocr.manager import OCRManager
     from app.pipeline.ocr.provider import OCRResult
+    from app.pipeline.asr.manager import ASRManager
+    from app.pipeline.queue import TaskQueue
     from app.session_upload.limits import UploadLimits
 
 logger = logging.getLogger(__name__)
@@ -116,10 +118,16 @@ class DocumentPipeline:
         milvus_client: MilvusClient,
         db_session_factory: async_sessionmaker[AsyncSession],
         ocr_manager: OCRManager | None = None,
+        asr_manager: "ASRManager | None" = None,
+        graph_queue: "TaskQueue | None" = None,
     ):
         self.milvus = milvus_client
         self.db_session_factory = db_session_factory
         self.ocr_manager = ocr_manager
+        self.asr_manager = asr_manager
+        # 知识图谱抽取慢道队列（pipeline:graph）。None 表示未启用/不可用 → 文档完成后
+        # 不触发图谱抽取（优雅降级，主链路零影响）。
+        self.graph_queue = graph_queue
         # 初始化管道各节点
         self.enricher = Enricher(llm=None, enabled=False)
         settings = get_settings()
@@ -146,6 +154,7 @@ class DocumentPipeline:
         tenant_id: str | None,
         limits: "UploadLimits",
         incoming_doc_id: str | None = None,
+        progress_tracker: "ProgressTracker | None" = None,
     ) -> ProcessedDocument:
         """执行 Load→OCR→Clean→Chunk→Pre_Embed_Gate→Embed 的同步处理单元（design C5）。
 
@@ -169,6 +178,9 @@ class DocumentPipeline:
             limits: 单次上传校验取一次的生效限制快照（同一次校验全程复用，Req 9.3）。
             incoming_doc_id: KB 上传时本文档 ID，用于聚合时排除自身（避免重处理双计）；
                 会话上传可不传。
+            progress_tracker: 可选的进度追踪器。传入时（KB 异步路径）embedding 阶段
+                会按批次实时写库，让前端进度条在大文件长时间 embedding 中持续推进；
+                为 None 时（会话同步路径）不更新进度，行为与之前一致。
 
         Returns:
             :class:`ProcessedDocument` 产物（含 chunk_result / enriched_children / metadata_list /
@@ -189,9 +201,37 @@ class DocumentPipeline:
         load_result = await asyncio.to_thread(loader.load, file_path)
         images_to_cleanup = load_result.images
         try:
+            # ─── 2. 音频 ASR 转写（音频文件走语音识别链路） ───
+            is_audio = bool(load_result.metadata.get("is_audio"))
+            if is_audio:
+                if not self.asr_manager:
+                    # 音频文件但未配置 ASR 服务：业务输入问题。
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("音频文件需要语音识别，但未配置 ASR 服务")
+
+                asr_result = await self._transcribe_with_limit(file_path)
+                if not asr_result.full_text.strip():
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError("音频转写结果为空")
+
+                load_result = LoadResult(
+                    content=asr_result.full_text,
+                    metadata={
+                        **load_result.metadata,
+                        "asr_provider": asr_result.provider_name,
+                    },
+                    images=[],
+                )
+
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
-            needs_ocr = (not stripped_content or len(stripped_content) < 10) and self.ocr_manager
+            needs_ocr = (
+                not is_audio
+                and (not stripped_content or len(stripped_content) < 10)
+                and self.ocr_manager
+            )
             has_embedded_images = bool(load_result.images and self.ocr_manager)
 
             if needs_ocr:
@@ -204,7 +244,7 @@ class DocumentPipeline:
                     },
                     images=[],
                 )
-            elif not stripped_content or len(stripped_content) < 10:
+            elif not is_audio and (not stripped_content or len(stripped_content) < 10):
                 if not self.ocr_manager:
                     # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
                     # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
@@ -253,12 +293,13 @@ class DocumentPipeline:
                     page_blocks=use_page_blocks,
                 )
 
-            # 清洗后兜底 OCR：与 process() 一致
+            # 清洗后兜底 OCR：与 process() 一致（音频转写结果不触发 OCR 兜底）
             cleaned_stripped = final_content.strip()
             if (
                 (not cleaned_stripped or len(cleaned_stripped) < 10)
                 and self.ocr_manager
                 and not needs_ocr
+                and not is_audio
             ):
                 ocr_result = await self._recognize_with_limit(file_path)
                 final_content = ocr_result.full_text
@@ -292,6 +333,21 @@ class DocumentPipeline:
                 chunk_result = await asyncio.to_thread(
                     chunker.chunk, final_content, load_result.metadata
                 )
+
+            # ─── 3.4 大小护栏（对齐 WeKnora absoluteMaxSize） ───
+            # 无论上游用哪种 chunker（含手动指定的 laws/paper/qa 体裁切分器，
+            # 它们本身无 size 控制），统一对最终父/子块施加绝对大小上限，杜绝
+            # 超大块导致检索/问答时撑爆模型上下文。按租户分块参数取上限。
+            from app.pipeline.chunker import enforce_size_limits
+            from app.retrieval.config import get_retrieval_config_store
+
+            guard_cfg = await get_retrieval_config_store().get_effective(tenant_id)
+            chunk_result = enforce_size_limits(
+                chunk_result,
+                parent_size=guard_cfg.parent_chunk_size,
+                child_size=guard_cfg.child_chunk_size,
+                overlap=guard_cfg.chunk_overlap,
+            )
 
             child_count = len(chunk_result.child_chunks)
             if child_count > self._CHUNK_COUNT_WARN_THRESHOLD:
@@ -344,9 +400,17 @@ class DocumentPipeline:
                     )
                 )
 
-            # 不传 ProgressTracker / doc_id（会话同步路径无 Document 行；KB 路径外围另行追踪）
+            # 不传 ProgressTracker / doc_id（会话同步路径无 Document 行）；
+            # KB 异步路径传入 progress_tracker，使 embedding 按批次实时写库，
+            # 避免大文件 embedding 期间前端进度条长时间不动（progress_tracker 为 None
+            # 时不更新进度，与会话路径行为一致）。
+            if progress_tracker is not None:
+                # 进度推进到 EMBED 区间起点（50%），让前端从此处开始随批次增长。
+                await progress_tracker.start_stage(
+                    PipelineStage.EMBED, "正在生成向量"
+                )
             embed_result = await self._embed_with_progress(
-                embed_texts, tracker=None, doc_id=""
+                embed_texts, tracker=progress_tracker, doc_id=incoming_doc_id or ""
             )
 
             return ProcessedDocument(
@@ -505,14 +569,13 @@ class DocumentPipeline:
                     tenant_id=kb_tenant_id,
                     limits=limits,
                     incoming_doc_id=doc_id,
+                    progress_tracker=tracker,
                 )
 
-                # process_to_vectors 一次性走完 Load→Embed；按既有进度模型把各阶段标完成
-                # （进度粒度由"逐阶段"退化为"批量完成"，但前端 0–100 进度仍单调推进）。
+                # process_to_vectors 一次性走完 Load→Embed；其内部已在 embedding 阶段
+                # 按批次实时推进进度（EMBED 区间 50%–90%）。此处把 Load/OCR/Chunk 标完成、
+                # 并将 EMBED 收尾到区间终点（complete_stage→90%），保证后续 INDEX 衔接。
                 load_to_embed_duration_ms = int((time.monotonic() - stage_start) * 1000)
-                await tracker.complete_stage(PipelineStage.LOAD)
-                await tracker.skip_stage(PipelineStage.OCR)
-                await tracker.complete_stage(PipelineStage.CHUNK)
                 await tracker.complete_stage(PipelineStage.EMBED)
 
                 child_count = len(processed.enriched_children)
@@ -679,6 +742,10 @@ class DocumentPipeline:
                 if bus:
                     await bus.publish("kb_data", kb_id)
 
+                # 文档入库完成后非阻塞触发知识图谱抽取（双开关 + 队列门控，任何故障不影响
+                # 主入库结果；fire-and-forget 不阻塞 process 返回）。Req 1.1 / 1.2 / 4.1。
+                self._fire_graph_extract(doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id)
+
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
 
@@ -738,6 +805,34 @@ class DocumentPipeline:
                     await err_session.commit()
                 logger.error("文档 %s 处理失败: %s", doc_id, e)
                 raise
+
+    def _fire_graph_extract(
+        self, *, doc_id: str, kb_id: str, tenant_id: str | None
+    ) -> None:
+        """非阻塞触发知识图谱抽取（fire-and-forget）。
+
+        以 ``asyncio.create_task`` 调度 :func:`maybe_trigger_graph_extract`，包一层 try/except
+        守卫，使图谱触发的任何失败（双开关关闭、队列不可用、DB 异常等）都不影响文档入库
+        主链路的返回（Req 1.1，优雅降级）。``graph_queue`` 为 None 时直接 no-op，不增加成本。
+        """
+        if self.graph_queue is None:
+            return
+
+        from app.pipeline.graph.trigger import maybe_trigger_graph_extract
+
+        async def _run() -> None:
+            try:
+                await maybe_trigger_graph_extract(
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    tenant_id=tenant_id,
+                    db_session_factory=self.db_session_factory,
+                    graph_queue=self.graph_queue,
+                )
+            except Exception as e:  # noqa: BLE001 — 图谱触发失败绝不影响主入库结果
+                logger.warning("文档 %s 触发知识图谱抽取失败（已忽略，不影响入库）: %s", doc_id, e)
+
+        asyncio.create_task(_run())
 
     async def _select_chunker(
         self, session: AsyncSession, kb_id: str, file_type: str, content: str
@@ -1027,6 +1122,15 @@ class DocumentPipeline:
         from app.pipeline.concurrency import get_ocr_semaphore
         async with get_ocr_semaphore():
             return await self.ocr_manager.recognize(file_path)
+
+    async def _transcribe_with_limit(self, file_path: str):
+        """整文件 ASR：通过进程级全局 ASR 信号量限流后调用 asr_manager.transcribe。
+
+        所有文档共享同一个全局 ASR 信号量，保证对远程 ASR 服务的总并发恒定可控。
+        """
+        from app.pipeline.concurrency import get_asr_semaphore
+        async with get_asr_semaphore():
+            return await self.asr_manager.transcribe(file_path)
 
     async def _concurrent_ocr_images(
         self, images: list[EmbeddedImage], doc_id: str

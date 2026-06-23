@@ -34,8 +34,13 @@ class BaseLoader(ABC):
         ...
 
 
+# 支持的音频文件类型（走 ASR 语音转写链路）
+AUDIO_TYPES = {"mp3", "wav", "m4a", "flac", "ogg"}
+
 # 支持的文件类型
-SUPPORTED_TYPES = {"md", "txt", "pdf", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png"}
+SUPPORTED_TYPES = {
+    "md", "txt", "pdf", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png",
+} | AUDIO_TYPES
 
 
 def get_loader(file_type: str) -> BaseLoader:
@@ -80,6 +85,9 @@ def get_loader(file_type: str) -> BaseLoader:
     elif file_type in ("jpg", "jpeg", "png"):
         from app.pipeline.loaders.image_loader import ImageLoader
         return ImageLoader()
+    elif file_type in AUDIO_TYPES:
+        from app.pipeline.loaders.audio_loader import AudioLoader
+        return AudioLoader()
 
     # 不应到达此处
     raise ValueError(f"未实现的加载器: {file_type}")
