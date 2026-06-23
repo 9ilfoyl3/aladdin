@@ -56,6 +56,18 @@ function Chat() {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
+  // 当前展示的会话 id 镜像：供流式异步回调判断「输出归属的会话是否仍在前台」，
+  // 闭包里的 currentSessionId 会过期，必须用 ref 读最新值。
+  const currentSessionIdRef = useRef<string | null>(null)
+  // messages 状态镜像：发起新一轮流式时以它为基线播种流式缓冲（state 更新是异步的，
+  // 不能直接读 messages）。
+  const messagesRef = useRef<Message[]>(messages)
+  // 正在流式输出的会话缓冲（权威副本）：{ sessionId, messages }。
+  // 无论用户当前看的是哪个会话，流式回调都更新这里；仅当该会话在前台时才同步到 messages 状态。
+  // 切回该会话时用它恢复，实现会话级输出隔离。
+  const streamRef = useRef<{ sessionId: string; messages: Message[] } | null>(null)
+  // 正在流式输出的会话 id（用于判断「当前查看的会话是否正在流式」，控制光标/重试按钮）。
+  const streamingSessionRef = useRef<string | null>(null)
 
   const { currentSessionId, setCurrentSessionId, newSessionNonce, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
   const confirm = useConfirm()
@@ -112,6 +124,10 @@ function Chat() {
     }
   }, [])
 
+  // 同步「当前展示会话」与「消息列表」镜像，供流式异步回调读取最新值（闭包会过期）。
+  useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
+  useEffect(() => { messagesRef.current = messages }, [messages])
+
   // 默认选中 is_default 的 Agent 预设
   useEffect(() => {
     if (agentPresets.length > 0 && !selectedPreset) {
@@ -153,6 +169,22 @@ function Chat() {
     // 若该会话是刚在本地发起发送的（消息已在本地、可能正在流式），跳过加载避免覆盖
     if (pendingSendSessionRef.current === currentSessionId) {
       return
+    }
+    // 若切回的会话正在后台流式输出：从流式缓冲（权威副本）恢复，跳过服务端加载，
+    // 否则会用「尚未落库的半成品」之前的旧历史覆盖正在进行的输出。
+    if (
+      streamRef.current &&
+      streamRef.current.sessionId === currentSessionId &&
+      streamingSessionRef.current === currentSessionId
+    ) {
+      setMessages(streamRef.current.messages)
+      setIsStreaming(true)
+      setIsLoadingMessages(false)
+      return
+    }
+    // 切到的不是正在流式的会话：确保流式态关闭（流仍在后台跑，但前台不显示光标/禁用）。
+    if (streamingSessionRef.current !== currentSessionId) {
+      setIsStreaming(false)
     }
     // 加载会话消息
     async function loadMessages() {
@@ -304,6 +336,9 @@ function Chat() {
   ) {
     const query = (overrideQuery ?? input).trim()
     if (!query || isStreaming) return
+    // 已有后台流式在跑（用户可能切到别的会话查看），不允许并发发起新一轮，
+    // 否则会覆盖正在进行的流式缓冲。只支持单条在飞流。
+    if (streamingSessionRef.current !== null) return
 
     let sessionId = currentSessionId
     if (!sessionId) {
@@ -352,12 +387,37 @@ function Chat() {
         file_type: f.file_type,
       }))
     if (boundAttachments.length > 0) userMessage.attachments = boundAttachments
-    setMessages((prev) => [...prev, userMessage])
+
+    const assistantMessage: Message = { role: 'assistant', content: '', references: [] }
+
+    // 该轮流式输出绑定的会话 id（闭包内固定，不随用户切换会话变化）。
+    const streamSessionId = sessionId!
+    // 初始化该会话的流式缓冲（权威副本）：以「当前消息 + 本轮 user + 空 assistant」为基线。
+    // 之后所有流式增量都写进这里；仅当该会话在前台时才镜像到 messages 状态，实现会话隔离。
+    const baseMessages = [...messagesRef.current, userMessage, assistantMessage]
+    streamRef.current = { sessionId: streamSessionId, messages: baseMessages }
+    streamingSessionRef.current = streamSessionId
+    setMessages(baseMessages)
     setInput('')
     setIsStreaming(true)
 
-    const assistantMessage: Message = { role: 'assistant', content: '', references: [] }
-    setMessages((prev) => [...prev, assistantMessage])
+    // 会话隔离的消息更新器：增量始终写入该会话的流式缓冲；
+    // 仅当该会话仍是前台展示会话时，才同步到可见的 messages 状态。
+    // 这样后台流式不会污染用户切过去查看的其它会话。
+    const updateStream = (mutate: (prev: Message[]) => Message[]) => {
+      if (!streamRef.current || streamRef.current.sessionId !== streamSessionId) return
+      const next = mutate(streamRef.current.messages)
+      streamRef.current.messages = next
+      if (currentSessionIdRef.current === streamSessionId) {
+        setMessages(next)
+      }
+    }
+    // 会话隔离的上下文用量更新器：仅在该会话前台时更新进度圆环。
+    const updateUsage = (usage: { current: number; max: number }) => {
+      if (currentSessionIdRef.current === streamSessionId) {
+        setContextUsage(usage)
+      }
+    }
 
     try {
       // 合并知识库选择映射到后端契约（保持既有路由语义不变）：
@@ -438,7 +498,7 @@ function Chat() {
                 if (parsed.metadata.session_source_failed) sessionSourceFailed = true
                 if (parsed.metadata.kb_source_failed) kbSourceFailed = true
                 if (sessionSourceFailed || kbSourceFailed) {
-                  setMessages((prev) => {
+                  updateStream((prev) => {
                     const updated = [...prev]
                     const last = updated[updated.length - 1]
                     if (last && last.role === 'assistant') {
@@ -464,7 +524,7 @@ function Chat() {
                         segments = [...segments, { type: 'thought', content: parsed.content }]
                       }
                     }
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -486,7 +546,7 @@ function Chat() {
                       toolName: parsed.tool_name,
                       toolArgs: parsed.arguments,
                     }]
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -511,7 +571,7 @@ function Chat() {
                           }
                         : seg
                     )
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -543,7 +603,7 @@ function Chat() {
                         fullContent = lastSeg.content
                       }
                     }
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -561,7 +621,7 @@ function Chat() {
                     if (parsed.references && Array.isArray(parsed.references)) {
                       references = parsed.references
                     }
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -578,7 +638,7 @@ function Chat() {
                   case 'complete': {
                     if (typeof parsed.total_duration_ms === 'number') {
                       totalDurationMs = parsed.total_duration_ms
-                      setMessages((prev) => {
+                      updateStream((prev) => {
                         const updated = [...prev]
                         updated[updated.length - 1] = {
                           role: 'assistant',
@@ -595,7 +655,7 @@ function Chat() {
 
                   // 上下文 token 用量：更新进度圆环
                   case 'token_usage': {
-                    setContextUsage({
+                    updateUsage({
                       current: parsed.current_context_tokens,
                       max: parsed.max_context_tokens,
                     })
@@ -607,7 +667,7 @@ function Chat() {
                     isError = true
                     fullContent = `⚠️ ${parsed.content || '执行出错'}`
                     segments = [...segments, { type: 'answer', content: fullContent }]
-                    setMessages((prev) => {
+                    updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
                         role: 'assistant',
@@ -624,7 +684,7 @@ function Chat() {
                   case 'message_saved': {
                     if (parsed.message_id) {
                       savedMessageId = parsed.message_id as string
-                      setMessages((prev) => {
+                      updateStream((prev) => {
                         const updated = [...prev]
                         const last = updated[updated.length - 1]
                         if (last && last.role === 'assistant') {
@@ -642,7 +702,7 @@ function Chat() {
               // Agent 模式下的 references 事件（无 type 字段，直接包含 references 数组）
               if (isAgentMode && parsed.references && Array.isArray(parsed.references)) {
                 references = parsed.references
-                setMessages((prev) => {
+                updateStream((prev) => {
                   const updated = [...prev]
                   updated[updated.length - 1] = {
                     role: 'assistant',
@@ -658,7 +718,7 @@ function Chat() {
               // 旧格式兼容：agent_progress 事件（非 agent 模式下保留）
               if (parsed.type === 'agent_progress') {
                 agentSteps = [...(agentSteps || []), { step: parsed.step, detail: parsed.detail }]
-                setMessages((prev) => {
+                updateStream((prev) => {
                   const updated = [...prev]
                   updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps }
                   return updated
@@ -671,7 +731,7 @@ function Chat() {
                 const delta = parsed.choices?.[0]?.delta?.content
                 if (delta) {
                   fullContent += delta
-                  setMessages((prev) => {
+                  updateStream((prev) => {
                     const updated = [...prev]
                     updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps }
                     return updated
@@ -680,7 +740,7 @@ function Chat() {
                 // 非 agent 模式下的 references（旧格式，直接在 JSON 中）
                 if (parsed.references) {
                   references = parsed.references
-                  setMessages((prev) => {
+                  updateStream((prev) => {
                     const updated = [...prev]
                     updated[updated.length - 1] = { role: 'assistant', content: fullContent, references, agentSteps }
                     return updated
@@ -694,8 +754,8 @@ function Chat() {
 
       // 最终状态更新
       if (isAgentMode) {
-        setMessages((prev) => {
-          const updated = [...prev]
+        updateStream(() => {
+          const updated = [...streamRef.current!.messages]
           updated[updated.length - 1] = {
             role: 'assistant',
             content: fullContent,
@@ -710,24 +770,34 @@ function Chat() {
           return updated
         })
       } else {
-        setMessages((prev) => {
-          const updated = [...prev]
+        updateStream(() => {
+          const updated = [...streamRef.current!.messages]
           updated[updated.length - 1] = { role: 'assistant', content: fullContent, id: savedMessageId, isError, references, agentSteps, sessionSourceFailed, kbSourceFailed }
           return updated
         })
       }
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : '请求失败'
-      setMessages((prev) => {
+      updateStream((prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = { role: 'assistant', content: `⚠️ ${errMsg}`, isError: true }
         return updated
       })
     } finally {
-      setIsStreaming(false)
+      // 仅当本轮流式仍是「最新发起的那一轮」时才清流式态（避免误清掉之后又发起的新一轮）。
+      if (streamingSessionRef.current === streamSessionId) {
+        streamingSessionRef.current = null
+        streamRef.current = null
+        // 仅当用户当前仍在看这个会话时，才关闭前台的流式 UI 态。
+        if (currentSessionIdRef.current === streamSessionId) {
+          setIsStreaming(false)
+        }
+      }
       refreshSessions()
       // 清除本地发送标记：之后再切回该会话时正常从服务端加载
-      pendingSendSessionRef.current = null
+      if (pendingSendSessionRef.current === streamSessionId) {
+        pendingSendSessionRef.current = null
+      }
     }
   }
 
