@@ -935,13 +935,20 @@ function Chat() {
       const retry = await sessionApi.retryLastRound(currentSessionId)
       // 本地移除最后一轮（最后一条 user 及其之后的所有消息）
       pendingSendSessionRef.current = currentSessionId
-      setMessages((prev) => {
+      // 关键：同步裁剪 messagesRef（镜像）。messagesRef 只由 [messages] 的副作用在
+      // 渲染后更新，而本函数紧接着 await handleSend()，后者以 messagesRef.current 为基线
+      // 播种本轮消息。若不同步裁剪，handleSend 会读到「未裁剪」的旧列表（含旧 user+
+      // assistant），导致旧轮残留 + 重复追加新 query。故在此即时裁剪 ref 与 state 一致。
+      const trimmed = (() => {
+        const prev = messagesRef.current
         let lastUserIdx = -1
         for (let i = prev.length - 1; i >= 0; i--) {
           if (prev[i].role === 'user') { lastUserIdx = i; break }
         }
         return lastUserIdx >= 0 ? prev.slice(0, lastUserIdx) : prev
-      })
+      })()
+      messagesRef.current = trimmed
+      setMessages(trimmed)
       // 沿用该轮原始知识库（kb_ids 优先，回退单选 kb_id），同步选择器并显式传给重发，
       // 避免依赖尚未刷新的派生状态导致知识库/附件回落到输入框。
       const retryKbIds = (retry.kb_ids && retry.kb_ids.length > 0)

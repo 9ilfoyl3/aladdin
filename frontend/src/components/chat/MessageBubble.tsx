@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, Square } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -235,7 +235,9 @@ function MessageBubble({
         {/* 用户中途停止：保留已生成内容，气泡尾部展示「已停止」轻量提示 */}
         {msg.stopped && !(isStreaming && isLast) && (
           <div className="mx-1 flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
-            <Square className="h-3 w-3 fill-current" />
+            <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-current">
+              <span className="h-1.5 w-1.5 rounded-[1px] bg-current" />
+            </span>
             <span>已停止生成</span>
           </div>
         )}
