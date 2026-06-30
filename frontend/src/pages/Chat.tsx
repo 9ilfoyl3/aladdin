@@ -57,6 +57,25 @@ function Chat() {
   const [imagePreviewUrls, setImagePreviewUrls] = useState<Record<string, string>>({})
   const imagePreviewUrlsRef = useRef<Record<string, string>>({})
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 消息内容容器：用 ResizeObserver 监听其高度变化。Streamdown 的代码高亮 / Mermaid 是
+  // 异步动态 import 的——首屏代码块先以「未高亮的高大纯文本」渲染（scrollHeight 偏大），
+  // 高亮 resolve 后重排为紧凑的横向滚动块、高度骤降。任何「一次性 smooth 滚到底」都会
+  // 被这次高度坍缩打断、停在半路。改为监听内容尺寸、每次变化即「瞬时」贴底，才能稳定到底。
+  const contentRef = useRef<HTMLDivElement>(null)
+  // 标记上一次滚动是否由程序触发（贴底）。程序化贴底也会派发 scroll 事件，
+  // 若不区分，会和「用户上滑打破粘附」的判定混淆（尤其内容高度坍缩时）。
+  const programmaticScrollRef = useRef(false)
+  // 入场平滑滚动「正在进行」标志：smooth 动画期间会连续派发大量 scroll 事件，且中途 scrollTop
+  // 尚未到底，若据此重算粘附会被误判为用户上滑而打破粘附，随后高度坍缩就停在半路。
+  // 动画进行期间用此标志全程抑制粘附重算，直到真正到底或超时。
+  const autoScrollingRef = useRef(false)
+  // 进入/切换会话的「入场动画」标志：为 true 时首次贴底用平滑滚动（从顶部滑到底部的过渡），
+  // 待内容（含异步代码高亮）高度稳定后播放一次，避免被高度坍缩打断。之后转为瞬时贴底。
+  const entryAnimateRef = useRef(false)
+  // 入场平滑滚动的防抖定时器：每次内容高度变化都重置，停止变化一段时间后才真正平滑滚到底。
+  const entryScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 入场平滑滚动的兜底超时：动画异常未到底时强制结束抑制。
+  const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 是否「粘附底部」：true 时新内容自动滚到底；用户上滑后置 false，回到底部后恢复 true。
   // 用 ref 持有权威值（供流式异步/滚动回调即时读取），state 仅驱动按钮等 UI 渲染。
   const stickToBottomRef = useRef(true)
@@ -157,16 +176,62 @@ function Chat() {
     }
   }, [llmConfigs, selectedModel])
 
-  // 智能滚动到底部：仅当用户处于「粘附底部」状态时才自动滚动。
-  // 用户上滑查看历史时打破粘附，输出不再强行拉到底；回到底部后恢复粘附。
+  // 贴底（智能滚动）：用 ResizeObserver 监听内容容器高度变化，只要处于「粘附底部」状态，
+  // 每次高度变化（流式增量 / markdown / 代码高亮异步定型 / 高度坍缩）都「瞬时」贴到最新底部。
+  // 瞬时 scrollTop = scrollHeight 永远会被正确钳制到当前最大值，不像 smooth 动画会被中途的
+  // 高度坍缩打断而停在半路。这是「滚不到底」的根本解法。
+  //
+  // 入场动画（entryAnimateRef）：进入/切换会话时希望保留「从顶部平滑滑到底部」的过渡。
+  // 但平滑动画会被异步代码高亮的高度坍缩打断，故用防抖——内容高度每变一次就重置定时器，
+  // 待高度稳定（>120ms 无变化）后播放一次平滑滚动；其间不瞬时贴底，让用户看到从顶部下滑。
   useEffect(() => {
-    if (stickToBottomRef.current && scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTo({
-        top: scrollContainerRef.current.scrollHeight,
-        behavior: 'smooth',
-      })
+    const content = contentRef.current
+    const container = scrollContainerRef.current
+    if (!content || !container) return
+    const pin = () => {
+      if (!stickToBottomRef.current) return
+      if (entryAnimateRef.current) {
+        // 入场动画阶段：防抖，等高度稳定后再平滑滚一次到底，避免被坍缩打断。
+        if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
+        entryScrollTimerRef.current = setTimeout(() => {
+          entryAnimateRef.current = false
+          if (!stickToBottomRef.current) return
+          // 全程抑制粘附重算：smooth 动画会连续派发 scroll 事件，中途 scrollTop 未到底，
+          // 若被当作用户上滑就会打破粘附、停在半路。动画结束（到底）或超时后再解除。
+          autoScrollingRef.current = true
+          programmaticScrollRef.current = true
+          container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+          if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
+          autoScrollTimerRef.current = setTimeout(() => {
+            // 兜底：动画应已到底，强制再贴一次并解除抑制。
+            if (stickToBottomRef.current) {
+              programmaticScrollRef.current = true
+              container.scrollTop = container.scrollHeight
+            }
+            autoScrollingRef.current = false
+          }, 1000)
+        }, 260)
+        return
+      }
+      // 动画进行中高度又变（晚到的代码高亮坍缩）：重新发一次平滑滚动到新底部，保持过渡，
+      // 不要瞬时跳（否则用户看到的就是「直接蹦到底」而非滑动）。
+      if (autoScrollingRef.current) {
+        programmaticScrollRef.current = true
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+        return
+      }
+      // 常规阶段（流式增量等）：瞬时贴底，绝不被打断。
+      programmaticScrollRef.current = true
+      container.scrollTop = container.scrollHeight
     }
-  }, [messages])
+    const ro = new ResizeObserver(pin)
+    ro.observe(content)
+    return () => {
+      ro.disconnect()
+      if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
+      if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
+    }
+  }, [isLoadingMessages, currentSessionId])
 
   // 滚动监听：维护「粘附底部」状态、回到底部按钮可见性、当前激活提问锚点。
   useEffect(() => {
@@ -174,11 +239,27 @@ function Chat() {
     if (!el) return
     // 距底 <= 阈值视为「在底部」（流式高度抖动留出余量）
     const NEAR_BOTTOM = 80
-    const onScroll = () => {
+    const onScroll = (initial = false) => {
+      // 程序化贴底触发的 scroll：不重算粘附状态（避免高度坍缩时被误判为离底打破粘附），
+      // 仅消费一次标记。锚点高亮等仍按当前位置更新。
+      const wasProgrammatic = programmaticScrollRef.current
+      programmaticScrollRef.current = false
       const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
       const atBottom = distanceToBottom <= NEAR_BOTTOM
-      stickToBottomRef.current = atBottom
-      setShowScrollToBottom(!atBottom)
+      // 入场平滑滚动进行中：全程不重算粘附（中途 scrollTop 未到底，重算会误判为离底）。
+      // 一旦到底即认为动画完成，解除抑制。
+      if (autoScrollingRef.current) {
+        if (atBottom) {
+          autoScrollingRef.current = false
+          if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
+        }
+      } else if (!wasProgrammatic && !initial) {
+        // initial：effect 挂载/消息变更时的同步首调。此刻内容常在顶部（scrollTop=0）且尚未
+        // 贴底，绝不能据此把 stick 置 false——那会抢在 ResizeObserver 首次 pin 之前打破粘附，
+        // 导致「进入会话停在顶部不贴底」。stick 只由真实滚动事件（用户上滑/到底）更新。
+        stickToBottomRef.current = atBottom
+        setShowScrollToBottom(!atBottom)
+      }
 
       // 激活提问锚点：以视口上部「阅读基线」（容器高度 ~30%）为判定线，
       // 取该线以上、最靠近基线的那条 user 消息（即当前正在阅读的那一轮）。
@@ -203,9 +284,10 @@ function Chat() {
       if (atBottom) active = entries[entries.length - 1].idx
       setActiveAnchorIndex(active)
     }
-    el.addEventListener('scroll', onScroll, { passive: true })
-    onScroll()
-    return () => el.removeEventListener('scroll', onScroll)
+    const scrollHandler = () => onScroll(false)
+    el.addEventListener('scroll', scrollHandler, { passive: true })
+    onScroll(true)
+    return () => el.removeEventListener('scroll', scrollHandler)
   }, [messages])
 
   // 强制滚到底部并恢复粘附（回到底部按钮 / 发送新消息时调用）
@@ -237,6 +319,11 @@ function Chat() {
   useEffect(() => {
     // 切换/进入会话时关闭可能残留的 Artifact 预览（上一会话打开的附件预览不应带到新会话）
     closeArtifact()
+    // 进入/切换会话默认粘附底部：上一会话上滑残留的 stick=false 不带过来，
+    // 配合 ResizeObserver 在内容（含异步代码高亮）定型后定位到最新消息。
+    stickToBottomRef.current = true
+    // 标记本次为入场：内容定型后播放一次「从顶部平滑滑到底部」的过渡（防抖等高度稳定）。
+    entryAnimateRef.current = true
     if (currentSessionId === null) {
       setMessages([])
       setInput('')
@@ -1193,7 +1280,7 @@ function Chat() {
         {isLoadingMessages ? (
           <ChatMessagesSkeleton />
         ) : (
-          <div className="max-w-3xl mx-auto py-6 px-4 space-y-5 animate-in fade-in-0 duration-500">
+          <div ref={contentRef} className="max-w-3xl mx-auto py-6 px-4 space-y-5 animate-in fade-in-0 duration-500">
             {(() => {
               // 最新一条 assistant 消息的下标：仅它可重试（历史轮不可重试，避免破坏后续历史）
               let lastAssistantIdx = -1

@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import update
 
@@ -57,7 +57,7 @@ class ApiKeyUsageTracker:
         """记录一次调用（仅内存累加，O(1)，不触库）。"""
         async with self._lock:
             cur = self._pending.get(api_key_id)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if cur is None:
                 self._pending[api_key_id] = _Pending(delta=1, last_used_at=now)
             else:
