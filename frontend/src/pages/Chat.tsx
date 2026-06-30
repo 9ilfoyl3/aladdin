@@ -74,6 +74,8 @@ function Chat() {
   const entryAnimateRef = useRef(false)
   // 入场平滑滚动的防抖定时器：每次内容高度变化都重置，停止变化一段时间后才真正平滑滚到底。
   const entryScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 入场 rAF 平滑滚动的句柄：每帧重读实时 scrollHeight 缓动逼近底部，跟随懒加载增长。
+  const entryRafRef = useRef<number | null>(null)
   // 入场平滑滚动的兜底超时：动画异常未到底时强制结束抑制。
   const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 是否「粘附底部」：true 时新内容自动滚到底；用户上滑后置 false，回到底部后恢复 true。
@@ -191,35 +193,54 @@ function Chat() {
     const pin = () => {
       if (!stickToBottomRef.current) return
       if (entryAnimateRef.current) {
-        // 入场动画阶段：防抖，等高度稳定后再平滑滚一次到底，避免被坍缩打断。
+        // 入场动画阶段：防抖，等高度初步稳定后启动一次「自定义 rAF 平滑滚动」。
+        // 不用原生 scrollTo({behavior:'smooth'})——它的目标在发起时就固定了，而懒加载会让
+        // 下方内容边滚边挂载、高度持续增长，原生动画滚到「旧底部」就停，随后兜底瞬时贴底，
+        // 表现为「平滑一段后突然触底」。改为每帧重新读取实时 scrollHeight 并缓动逼近，
+        // 内容增长时持续平滑跟随，最终精确落到真实底部。
         if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
         entryScrollTimerRef.current = setTimeout(() => {
           entryAnimateRef.current = false
           if (!stickToBottomRef.current) return
-          // 全程抑制粘附重算：smooth 动画会连续派发 scroll 事件，中途 scrollTop 未到底，
-          // 若被当作用户上滑就会打破粘附、停在半路。动画结束（到底）或超时后再解除。
           autoScrollingRef.current = true
-          programmaticScrollRef.current = true
-          container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-          if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
-          autoScrollTimerRef.current = setTimeout(() => {
-            // 兜底：动画应已到底，强制再贴一次并解除抑制。
-            if (stickToBottomRef.current) {
-              programmaticScrollRef.current = true
-              container.scrollTop = container.scrollHeight
+          let stableFrames = 0
+          let lastTarget = -1
+          const step = () => {
+            if (!stickToBottomRef.current) { autoScrollingRef.current = false; return }
+            const c = scrollContainerRef.current
+            if (!c) { autoScrollingRef.current = false; return }
+            const target = c.scrollHeight - c.clientHeight
+            const cur = c.scrollTop
+            const diff = target - cur
+            // 缓动：每帧前进剩余距离的一部分，但夹在 [最小步长, 最大步长] 之间。
+            // 上限防止距离大时初段冲太快，整体更慢更匀。
+            const stepPx = Math.min(Math.max(diff * 0.06, 8), 28)
+            programmaticScrollRef.current = true
+            if (diff <= 1) {
+              c.scrollTop = target
+            } else {
+              c.scrollTop = cur + Math.min(stepPx, diff)
             }
-            autoScrollingRef.current = false
-          }, 1000)
-        }, 260)
+            // 目标连续稳定（懒加载不再增高）且已贴底 → 结束。
+            if (target === lastTarget && diff <= 1) {
+              stableFrames += 1
+            } else {
+              stableFrames = 0
+              lastTarget = target
+            }
+            if (stableFrames >= 2) {
+              c.scrollTop = c.scrollHeight
+              autoScrollingRef.current = false
+              return
+            }
+            entryRafRef.current = requestAnimationFrame(step)
+          }
+          entryRafRef.current = requestAnimationFrame(step)
+        }, 200)
         return
       }
-      // 动画进行中高度又变（晚到的代码高亮坍缩）：重新发一次平滑滚动到新底部，保持过渡，
-      // 不要瞬时跳（否则用户看到的就是「直接蹦到底」而非滑动）。
-      if (autoScrollingRef.current) {
-        programmaticScrollRef.current = true
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-        return
-      }
+      // 入场 rAF 动画进行中：高度变化由 step 每帧自行读取跟随，这里不额外贴底（避免打断缓动）。
+      if (autoScrollingRef.current) return
       // 常规阶段（流式增量等）：瞬时贴底，绝不被打断。
       programmaticScrollRef.current = true
       container.scrollTop = container.scrollHeight
@@ -230,6 +251,7 @@ function Chat() {
       ro.disconnect()
       if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
       if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
+      if (entryRafRef.current) cancelAnimationFrame(entryRafRef.current)
     }
   }, [isLoadingMessages, currentSessionId])
 
