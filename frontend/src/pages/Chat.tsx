@@ -79,6 +79,8 @@ function Chat() {
   const streamRef = useRef<{ sessionId: string; messages: Message[] } | null>(null)
   // 正在流式输出的会话 id（用于判断「当前查看的会话是否正在流式」，控制光标/重试按钮）。
   const streamingSessionRef = useRef<string | null>(null)
+  // 当前在飞的问答流 AbortController：点「停止」时 abort，触发后端 SSE 取消 + 落库部分答案。
+  const chatAbortRef = useRef<AbortController | null>(null)
 
   const { currentSessionId, setCurrentSessionId, newSessionNonce, refreshSessions, addOptimisticSession, replaceOptimisticSession, removeOptimisticSession } = useSession()
   const confirm = useConfirm()
@@ -508,9 +510,15 @@ function Chat() {
       const primaryKb = effectiveKbIds[0] || undefined
       const multiKbIds = effectiveKbIds.length > 1 ? effectiveKbIds : undefined
 
+      // 本轮问答流的中止句柄：点「停止」按钮时 abort，断开 SSE 连接，
+      // 后端据此取消 Agent 执行并把已生成的部分答案落库。
+      const abortController = new AbortController()
+      chatAbortRef.current = abortController
+
       const response = await fetch('/api/chat/completions', {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
+        signal: abortController.signal,
         body: JSON.stringify({
           model: 'rag',
           messages: [{ role: 'user', content: query }],
@@ -857,13 +865,28 @@ function Chat() {
         })
       }
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : '请求失败'
-      updateStream((prev) => {
-        const updated = [...prev]
-        updated[updated.length - 1] = { role: 'assistant', content: `⚠️ ${errMsg}`, isError: true }
-        return updated
-      })
+      // 用户点「停止」：abort 触发的 AbortError 不是错误，保留已流式产出的部分答案，
+      // 仅追加一个轻量「已停止」标记，不覆盖成错误气泡。
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        updateStream((prev) => {
+          const updated = [...prev]
+          const last = updated[updated.length - 1]
+          if (last && last.role === 'assistant') {
+            updated[updated.length - 1] = { ...last, stopped: true }
+          }
+          return updated
+        })
+      } else {
+        const errMsg = error instanceof Error ? error.message : '请求失败'
+        updateStream((prev) => {
+          const updated = [...prev]
+          updated[updated.length - 1] = { role: 'assistant', content: `⚠️ ${errMsg}`, isError: true }
+          return updated
+        })
+      }
     } finally {
+      // 清理本轮中止句柄（单条在飞流，本轮结束即可清）。
+      chatAbortRef.current = null
       // 仅当本轮流式仍是「最新发起的那一轮」时才清流式态（避免误清掉之后又发起的新一轮）。
       if (streamingSessionRef.current === streamSessionId) {
         streamingSessionRef.current = null
@@ -879,6 +902,12 @@ function Chat() {
         pendingSendSessionRef.current = null
       }
     }
+  }
+
+  // 停止当前流式输出：中止在飞的问答请求。后端收到断流后取消 Agent 执行，
+  // 并把已生成的部分答案落库；前端保留已显示内容并标记「已停止」。
+  function handleStop() {
+    chatAbortRef.current?.abort()
   }
 
   // 设置/取消 AI 回答反馈（点赞/踩）。乐观更新本地状态，失败回滚。
@@ -1109,6 +1138,7 @@ function Chat() {
     agentPresets,
     onInputChange: setInput,
     onSend: handleSend,
+    onStop: handleStop,
     onToggleKb: toggleKb,
     onModelChange: setSelectedModel,
     onPresetChange: setSelectedPreset,

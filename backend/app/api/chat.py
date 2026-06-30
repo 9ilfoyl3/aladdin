@@ -1359,6 +1359,7 @@ async def _stream_response(
         # 步骤面板统计的是「执行步骤（思考 + 工具调用）」的耗时，不含答案正文的流式输出，
         # 故在此截止，而非等整个引擎跑完（含答案 token 全部流完）。
         final_answer_at: float | None = None
+        cancelled = False
         try:
             while not agent_task.done():
                 try:
@@ -1378,16 +1379,49 @@ async def _stream_response(
             except Exception as e:
                 agent_error = e
                 logger.error("流式 Agent 执行异常: %s", sanitize_for_log(e))
+        except asyncio.CancelledError:
+            # 用户点「停止」或客户端断开：SSE 生成器被取消。Agent 在独立 task 中运行，
+            # 不会随生成器自动取消，必须显式 cancel 回收，避免空跑浪费 LLM token。
+            # 已产出的部分答案落库（被中断的回答也保留在历史里，可继续追问/重试）。
+            cancelled = True
+            logger.info("[Chat] 流式输出被中断，停止 Agent 执行并保存部分答案")
+            if not agent_task.done():
+                agent_task.cancel()
+            try:
+                await asyncio.shield(agent_task)
+            except BaseException:  # noqa: BLE001 - 任务已取消/异常，回收即可
+                pass
+            partial_answer = "".join(
+                s.get("content", "")
+                for s in agent_steps_collected
+                if s.get("type") == "final_answer" and s.get("content")
+            )
+            if session_id and partial_answer:
+                try:
+                    refs = await _build_references(state.knowledge_refs)
+                    refs_data = [r.model_dump() for r in refs] if refs else None
+                    await asyncio.shield(
+                        _save_message(
+                            session_id, "assistant", partial_answer,
+                            references=refs_data,
+                            agent_steps=agent_steps_collected or None,
+                            kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id,
+                        )
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("中断后保存部分答案失败: %s", sanitize_for_log(e))
+            raise
         finally:
-            # 排空队列中剩余的事件（异常路径同样执行，不丢已产生的思考/工具事件）
-            while not event_queue.empty():
-                event = event_queue.get_nowait()
-                sse_data = _agent_event_to_sse(event)
-                if sse_data:
-                    if final_answer_at is None and sse_data.get("type") == "final_answer":
-                        final_answer_at = time.time()
-                    agent_steps_collected.append(sse_data)
-                    yield json.dumps(sse_data, ensure_ascii=False)
+            # 取消路径下客户端已断开，再 yield 会二次抛错；仅正常路径排空剩余事件。
+            if not cancelled:
+                while not event_queue.empty():
+                    event = event_queue.get_nowait()
+                    sse_data = _agent_event_to_sse(event)
+                    if sse_data:
+                        if final_answer_at is None and sse_data.get("type") == "final_answer":
+                            final_answer_at = time.time()
+                        agent_steps_collected.append(sse_data)
+                        yield json.dumps(sse_data, ensure_ascii=False)
 
         # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用。
         # 注意：工具持有的 state 对象和引擎内部的 state 是不同的，
@@ -1549,6 +1583,21 @@ async def _stream_response(
                     choices=[StreamChoice(delta=DeltaContent(content=full_response[i:i + chunk_size]))],
                 )
                 yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
+    except asyncio.CancelledError:
+        # 用户点「停止」/客户端断开：保存已生成的部分正文到会话历史后再抛出，
+        # 使被中断的回答与 agent 分支一致地保留、可继续追问。
+        logger.info("[Chat] 非 Agent 流式输出被中断，保存部分答案")
+        if session_id and full_response:
+            try:
+                await asyncio.shield(
+                    _save_message(
+                        session_id, "assistant", full_response,
+                        kb_id=kb_id, kb_ids=kb_ids, tenant_id=tenant_id,
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("中断后保存部分答案失败: %s", sanitize_for_log(e))
+        raise
     except Exception as e:
         logger.warning("LLM 流式生成失败，降级为纯检索结果: %s", e)
         llm_degraded = True

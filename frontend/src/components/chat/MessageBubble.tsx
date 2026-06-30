@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, Square } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -62,6 +62,8 @@ export interface Message {
   feedback?: 'like' | 'dislike' | null
   // 标记本条 assistant 消息为错误结果（请求异常）：动作栏仅显示重试
   isError?: boolean
+  // 标记本条 assistant 消息被用户中途停止：保留已生成内容，气泡尾部展示「已停止」提示
+  stopped?: boolean
   references?: Reference[]
   agentSteps?: AgentStep[]
   // 用户消息绑定的会话文件附件（发送时从已上传文件中选取，随消息进入历史）
@@ -227,6 +229,14 @@ function MessageBubble({
                   ? '会话文件检索失败，本次回答未纳入本会话上传文件的内容。'
                   : '知识库检索部分失败，本次回答可能遗漏部分知识库内容。'}
             </span>
+          </div>
+        )}
+
+        {/* 用户中途停止：保留已生成内容，气泡尾部展示「已停止」轻量提示 */}
+        {msg.stopped && !(isStreaming && isLast) && (
+          <div className="mx-1 flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+            <Square className="h-3 w-3 fill-current" />
+            <span>已停止生成</span>
           </div>
         )}
 
