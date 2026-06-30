@@ -26,7 +26,9 @@ from app.auth.kb_scope import authorize_requested_kbs
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
+from app.agent.content_router import ContentStreamRouter
 from app.agent.tools.final_answer import FinalAnswerTool
+from app.agent.tools.final_answer_parse import extract_inline_answer
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
@@ -1511,22 +1513,40 @@ async def _stream_response(
     full_response = ""
     try:
         if stream_enabled:
-            async for token in llm.stream(messages, **llm_kwargs):
-                full_response += token
+            # 非 agent 简单 RAG 链路：部分模型会把整段回答写成 `{"answer": "..."}`
+            # （甚至带 `final_answer` 前缀）的纯文本 JSON 输出。复用 Agent 链路的
+            # ContentStreamRouter 逐 token 解包：普通文本原样透传，内联 answer JSON
+            # 则提取其 answer 字段值作为正文，避免原始 JSON 直接泄露给用户。
+            router = ContentStreamRouter()
+
+            def _emit_content(text: str) -> str:
+                nonlocal full_response
+                full_response += text
                 chunk_data = ChatCompletionChunk(
                     id=completion_id,
-                    choices=[StreamChoice(delta=DeltaContent(content=token))],
+                    choices=[StreamChoice(delta=DeltaContent(content=text))],
                 )
-                yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
+                return json.dumps(chunk_data.model_dump(), ensure_ascii=False)
+
+            async for token in llm.stream(messages, **llm_kwargs):
+                # router 区分 thought / answer，本链路两者都属于用户可见正文，统一发射。
+                _kind, text = router.feed(token)
+                if text:
+                    yield _emit_content(text)
+            # 冲刷 router 缓冲（流末仍在探测的残留按正文输出）
+            _, tail = router.flush()
+            if tail:
+                yield _emit_content(tail)
         else:
-            # 非流式生成：一次性获取完整回复，然后分段推送
+            # 非流式生成：一次性获取完整回复，解包可能的内联 answer JSON 后分段推送
             result = await llm.generate(messages, **llm_kwargs)
-            full_response = result
+            unwrapped = extract_inline_answer(result)
+            full_response = unwrapped if unwrapped is not None else result
             chunk_size = 4
-            for i in range(0, len(result), chunk_size):
+            for i in range(0, len(full_response), chunk_size):
                 chunk_data = ChatCompletionChunk(
                     id=completion_id,
-                    choices=[StreamChoice(delta=DeltaContent(content=result[i:i + chunk_size]))],
+                    choices=[StreamChoice(delta=DeltaContent(content=full_response[i:i + chunk_size]))],
                 )
                 yield json.dumps(chunk_data.model_dump(), ensure_ascii=False)
     except Exception as e:
@@ -1792,6 +1812,10 @@ async def chat_completions(
         llm_kwargs["enable_thinking"] = False
     try:
         answer = await llm.generate(messages, **llm_kwargs)
+        # 部分模型把整段回答写成 `{"answer": "..."}` 纯文本 JSON，解包为正文
+        unwrapped = extract_inline_answer(answer)
+        if unwrapped is not None:
+            answer = unwrapped
     except Exception as e:
         logger.warning("LLM 生成失败，降级为纯检索结果: %s", e)
         answer = _build_context(chunks)
