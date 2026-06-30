@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { knowledgeBaseApi, llmConfigApi, sessionApi, agentPresetApi, sessionFileApi, truncateSessionTitle } from '@/lib/api'
@@ -6,6 +7,7 @@ import type { SessionFileResponse, MessageAttachment } from '@/lib/api'
 import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
+import ChatAnchorRail, { type QueryAnchor } from '@/components/chat/ChatAnchorRail'
 import type { PendingSessionFile } from '@/components/chat/SessionFileList'
 import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
@@ -15,6 +17,7 @@ import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
 import { useArtifactStore } from '@/stores/artifactStore'
+import { cn } from '@/lib/utils'
 
 interface KnowledgeBaseItem {
   id: string
@@ -54,6 +57,14 @@ function Chat() {
   const [imagePreviewUrls, setImagePreviewUrls] = useState<Record<string, string>>({})
   const imagePreviewUrlsRef = useRef<Record<string, string>>({})
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 是否「粘附底部」：true 时新内容自动滚到底；用户上滑后置 false，回到底部后恢复 true。
+  // 用 ref 持有权威值（供流式异步/滚动回调即时读取），state 仅驱动按钮等 UI 渲染。
+  const stickToBottomRef = useRef(true)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  // 当前视口内激活的提问轮下标（驱动侧边锚点高亮）
+  const [activeAnchorIndex, setActiveAnchorIndex] = useState(-1)
+  // 每条 user 消息根节点 ref（按 message 下标存）：供锚点跳转定位 + 滚动高亮计算
+  const messageRefs = useRef<Record<number, HTMLDivElement | null>>({})
   // 标记：刚在该会话发起发送（消息已在本地），跳过 loadMessages 避免覆盖
   const pendingSendSessionRef = useRef<string | null>(null)
   // 当前展示的会话 id 镜像：供流式异步回调判断「输出归属的会话是否仍在前台」，
@@ -144,15 +155,81 @@ function Chat() {
     }
   }, [llmConfigs, selectedModel])
 
-  // 滚动到底部
+  // 智能滚动到底部：仅当用户处于「粘附底部」状态时才自动滚动。
+  // 用户上滑查看历史时打破粘附，输出不再强行拉到底；回到底部后恢复粘附。
   useEffect(() => {
-    if (scrollContainerRef.current) {
+    if (stickToBottomRef.current && scrollContainerRef.current) {
       scrollContainerRef.current.scrollTo({
         top: scrollContainerRef.current.scrollHeight,
         behavior: 'smooth',
       })
     }
   }, [messages])
+
+  // 滚动监听：维护「粘附底部」状态、回到底部按钮可见性、当前激活提问锚点。
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    // 距底 <= 阈值视为「在底部」（流式高度抖动留出余量）
+    const NEAR_BOTTOM = 80
+    const onScroll = () => {
+      const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      const atBottom = distanceToBottom <= NEAR_BOTTOM
+      stickToBottomRef.current = atBottom
+      setShowScrollToBottom(!atBottom)
+
+      // 激活提问锚点：以视口上部「阅读基线」（容器高度 ~30%）为判定线，
+      // 取该线以上、最靠近基线的那条 user 消息（即当前正在阅读的那一轮）。
+      // 按下标升序遍历保证「最靠下」语义正确；若无任何提问越过基线（处于首轮顶部），
+      // 回退到第一条提问。
+      const containerTop = el.getBoundingClientRect().top
+      const readingLine = el.clientHeight * 0.3
+      const entries = Object.entries(messageRefs.current)
+        .filter(([, node]) => node)
+        .map(([idxStr, node]) => ({ idx: Number(idxStr), top: node!.getBoundingClientRect().top - containerTop }))
+        .sort((a, b) => a.idx - b.idx)
+      if (entries.length === 0) {
+        setActiveAnchorIndex(-1)
+        return
+      }
+      let active = entries[0].idx
+      for (const e of entries) {
+        if (e.top <= readingLine) active = e.idx
+        else break
+      }
+      // 已滚到底部：强制激活最后一轮提问（保证新问题/末轮高亮）
+      if (atBottom) active = entries[entries.length - 1].idx
+      setActiveAnchorIndex(active)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [messages])
+
+  // 强制滚到底部并恢复粘附（回到底部按钮 / 发送新消息时调用）
+  function scrollToBottom() {
+    stickToBottomRef.current = true
+    setShowScrollToBottom(false)
+    scrollContainerRef.current?.scrollTo({
+      top: scrollContainerRef.current.scrollHeight,
+      behavior: 'smooth',
+    })
+  }
+
+  // 跳转到指定提问轮（侧边锚点点击）
+  function scrollToMessage(index: number) {
+    const node = messageRefs.current[index]
+    const container = scrollContainerRef.current
+    if (!node || !container) return
+    // 上滑定位即视为离开底部，避免随后流式把视口又拉回底部
+    stickToBottomRef.current = false
+    const containerTop = container.getBoundingClientRect().top
+    const nodeTop = node.getBoundingClientRect().top
+    container.scrollTo({
+      top: container.scrollTop + (nodeTop - containerTop) - 16,
+      behavior: 'smooth',
+    })
+  }
 
   // 会话切换时加载消息
   useEffect(() => {
@@ -398,6 +475,9 @@ function Chat() {
     streamRef.current = { sessionId: streamSessionId, messages: baseMessages }
     streamingSessionRef.current = streamSessionId
     setMessages(baseMessages)
+    // 发起新一轮：恢复粘附底部，并把侧边锚点立即定位到这条新提问
+    stickToBottomRef.current = true
+    setActiveAnchorIndex(baseMessages.length - 2) // 末尾是空 assistant，其前一条即本轮 user
     setInput('')
     setIsStreaming(true)
 
@@ -1004,6 +1084,17 @@ function Chat() {
   )
 
   const isEmpty = messages.length === 0
+
+  // 侧边锚点：每条 user 消息一个锚点，文本取该轮提问内容
+  const queryAnchors = useMemo<QueryAnchor[]>(
+    () =>
+      messages
+        .map((m, idx) => ({ m, idx }))
+        .filter(({ m }) => m.role === 'user')
+        .map(({ m, idx }) => ({ index: idx, text: m.content })),
+    [messages]
+  )
+
   // 共用的输入框 props
   const chatInputProps = {
     input,
@@ -1073,25 +1164,60 @@ function Chat() {
                 if (messages[i].role === 'assistant') { lastAssistantIdx = i; break }
               }
               return messages.map((msg, idx) => (
-                <MessageBubble
+                <div
                   key={idx}
-                  message={msg}
-                  index={idx}
-                  isStreaming={isStreaming}
-                  isLast={idx === messages.length - 1}
-                  isLastAssistant={idx === lastAssistantIdx && !isStreaming}
-                  expandedRefs={expandedRefs}
-                  onToggleRef={toggleRef}
-                  imagePreviewUrls={imagePreviewUrls}
-                  sessionId={currentSessionId}
-                  sessionFiles={sessionFiles}
-                  onFeedback={handleFeedback}
-                  onRetry={handleRetry}
-                />
+                  ref={(node) => {
+                    if (msg.role === 'user') messageRefs.current[idx] = node
+                  }}
+                >
+                  <MessageBubble
+                    message={msg}
+                    index={idx}
+                    isStreaming={isStreaming}
+                    isLast={idx === messages.length - 1}
+                    isLastAssistant={idx === lastAssistantIdx && !isStreaming}
+                    expandedRefs={expandedRefs}
+                    onToggleRef={toggleRef}
+                    imagePreviewUrls={imagePreviewUrls}
+                    sessionId={currentSessionId}
+                    sessionFiles={sessionFiles}
+                    onFeedback={handleFeedback}
+                    onRetry={handleRetry}
+                  />
+                </div>
               ))
             })()}
           </div>
         )}
+      </div>
+
+      {/* 浮层：与对话列表共用 max-w-3xl 居中容器，使锚点列 / 回到底部按钮与「对话框」右边对齐 */}
+      <div className="pointer-events-none absolute inset-0 z-20">
+        <div className="relative mx-auto h-full max-w-3xl px-4">
+          {/* 侧边锚点导航：贴对话框右侧外缘，每轮提问一个圆点，点击定位 */}
+          <div className="pointer-events-none absolute left-full top-1/2 ml-3 -translate-y-1/2">
+            <ChatAnchorRail
+              anchors={queryAnchors}
+              activeIndex={activeAnchorIndex}
+              onJump={scrollToMessage}
+            />
+          </div>
+
+          {/* 回到底部按钮：离开底部后浮现于输入框上方、对话框右边对齐 */}
+          <button
+            type="button"
+            aria-label="回到底部"
+            onClick={scrollToBottom}
+            className={cn(
+              'absolute bottom-32 right-4 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-lg transition-all duration-300 ease-out hover:text-foreground hover:shadow-xl',
+              showScrollToBottom
+                ? 'pointer-events-auto translate-y-0 opacity-100'
+                : 'pointer-events-none translate-y-2 opacity-0'
+            )}
+          >
+            <ChevronDown className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       {/* 输入区域 */}
