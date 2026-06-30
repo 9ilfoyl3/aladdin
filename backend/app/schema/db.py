@@ -39,8 +39,8 @@ class KnowledgeBase(Base, TenantScopedMixin):
     # 组织公共库开放维度：read（默认，组织成员仅可读）| write（组织成员可写内容）。
     # 仅 visibility=organization 时有效；private 忽略（不参与判定）。
     org_permission: Mapped[str] = mapped_column(String, default="read", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # 关联
     folders: Mapped[list["Folder"]] = relationship(back_populates="knowledge_base", cascade="all, delete-orphan")
@@ -56,8 +56,8 @@ class Folder(Base, TenantScopedMixin):
     kb_id: Mapped[str] = mapped_column(String, ForeignKey("knowledge_bases.id"), nullable=False)
     parent_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("folders.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # 关联
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="folders")
@@ -88,7 +88,7 @@ class Document(Base, TenantScopedMixin):
     graph_status: Mapped[str] = mapped_column(String, default="none", nullable=False)
     # 权威 attempt 计数，重解析时 +1，用于隔离陈旧的在途抽取子任务
     graph_attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # 关联
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="documents")
@@ -107,7 +107,7 @@ class Chunk(Base, TenantScopedMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     chunk_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # 关联
     document: Mapped["Document"] = relationship(back_populates="chunks")
@@ -124,14 +124,14 @@ class ApiKey(Base, TenantScopedMixin):
     name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     call_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # tenant-auth：三模型 Key
     # tenant_level（默认，机器凭据）| user_level（绑定用户）| external_agent（超管级代理）
     key_type: Mapped[str] = mapped_column(String, default="tenant_level", nullable=False)
     bound_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)  # 用户级 Key 绑定的 user
     authorized_scope: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 租户级 Key 授权范围
     key_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 代理 Key 的来源标识（命名空间前缀）
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class LLMConfig(Base):
@@ -156,7 +156,7 @@ class LLMConfig(Base):
     # 注：是否开启思考由智能体预设独占控制，本字段仅决定「开启时怎么写入 API」。
     thinking_control: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class OCRConfig(Base):
@@ -172,8 +172,8 @@ class OCRConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
     extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class ASRConfig(Base):
@@ -198,8 +198,8 @@ class ASRConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
     extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class EmbedConfig(Base):
@@ -222,8 +222,8 @@ class EmbedConfig(Base):
     sparse_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # 状态
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)  # 当前是否启用
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class RetrievalConfigRow(Base):
@@ -274,7 +274,7 @@ class RetrievalConfigRow(Base):
     # 上传限制档（租户级；仅 upload_max_file_mb 仍生效，其余已废弃但 DB 列保留向后兼容）
     upload_max_file_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class PlatformConfigRow(Base):
@@ -296,7 +296,7 @@ class PlatformConfigRow(Base):
     graph_ego_max_depth: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # ego BFS 最大跳数硬上限
     graph_retriever_hops: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 检索融合邻居跳数
     graph_retriever_max_chunks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 图谱召回每查询最大 chunk 数
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AgentPreset(Base):
@@ -327,8 +327,8 @@ class AgentPreset(Base):
     owner_user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
     # 是否开放给本租户全体成员可见可用；私有（False）仅创建者可见。内置预设恒 True。
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class CustomSkill(Base, TenantScopedMixin):
@@ -353,8 +353,8 @@ class CustomSkill(Base, TenantScopedMixin):
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class ChatSession(Base, TenantScopedMixin):
@@ -370,8 +370,8 @@ class ChatSession(Base, TenantScopedMixin):
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     model_config_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # 关联
     messages: Mapped[list["ChatMessageRecord"]] = relationship(
@@ -398,7 +398,7 @@ class ChatMessageRecord(Base, TenantScopedMixin):
     # 用户对 AI 回答的反馈：'like' | 'dislike' | None（仅 assistant 消息可能非空）。
     # 先落库保留，后续用于 agent 优化/质量评估。
     feedback: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # 关联
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
@@ -436,7 +436,7 @@ class SessionFile(Base, TenantScopedMixin):
     # 该文件 child chunk 数（会话累计配额聚合用）
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String, default="completed")  # processing | completed | failed
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class SessionChunk(Base, TenantScopedMixin):
@@ -458,7 +458,7 @@ class SessionChunk(Base, TenantScopedMixin):
     parent_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # ============================================================
@@ -480,7 +480,7 @@ class Tenant(Base):
     # 头像以 data URL 字符串存库（≤2MB，png/jpg/webp），不依赖文件系统。
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     avatar: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class User(Base):
@@ -511,7 +511,7 @@ class User(Base):
     created_via_invitation_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
     # 停用/重置口令时自增，使旧 JWT 失效（token 内 token_version 不匹配即拒绝）
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ExternalUser(Base):
@@ -528,7 +528,7 @@ class ExternalUser(Base):
     key_source: Mapped[str] = mapped_column(String, nullable=False)
     # 调用方通过 X-External-User-Id 传入的原始值
     external_user_id: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("key_source", "external_user_id", name="uq_external_identity"),
@@ -547,7 +547,7 @@ class KnowledgeBaseGrant(Base):
     grantee_id: Mapped[str] = mapped_column(String, nullable=False)  # user_id
     permission: Mapped[str] = mapped_column(String, nullable=False)  # read | write
     granted_by: Mapped[str] = mapped_column(String, nullable=False)  # 发起共享的 user_id
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("kb_id", "grantee_type", "grantee_id", name="uq_grant_target"),
@@ -578,7 +578,7 @@ class AuditLog(Base):
     result: Mapped[str] = mapped_column(String, default="success", nullable=False)  # success|fail
     ip: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     user_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class Invitation(Base):
@@ -603,11 +603,11 @@ class Invitation(Base):
     role_names: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     max_uses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # null=不限次
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
     created_by_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class KbShareLink(Base):
@@ -641,9 +641,9 @@ class KbShareLink(Base):
     permission: Mapped[str] = mapped_column(String, default="read", nullable=False)
     max_uses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # null=有效期内不限次
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # ============================================================
@@ -679,8 +679,8 @@ class GraphExtractJob(Base, TenantScopedMixin):
     # 事件中心图谱：本次抽取写入的事件数（event-centric-graph，worker 双写 Neo4j+Milvus 后累加）。
     events_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         # 一个 (kb_id, doc_id) 同时只有一个活跃 job；重解析自增 attempt 后旧行保留供审计
@@ -715,8 +715,8 @@ class GraphCommunity(Base, TenantScopedMixin):
     member_entity_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # 社区摘要向量在 Milvus 的引用 id（预留 task 9.2 的社区摘要向量检索，可空）
     embedding_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         UniqueConstraint("kb_id", "community_key", "level", name="uq_graph_community_kb_key_level"),

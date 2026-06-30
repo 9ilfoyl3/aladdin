@@ -150,6 +150,34 @@ async def _migrate_db() -> None:
         # ===== event-centric-graph：抽取台账新增事件计数列（存量库补列，缺省 0） =====
         # create_all 只建缺失整表、不给存量表补列；新增 events_count 供 worker 双写后累加。
         "ALTER TABLE graph_extract_jobs ADD COLUMN events_count INTEGER NOT NULL DEFAULT 0",
+        # ===== utc-timezone-fix：时间列统一为 timestamptz（带时区，内部存 UTC）=====
+        # 根因：旧列为 TIMESTAMP WITHOUT TIME ZONE（naive），应用层混用 func.now()（容器
+        # 本地东八区）/ datetime.utcnow() / datetime.now()，序列化无时区后缀，前端按浏览器
+        # 时区瞎猜 → 跨时区/同表不同列差 8 小时。修复后全链路 UTC：列改 timestamptz，应用写
+        # aware UTC，isoformat 自带 +00:00，前端 new Date() 正确转本地。
+        #
+        # 用 DO 块只转换「仍为 naive（timestamp without time zone）」的列，按 UTC 解释存量值。
+        # 幂等且安全：新库经 create_all 已是 timestamptz，本块自动跳过（不会因重复 AT TIME ZONE
+        # 造成偏移）；存量老库的 naive 列被一次性按 UTC 提升为 timestamptz（存量数据按用户确认
+        # 可接受偏差，仅保证新数据一致）。
+        """
+        DO $$
+        DECLARE r RECORD;
+        BEGIN
+            FOR r IN
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND data_type = 'timestamp without time zone'
+            LOOP
+                EXECUTE format(
+                    'ALTER TABLE %I ALTER COLUMN %I TYPE TIMESTAMPTZ '
+                    'USING %I AT TIME ZONE ''UTC''',
+                    r.table_name, r.column_name, r.column_name
+                );
+            END LOOP;
+        END $$;
+        """,
     ]
     for sql in migrations:
         try:

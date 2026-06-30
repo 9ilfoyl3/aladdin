@@ -11,7 +11,7 @@
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -554,7 +554,7 @@ async def update_knowledge_base(
     _ensure_kb_owner(identity, kb)  # 改名/改配置属实体操作：owner 专属
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(kb, field, value)
-    kb.updated_at = datetime.utcnow()
+    kb.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(kb)
     return _to_resp(kb)
@@ -735,7 +735,7 @@ async def set_visibility(
             if body.org_permission is not None
             else OrgPermissionEnum.READ.value
         )
-    kb.updated_at = datetime.utcnow()
+    kb.updated_at = datetime.now(timezone.utc)
     add_audit(
         db, actor=identity, action=AuditActionEnum.KB_SET_VISIBILITY,
         target_type="kb", target_id=kb.id, target_name=kb.name,

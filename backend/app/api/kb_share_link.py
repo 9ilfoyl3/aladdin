@@ -66,8 +66,8 @@ def _hash_token(token: str) -> str:
 
 
 def _now() -> datetime:
-    # 与 DB 列 TIMESTAMP WITHOUT TIME ZONE 一致：naive UTC（对齐 invitation_routes）。
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # DB 列为 TIMESTAMP WITH TIME ZONE：统一用 aware UTC，与读回的 aware datetime 可直接比较。
+    return datetime.now(timezone.utc)
 
 
 def _link_active(link: KbShareLink) -> bool:
@@ -75,8 +75,9 @@ def _link_active(link: KbShareLink) -> bool:
     if not link.is_active:
         return False
     exp = link.expires_at
-    if exp.tzinfo is not None:
-        exp = exp.replace(tzinfo=None)
+    # DB 列为 aware UTC；历史 naive 行按 UTC 补 tzinfo 后统一与 aware _now() 比较。
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
     if exp < _now():
         return False
     if link.max_uses is not None and link.used_count >= link.max_uses:

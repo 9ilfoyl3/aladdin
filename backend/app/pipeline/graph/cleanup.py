@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -151,7 +151,7 @@ async def sweep_stuck_graph_jobs(
     """
     if timeout_minutes is None:
         timeout_minutes = get_settings().graph_job_timeout_minutes
-    cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
 
     try:
         async with db_session_factory() as session:

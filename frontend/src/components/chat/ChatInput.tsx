@@ -1,5 +1,5 @@
 import { useRef, useEffect } from 'react'
-import { Send, Cpu, Bot, Paperclip } from 'lucide-react'
+import { Send, Cpu, Bot, Paperclip, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
@@ -42,6 +42,8 @@ interface ChatInputProps {
   agentPresets: AgentPresetItem[]
   onInputChange: (value: string) => void
   onSend: (query?: string) => void
+  /** 停止当前流式输出（中止在飞请求） */
+  onStop?: () => void
   onToggleKb: (kbId: string) => void
   onModelChange: (value: string) => void
   onPresetChange: (value: string) => void
@@ -81,6 +83,7 @@ function ChatInput({
   agentPresets,
   onInputChange,
   onSend,
+  onStop,
   onToggleKb,
   onModelChange,
   onPresetChange,
@@ -248,14 +251,26 @@ function ChatInput({
                 </SelectContent>
               </Select>
 
-              <Button
-                size="icon"
-                className="h-9 w-9 rounded-full shrink-0"
-                onClick={() => onSend()}
-                disabled={!input.trim() || isStreaming}
-              >
-                <Send className="h-4 w-4" />
-              </Button>
+              {isStreaming ? (
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  className="h-9 w-9 rounded-full shrink-0"
+                  onClick={() => onStop?.()}
+                  aria-label="停止输出"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  className="h-9 w-9 rounded-full shrink-0"
+                  onClick={() => onSend()}
+                  disabled={!input.trim()}
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
         </div>
@@ -326,14 +341,26 @@ function ChatInput({
                 </SelectContent>
               </Select>
 
-              <Button
-                size="icon"
-                className="h-8 w-8 rounded-full shrink-0"
-                onClick={() => onSend()}
-                disabled={!input.trim() || isStreaming}
-              >
-                <Send className="h-4 w-4" />
-              </Button>
+              {isStreaming ? (
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  className="h-8 w-8 rounded-full shrink-0"
+                  onClick={() => onStop?.()}
+                  aria-label="停止输出"
+                >
+                  <Square className="h-3 w-3 fill-current" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  className="h-8 w-8 rounded-full shrink-0"
+                  onClick={() => onSend()}
+                  disabled={!input.trim()}
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
         </div>
