@@ -20,7 +20,7 @@ Guard 内部顺序（任一不满足即拒绝）：
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 
 from fastapi import Depends, Request
 from sqlalchemy import select
@@ -112,22 +112,24 @@ def _must_change_gate(must_change: bool, allow: bool) -> bool:
     return must_change and not allow
 
 
-async def _resolve_identity(
-    request: Request, session: AsyncSession
+async def resolve_identity_from_credentials(
+    token: str, headers: Mapping[str, str], session: AsyncSession
 ) -> tuple[IdentityContext, bool]:
-    """从请求凭据解析 IdentityContext。无有效凭据 -> 401。
+    """从 token + headers 解析 IdentityContext（不绑定 Request，供 HTTP 与 WS 共用）。
 
     返回 (identity, must_change_password)。must_change_password 由本函数已取到的
     User 直接读出，避免 Guard 再单独查一次 users（同请求内消除冗余查询）。
     API Key 通道无"当前用户改密"概念，must_change_password 恒为 False。
+
+    token 为 sk- 前缀走 API Key 认证（headers 提供 external_agent 的
+    X-External-User-Id 等）；否则按 JWT 解析并做 User/租户校验。无有效凭据 -> 401。
     """
-    token = _extract_bearer(request)
     if not token:
         raise UnauthenticatedError("缺少 Authorization 凭据")
 
     if _is_api_key_token(token):
         # API Key 通道（含三模型）：无强制改密闸门
-        identity = await ApiKeyAuthenticator(session).authenticate(token, request.headers)
+        identity = await ApiKeyAuthenticator(session).authenticate(token, headers)
         return identity, False
 
     # JWT 通道
@@ -170,6 +172,20 @@ async def _resolve_identity(
         role=role,
     )
     return identity, bool(user.must_change_password)
+
+
+async def _resolve_identity(
+    request: Request, session: AsyncSession
+) -> tuple[IdentityContext, bool]:
+    """从请求凭据解析 IdentityContext。无有效凭据 -> 401。
+
+    从 Request 取 Bearer token 与 headers 后委托 resolve_identity_from_credentials，
+    行为与既有实现完全一致。
+    """
+    token = _extract_bearer(request)
+    if not token:
+        raise UnauthenticatedError("缺少 Authorization 凭据")
+    return await resolve_identity_from_credentials(token, request.headers, session)
 
 
 def authorization_guard(

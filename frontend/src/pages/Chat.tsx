@@ -13,6 +13,7 @@ import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import SideRays from '@/components/SideRays'
+import { useSessionUploadEvents } from '@/hooks/useSessionUploadEvents'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
@@ -131,6 +132,32 @@ function Chat() {
     queryFn: () => sessionFileApi.list(currentSessionId!),
     enabled: !!currentSessionId,
   })
+
+  // 会话文件建索引实时状态（WS 推送 queued→processing→progress→completed/failed）。
+  // 见 useSessionUploadEvents / Design C10：把 live 状态 merge 进服务端列表，
+  // 让 chip 无需等 query refetch 即可实时前进。completed/removed 时该 hook 会自动
+  // invalidate ['session-files', sid]，服务端行随后携带真实 chunk_count 等落地。
+  const { fileStates } = useSessionUploadEvents(currentSessionId)
+
+  // 服务端列表叠加 live 状态：单一 merge 点，向下游（输入区/气泡）统一透出实时进度。
+  // 对每个服务端文件，若存在对应 live 状态则以其覆盖 status/progress/message/error
+  //（及 chunk_count，若 live 提供）；无 live 状态时保持服务端值不变。
+  const mergedSessionFiles = useMemo<SessionFileResponse[]>(
+    () =>
+      sessionFiles.map((f) => {
+        const live = fileStates[f.id]
+        if (!live) return f
+        return {
+          ...f,
+          status: live.status || f.status,
+          progress: typeof live.progress === 'number' ? live.progress : f.progress,
+          progress_message: live.progress_message ?? f.progress_message,
+          error_message: live.error_message ?? f.error_message,
+          chunk_count: typeof live.chunk_count === 'number' ? live.chunk_count : f.chunk_count,
+        }
+      }),
+    [sessionFiles, fileStates]
+  )
 
   // 切换会话时清掉本地占位（避免 A 会话上传中切到 B 仍显示）。
   // 用 ref 跟踪上一次会话：跳过「null -> 新建会话」首建场景——该场景是新对话首次
@@ -1223,9 +1250,10 @@ function Chat() {
   }, [messages])
 
   // 输入区仅展示"尚未随消息发出"的会话文件（已发送的随气泡上移）。
+  // 用 merge 后的列表，chip 才能实时反映建索引进度。
   const stagedFiles = useMemo(
-    () => sessionFiles.filter((f) => !consumedFileIds.has(f.id)),
-    [sessionFiles, consumedFileIds]
+    () => mergedSessionFiles.filter((f) => !consumedFileIds.has(f.id)),
+    [mergedSessionFiles, consumedFileIds]
   )
 
   const isEmpty = messages.length === 0
@@ -1326,7 +1354,7 @@ function Chat() {
                     onToggleRef={toggleRef}
                     imagePreviewUrls={imagePreviewUrls}
                     sessionId={currentSessionId}
-                    sessionFiles={sessionFiles}
+                    sessionFiles={mergedSessionFiles}
                     onFeedback={handleFeedback}
                     onRetry={handleRetry}
                   />

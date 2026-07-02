@@ -778,9 +778,10 @@ export interface MessageAttachment {
 // 会话级文件上传（session-file-upload Task 8 / Design C8）
 //
 // 后端入口 /api/sessions/{session_id}/files：
-// - POST  multipart(file)  → 同步建索引，返回 SessionFileResponse
-// - GET                    → 列出本会话已上传文件
+// - POST  multipart(file)  → 秒回 + 后台异步建索引，返回 202 + SessionFileResponse(status=queued)
+// - GET                    → 列出本会话已上传文件（含最新 status/progress/error_message，轮询/对账兜底）
 // - DELETE /{file_id}      → 移除单文件并释放配额（204）
+// - WS   /events           → 实时推送建索引状态事件（见 useSessionUploadEvents）
 //
 // 鉴权：仅会话所有者本人；非 owner / 非存在 → 后端统一 404（存在性非泄露）。
 // 限制超额：413（FileTooLargeError / UploadCapExceeded），
@@ -792,8 +793,14 @@ export interface SessionFileResponse {
   file_type: string | null
   file_size: number | null
   chunk_count: number
-  /** processing | completed | failed —— 同步建索引完成后通常为 completed */
+  /** queued | processing | completed | failed —— 异步路径上传后初始为 queued */
   status: string
+  /** 建索引进度 0-100（异步路径由 worker 各阶段更新） */
+  progress: number
+  /** 当前阶段人类可读描述（可空） */
+  progress_message: string | null
+  /** 失败原因（status=failed 时有值） */
+  error_message: string | null
   created_at: string
 }
 
