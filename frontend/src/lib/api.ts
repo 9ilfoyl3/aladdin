@@ -1218,6 +1218,26 @@ export interface GraphEntityDetail {
   chunks: GraphEntityChunk[]
 }
 
+/** 事件详情里关联（MENTIONS）的实体（可点击 pivot）。 */
+export interface GraphEventMention {
+  id: string
+  name: string
+  type: string
+}
+
+/** 事件详情（GET /graph/event/{id}，事件中心图谱，懒加载）。 */
+export interface GraphEventDetail {
+  id: string
+  title: string
+  summary: string
+  content: string
+  doc_id: string
+  /** 关联实体列表（可点击 pivot） */
+  mentions: GraphEventMention[]
+  /** 来源 chunk 原文预览（可为 null） */
+  chunk: GraphEntityChunk | null
+}
+
 /** KB 级图谱配置（config.graph，design.md 3.3 / 5.2）。 */
 export interface GraphConfig {
   enabled: boolean
@@ -1273,6 +1293,9 @@ export const graphApi = {
   // 实体详情（懒加载）：属性/别名/邻居/关联原文 chunk 预览。
   getGraphEntity: (kbId: string, entityId: string) =>
     request<GraphEntityDetail>(`/kb/${kbId}/graph/entity/${entityId}`),
+  // 事件详情（懒加载）：标题/摘要/完整内容/关联实体/来源原文预览（事件中心图谱）。
+  getGraphEvent: (kbId: string, eventId: string) =>
+    request<GraphEventDetail>(`/kb/${kbId}/graph/event/${eventId}`),
   // KB 图谱配置：后端尚无独立 GET config 端点（task 5.2 的 PUT 之外），
   // 故从 KB 详情的 config.graph 派生（逐字段兜底，缺失回退安全默认）。
   getGraphConfig: async (kbId: string): Promise<GraphConfig> => {

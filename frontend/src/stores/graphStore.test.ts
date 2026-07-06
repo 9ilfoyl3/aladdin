@@ -85,6 +85,7 @@ describe('graphStore 模式切换', () => {
       mode: 'overview',
       types: [],
       limit: undefined,
+      include_events: true,
     })
   })
 
@@ -108,6 +109,7 @@ describe('graphStore 模式切换', () => {
       center: 'e1',
       depth: 2,
       types: [],
+      include_events: true,
     })
   })
 
@@ -130,6 +132,7 @@ describe('graphStore 类型过滤', () => {
       mode: 'overview',
       types: ['人物'],
       limit: undefined,
+      include_events: true,
     })
   })
 
@@ -145,6 +148,7 @@ describe('graphStore 类型过滤', () => {
       center: 'e1',
       depth: 1,
       types: ['人物'],
+      include_events: true,
     })
   })
 
