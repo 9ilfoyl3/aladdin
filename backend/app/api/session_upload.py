@@ -74,6 +74,33 @@ WS_CLOSE_MUST_CHANGE_PASSWORD = 4403  # 强制改密未完成
 WS_CLOSE_SESSION_FORBIDDEN = 4404  # 会话不存在 / 非本人（存在性非泄露）
 WS_CLOSE_TOO_MANY_CONNECTIONS = 4429  # 单会话连接数超限
 
+
+async def _resolve_signed_ws_identity(
+    websocket: WebSocket, headers: dict, session: AsyncSession
+) -> tuple[IdentityContext, bool]:
+    """WS 握手的 AK/SK 签名通道：验签（时间窗 + HMAC + nonce）后按 AK 合成身份。
+
+    签名要素经 query 传入（WS 握手为 GET，浏览器无法自定义头）；WS 的 canonical 用
+    空 query（资源由 path 内 session_id 唯一确定，签名无法覆盖含自身的 query）。
+    验签失败抛 ``UnauthenticatedError`` -> 上层 4401。API Key 通道无强制改密，返回 False。
+    """
+    from app.auth.apikey_auth import ApiKeyAuthenticator
+    from app.auth.signing import verify_signed_params
+
+    qp = websocket.query_params
+    ak = await verify_signed_params(
+        ak=qp.get("ak"),
+        ts=qp.get("ts"),
+        nonce=qp.get("nonce"),
+        sign=qp.get("sign"),
+        method="GET",
+        path=websocket.url.path,
+        query="",
+        external_user_id=headers.get(HEADER_EXTERNAL_USER_ID) or "",
+    )
+    identity = await ApiKeyAuthenticator(session).authenticate_by_id(ak, headers)
+    return identity, False
+
 # 服务端心跳间隔兜底默认值（秒）。配置项 session_upload_ws_ping_interval
 # 由任务 9.1 落地；此处 getattr 防御式读取，避免硬依赖尚未落地的配置。
 _DEFAULT_WS_PING_INTERVAL = 30
@@ -393,19 +420,8 @@ async def session_files_events(websocket: WebSocket, session_id: str) -> None:
     from app.config import get_settings
     from app.storage.database import async_session
 
-    # 1) 提取 token：query access_token 优先，回退 Authorization: Bearer 头
-    token = websocket.query_params.get("access_token")
-    if not token:
-        auth = websocket.headers.get("Authorization")
-        if auth and auth[: len(_BEARER_PREFIX)].lower() == _BEARER_PREFIX:
-            token = auth[len(_BEARER_PREFIX):].strip()
-    if not token:
-        # 无任何凭据：未认证（accept 前关闭）
-        await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
-        return
-
-    # 2) 组装凭据解析用 headers：以握手头为底，按 query 注入 external_user_id / tenant_id
-    #    （浏览器无法自定义头，这些身份要素只能经 query 传入，用精确的 HEADER_* 键注入）。
+    # 组装凭据解析用 headers：以握手头为底，按 query 注入 external_user_id / tenant_id
+    # （浏览器无法自定义头，这些身份要素只能经 query 传入，用精确的 HEADER_* 键注入）。
     headers = dict(websocket.headers)
     external_user_id = websocket.query_params.get("external_user_id")
     if external_user_id:
@@ -416,15 +432,39 @@ async def session_files_events(websocket: WebSocket, session_id: str) -> None:
     if tenant_id:
         headers[HEADER_TENANT_ID] = tenant_id
 
+    # 1) 判定通道：query 带 ak+sign 走 AK/SK 签名通道，否则走 access_token/Bearer。
+    #    WS 握手为 GET，签名参数只能经 query 传入；签名不能覆盖含自身的 query，
+    #    故 WS 的 canonical 用空 query（资源由 path 内的 session_id 唯一确定）。
+    ak = websocket.query_params.get("ak")
+    sign = websocket.query_params.get("sign")
+    signed_channel = bool(ak and sign)
+    token = None
+    if not signed_channel:
+        # 提取 token：query access_token 优先，回退 Authorization: Bearer 头
+        token = websocket.query_params.get("access_token")
+        if not token:
+            auth = websocket.headers.get("Authorization")
+            if auth and auth[: len(_BEARER_PREFIX)].lower() == _BEARER_PREFIX:
+                token = auth[len(_BEARER_PREFIX):].strip()
+        if not token:
+            # 无任何凭据：未认证（accept 前关闭）
+            await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
+            return
+
     hub = get_event_hub()
     registered = False
     try:
         async with async_session() as session:
             # 3) 凭据解析：区分 4400（缺 external_user_id）与 4401（其余认证失败）
             try:
-                identity, must_change = await resolve_identity_from_credentials(
-                    token, headers, session
-                )
+                if signed_channel:
+                    identity, must_change = await _resolve_signed_ws_identity(
+                        websocket, headers, session
+                    )
+                else:
+                    identity, must_change = await resolve_identity_from_credentials(
+                        token, headers, session
+                    )
             except MissingExternalUserIdError:
                 await websocket.close(code=WS_CLOSE_MISSING_EXTERNAL_USER)
                 return

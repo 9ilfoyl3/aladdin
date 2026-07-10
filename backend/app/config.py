@@ -146,6 +146,11 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_expire_minutes: int = 720  # JWT 有效期（分钟），默认 12 小时
 
+    # ---- API Key AK/SK 签名（aksk-signing）：供无后端的可信调用方免明文密钥上行 ----
+    # 请求以 HMAC-SHA256 签名认证：AK=api_key.id（可公开），SK 由服务端从
+    # jwt_secret 派生（不落库，DB 泄露也无法伪造）。此处仅时间窗；nonce 防重放走 Redis。
+    apikey_sign_window_seconds: int = 300  # 签名时间窗（秒），|now-ts|>窗口即拒绝（防重放）
+
     # Super_Admin 引导（SuperAdminBootstrap）。首次启动且无 Super_Admin 时据此创建，
     # 并强制改密。缺失时 fail-fast，禁止用默认口令静默兜底。
     super_admin_username: str = ""

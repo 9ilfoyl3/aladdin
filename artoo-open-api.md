@@ -28,13 +28,15 @@ Authorization: Bearer <凭据>
 
 API Key 明文格式为 `sk-` + 48 位十六进制串，服务端只存 SHA256 哈希，**明文仅创建时返回一次**。
 
+> 除上面的明文 Bearer 外，还提供 **AK/SK 签名通道**（见 1.5）：不把长期密钥每次上行，改为对每次请求做 HMAC 签名。适合脚本 / 自动化平台 / 桌面客户端等"无独立后端但运行在可信环境"的直连场景，控制台/抓包里只看到每次现算的签名，看不到长期密钥。
+
 ### 1.2 三种 API Key 与选型
 
 | 类型 | 标识 | 身份语义 | 知识库范围 | 能否写（建库/上传） | 多轮对话 |
 | --- | --- | --- | --- | --- | --- |
 | 租户级 Key | `tenant_level` | 机器身份（`role=None`） | 由 Key 的 `scope` 显式裁定 | 否（仅读检索） | 需自管历史 |
 | 用户级 Key | `user_level` | 绑定某注册用户 | 该用户可读的全部库 | 是 | 支持 |
-| **超管级代理 Key** | `external_agent` | **代表你方外部用户** | 外部用户自有私有库 ∪ 外部租户公共库 | **是** | **支持（服务端托管）** |
+| **超管级代理 Key** | `external_agent` | **代表你方外部用户** | 外部用户自有私有库 | **是** | **支持（服务端托管）** |
 
 > **第三方用自有用户体系接入，请选「超管级代理 Key」。** 它由平台超管签发，租户硬锁到内置「外部用户租户」；每次请求额外带头 `X-External-User-Id: <你方用户ID>`，平台按 `(代理Key, 外部用户ID)` 复合键自动懒创建并隔离独立身份，无需在 Artoo 逐个注册账号。外部用户固定 `member` 角色，可通过写权限闸门。
 
@@ -48,7 +50,7 @@ API Key 明文格式为 `sk-` + 48 位十六进制串，服务端只存 SHA256 �
 要点：
 
 - 同一代理 Key 下，不同 `X-External-User-Id` 之间**私有库与会话互不可见**。
-- 外部用户可访问范围 = 自有私有库 ∪「外部用户租户」内公共库，**不能跨到平台其他业务租户**。
+- 外部用户可访问范围 = 自有私有库（各外部用户互相隔离），**不能跨到平台其他业务租户**。
 - 建库/传文档时 `owner_user_id` 自动盖成该外部用户，归属天然隔离。
 
 ### 1.4 通用错误码
@@ -64,6 +66,66 @@ API Key 明文格式为 `sk-` + 48 位十六进制串，服务端只存 SHA256 �
 | `503` | 服务暂不可用 | 会话文件异步上传时队列（Redis）/ 对象存储暂不可用，请稍后重试（见第 8 节） |
 
 错误响应统一为 `{ "detail": "<原因>" }`。
+
+### 1.5 AK/SK 签名调用（免明文密钥上行）
+
+面向"无独立后端、但运行在**可信环境**"的直连场景（脚本 / 自动化平台节点 / 桌面客户端）。用一把 `SK` 对每次请求做 HMAC-SHA256 签名，服务端重算比对；网络里只出现**每次现算的签名**，长期密钥不再逐请求上行。
+
+**凭据来源**：任意类型 Key 创建时（见第 2 节），响应额外返回 `access_key`（AK）与 `secret_key`（SK）：
+
+- `AK` = Key 的 `id`，可公开，仅用于定位密钥；
+- `SK` 由服务端从平台密钥派生、**不落库**（DB 泄露也无法伪造签名），**仅创建时返回一次**，请妥善保存在你方可信环境。
+
+**请求头格式**：
+
+```
+Authorization: SAG-HMAC-SHA256 ak=<AK>,ts=<unix秒>,nonce=<随机hex>,sign=<hex签名>
+```
+
+**签名串**（按顺序换行 `\n` 连接，客户端与服务端须逐字节一致）：
+
+```
+<HTTP方法大写>\n<请求路径>\n<原始query串>\n<ts>\n<nonce>\n<X-External-User-Id或空>
+```
+
+- 不纳入 body：兼容 multipart 文件上传（客户端难以拿到最终多部分字节做哈希）；body 完整性依赖 HTTPS。
+- 代理 Key 仍需带 `X-External-User-Id` 头，且其值已并入签名（在途被篡改会验签失败）。
+
+**校验规则**：`|now - ts| > 300s`（可配 `APIKEY_SIGN_WINDOW_SECONDS`）拒绝；`nonce` 在时间窗内只能用一次（Redis 去重，防重放）；任一不过 → `401`。
+
+**Node.js 示例（对代理 Key 调上传接口）**：
+
+```js
+const crypto = require("crypto");
+
+const BASE = "http://localhost:8000";
+const AK = "<创建返回的 access_key>";
+const SK = "<创建返回的 secret_key>";
+const EU = "alice-001";
+
+const method = "POST";
+const path = "/api/knowledge-bases/<kb_id>/documents/upload";
+const query = ""; // 无 query 时为空串
+const ts = Math.floor(Date.now() / 1000).toString();
+const nonce = crypto.randomBytes(16).toString("hex");
+
+const canonical = [method, path, query, ts, nonce, EU].join("\n");
+const sign = crypto.createHmac("sha256", SK).update(canonical).digest("hex");
+
+const form = new FormData();
+form.append("file", new Blob([/* 文件字节 */]), "manual.pdf");
+
+await fetch(`${BASE}${path}`, {
+  method,
+  headers: {
+    "Authorization": `SAG-HMAC-SHA256 ak=${AK},ts=${ts},nonce=${nonce},sign=${sign}`,
+    "X-External-User-Id": EU,
+  },
+  body: form,
+});
+```
+
+> 签名通道与 Bearer 通道**等价**：认证通过后走完全相同的身份合成与权限判定，下文所有接口都可改用签名头调用（把示例里的 `-H "Authorization: Bearer $KEY"` 换成签名头即可）。签名通道**不能**放进不可信的公开浏览器前端——SK 一旦落入终端用户可控环境即可被提取，签名机制只防重放/防篡改/免明文上行，不解决"密钥被提取"。
 
 ---
 
@@ -98,7 +160,7 @@ curl -X POST $BASE/api/api-keys/external-agent \
   -d '{"name":"第三方系统代理Key"}'
 ```
 
-响应（明文 `key` 仅此一次，请妥善保存）：
+响应（明文 `key`、`secret_key` 均仅此一次，请妥善保存）：
 
 ```json
 {
@@ -107,11 +169,16 @@ curl -X POST $BASE/api/api-keys/external-agent \
   "prefix": "sk-81a95f36...",
   "name": "第三方系统代理Key",
   "key_type": "external_agent",
-  "created_at": "2026-07-01T03:11:16.642270"
+  "created_at": "2026-07-01T03:11:16.642270",
+  "access_key": "835d75f1-...",
+  "secret_key": "9f3c...（仅此一次，AK/SK 签名通道用，见 1.5）"
 }
 ```
 
-拿到后设 `KEY=sk-...`，第三方系统即可用它 + `X-External-User-Id` 调用下文全部业务接口。
+两种用法二选一：
+
+- **Bearer 明文通道**：设 `KEY=sk-...`，用 `Authorization: Bearer $KEY` + `X-External-User-Id` 调下文全部业务接口。
+- **AK/SK 签名通道**（推荐用于无后端的可信直连）：用 `access_key` / `secret_key` 按 1.5 对每次请求签名，密钥不逐请求上行。
 
 ### 2.3 撤销代理 Key（仅 Super_Admin）
 
@@ -422,12 +489,20 @@ curl $BASE/api/knowledge-bases/<kb_id>/folders/<folder_id>/breadcrumb \
 
 ## 6. 检索与问答
 
-### 6.1 纯检索测试（不经 LLM）
+### 6.1 纯检索召回（不经 LLM）
 
-`POST /api/retrieval/test`　字段：`query`（必填）、`knowledge_base_id`（必填）、`mode`（`direct`|`hybrid`，默认 `hybrid`）、`top_k`（默认 10）。
+单轮召回，只返回命中的 chunk 及多维分数信号，不经 LLM 生成。两个等价路径：
+
+- `POST /api/retrieval/search`：**对外集成推荐**，语义为「检索召回」。
+- `POST /api/retrieval/test`：能力与 `/search` 完全一致（同一底层实现），保留供前端调参页调用。
+
+字段：`query`（必填）、`knowledge_base_id`（必填）、`mode`（`direct`|`hybrid`，默认 `hybrid`）、`top_k`（默认 10）。
+
+- `direct`：仅稠密向量单路召回，最快，`trace` 为 `null`。
+- `hybrid`：三路混合（Dense + Sparse + BM25）+ RRF + Rerank + MMR + 父块扩展。**当平台开启图谱（`GRAPH_ENABLE`）且图存储（Neo4j）可用时，自动并入图谱召回第四路（`graph`）**，与生产问答链路 `hybrid` 召回口径一致；未开启图谱时行为与三路完全相同。
 
 ```bash
-curl -X POST $BASE/api/retrieval/test \
+curl -X POST $BASE/api/retrieval/search \
   -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU" \
   -H "Content-Type: application/json" \
   -d '{"query":"保修期多久","knowledge_base_id":"<kb_id>","mode":"hybrid","top_k":10}'
@@ -441,11 +516,59 @@ curl -X POST $BASE/api/retrieval/test \
   "results": [
     { "chunk_id": "ck-1", "doc_id": "doc-71bc...", "filename": "manual.pdf",
       "content": "父块文本…", "child_content": "命中子块…", "score": 0.83,
-      "rrf_score": 0.031, "rerank_score": 0.79, "routes": ["dense","bm25"] }
+      "rrf_score": 0.031, "rerank_score": 0.79, "routes": ["dense","bm25","graph"] }
   ],
-  "trace": { "routes": [{ "name":"dense","recalled":20,"enabled":true }], "funnel": [{ "stage":"rerank","count":10 }] }
+  "trace": {
+    "routes": [
+      { "name":"dense","recalled":20,"enabled":true },
+      { "name":"sparse","recalled":20,"enabled":true },
+      { "name":"bm25","recalled":18,"enabled":true },
+      { "name":"graph","recalled":6,"enabled":true }
+    ],
+    "funnel": [{ "stage":"Rerank 输出","count":10 }]
+  }
 }
 ```
+
+> `routes` 中 `graph` 项的 `enabled` 反映本次是否注入了图谱第四路（平台未开启图谱 / 图存储不可用时为 `false`、`recalled` 为 0）。
+
+### 6.1.1 Agent 检索召回（多步推理召回）
+
+`POST /api/retrieval/agent`
+
+区别于 6.1 的单轮召回：跑 ReAct Agent 引擎，围绕问题**多步检索、反思、改写子查询**后汇聚证据，返回其召回的引用来源与最终作答。召回口径（含图谱第四路）与 `/v1/chat/completions` 的 `agent` 模式一致。无会话概念（不落库、不加载历史、不接入会话临时文件），一次请求一个独立推理链。
+
+字段：`query`（必填）、`knowledge_base_id` 或 `kb_ids`（二选一，至少其一）、`agent_preset_id`（可选）、`model_config_id`（可选）。
+
+```bash
+curl -X POST $BASE/api/retrieval/agent \
+  -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"保修期多久，超期如何收费","knowledge_base_id":"<kb_id>"}'
+```
+
+响应：
+
+```json
+{
+  "query": "保修期多久，超期如何收费",
+  "answer": "根据检索到的资料，保修期为 12 个月……",
+  "references": [
+    { "doc_id":"doc-71bc...", "chunk_id":"ck-1", "filename":"manual.pdf",
+      "content":"父块…", "child_content":"子块…", "score":0.83 }
+  ],
+  "agent_steps": [
+    { "type":"thought", "content":"先检索保修期，再检索超期收费" },
+    { "type":"tool_call", "name":"knowledge_search" },
+    { "type":"tool_result" },
+    { "type":"final_answer" }
+  ],
+  "degraded": false,
+  "elapsed_ms": 2360
+}
+```
+
+> `agent_steps` 用于在第三方界面还原 Agent 的检索/推理过程；只需召回来源时取 `references` 即可。
 
 ### 6.2 对话问答（OpenAI 兼容）
 
@@ -697,17 +820,35 @@ curl $BASE/api/sessions/<session_id>/files/<file_id>/raw \
 
 实时订阅该会话所有文件的建索引状态。连接建立后服务端**先推一帧当前快照**（该会话所有文件的最新状态），随后按需增量推送状态事件；服务端会周期发送 `ping` 保活。会话严格按 `X-External-User-Id` 隔离，仅归属主体可订阅。
 
-**鉴权（握手前完成）**：浏览器/客户端无法自定义 WebSocket 请求头，凭据经 query 参数传入：
+**鉴权（握手前完成）**：浏览器/客户端无法自定义 WebSocket 请求头，凭据经 query 参数传入。两种通道二选一：
+
+_通道一：明文 token_
 
 | query 参数 | 必填 | 说明 |
 | --- | --- | --- |
 | `access_token` | 是 | 代理 Key 明文（`sk-...`）；亦可回退 `Authorization: Bearer` 头 |
 | `external_user_id` | 是（代理 Key） | 你方终端用户唯一标识；亦可回退 `X-External-User-Id` 头 |
 
-连接示例（`wscat`）：
-
 ```bash
 wscat -c "ws://localhost:8000/api/sessions/<session_id>/files/events?access_token=$KEY&external_user_id=$EU"
+```
+
+_通道二：AK/SK 签名_（见 1.5，query 带 `ak`+`sign` 即走此通道）
+
+| query 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `ak` / `ts` / `nonce` / `sign` | 是 | 签名四要素；WS 握手为 GET，故经 query 传入 |
+| `external_user_id` | 是（代理 Key） | 你方终端用户唯一标识（已并入签名） |
+
+签名串与 1.5 相同，但 **WS 的 `path` 取握手路径、`query` 固定为空串**（签名无法覆盖含自身的 query，资源由 path 内 `session_id` 唯一确定）：
+
+```
+GET\n/api/sessions/<session_id>/files/events\n\n<ts>\n<nonce>\n<external_user_id>
+```
+
+```bash
+# ts/nonce/sign 由你方按上式对空 query 计算
+wscat -c "ws://localhost:8000/api/sessions/<session_id>/files/events?ak=$AK&ts=$TS&nonce=$NONCE&sign=$SIGN&external_user_id=$EU"
 ```
 
 **快照帧**（连接后首帧）：
@@ -851,7 +992,8 @@ curl $BASE/api/system/health
 
 ## 12. 安全建议
 
-- 代理 Key 等同密码，仅第三方服务端持有，切勿下发到浏览器/移动端等不可信前端。
-- `X-External-User-Id` 由第三方服务端按当前登录用户注入，不要让终端用户可篡改。
-- Key 泄露后立即撤销（`DELETE /api/api-keys/{id}`）并重签。
-- 生产环境建议收敛 CORS（当前默认 `allow_origins=["*"]`）并启用 HTTPS。
+- 代理 Key（含明文 `key` 与签名 `secret_key`）等同密码，仅可信调用方持有，切勿下发到浏览器/移动端等**不可信前端**。AK/SK 签名只防重放/防篡改/免明文上行，**不解决 SK 被提取**——公开前端场景无解，需自建一层可信代理。
+- 优先用 **AK/SK 签名通道**（1.5）替代明文 Bearer：网络与日志里不再出现长期密钥，只有每次现算的签名。
+- `X-External-User-Id` 由调用方按当前登录用户注入，不要让终端用户可篡改（签名通道下其值已并入签名，可防在途篡改，但持有 SK 者仍可自行改签，故仍以可信环境为前提）。
+- Key 泄露后立即撤销（`DELETE /api/api-keys/{id}`）并重签；撤销后其 AK/SK 签名同时失效。
+- 生产环境建议收敛 CORS（当前默认 `allow_origins=["*"]`）并启用 HTTPS（签名不纳入 body，body 完整性依赖 TLS）。

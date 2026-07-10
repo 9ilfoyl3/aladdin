@@ -179,9 +179,28 @@ async def _resolve_identity(
 ) -> tuple[IdentityContext, bool]:
     """从请求凭据解析 IdentityContext。无有效凭据 -> 401。
 
-    从 Request 取 Bearer token 与 headers 后委托 resolve_identity_from_credentials，
-    行为与既有实现完全一致。
+    两条通道：
+    - ``Authorization: SAG-HMAC-SHA256 ...`` -> AK/SK 签名认证（aksk-signing）：先验签
+      （时间窗 + HMAC + nonce），再按 AK 合成身份。密钥明文不上行。
+    - 其余 -> Bearer 通道（sk-... 走 API Key，其它按 JWT），委托
+      resolve_identity_from_credentials，行为与既有实现完全一致。
     """
+    from app.auth.signing import is_signed_request, verify_signature
+
+    authorization = request.headers.get("Authorization")
+    if is_signed_request(authorization):
+        ak = await verify_signature(
+            method=request.method,
+            path=request.url.path,
+            query=request.url.query,
+            headers=request.headers,
+            authorization=authorization or "",
+        )
+        identity = await ApiKeyAuthenticator(session).authenticate_by_id(
+            ak, request.headers
+        )
+        return identity, False  # API Key 通道无"当前用户改密"概念
+
     token = _extract_bearer(request)
     if not token:
         raise UnauthenticatedError("缺少 Authorization 凭据")
