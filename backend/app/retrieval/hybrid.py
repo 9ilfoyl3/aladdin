@@ -312,10 +312,18 @@ class HybridRetriever(BaseRetriever):
         if has_bm25:
             tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs))
 
+        # 第四路：图谱召回（可选）。与 search_with_degraded 同构——仅当注入了 graph_retriever
+        # 时追加；未注入（None）→ tasks/RRF 输入与三路时逐字节一致（Property 8 零回归）。
+        # 这样调参/召回接口在图谱开启时也能看到并用上第四路，与生产问答链路同口径。
+        has_graph = self.graph_retriever is not None
+        graph_idx = len(tasks) if has_graph else -1
+        if has_graph:
+            tasks.append(self.graph_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
+
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         def _safe(idx: int) -> list[RetrievalResult]:
-            if idx >= len(results_list):
+            if idx < 0 or idx >= len(results_list):
                 return []
             r = results_list[idx]
             if isinstance(r, Exception):
@@ -326,6 +334,7 @@ class HybridRetriever(BaseRetriever):
         dense_results = _safe(0)
         sparse_results = _safe(1)
         bm25_results = _safe(2) if has_bm25 else []
+        graph_results = _safe(graph_idx) if has_graph else []
 
         # 路由归属：chunk_id -> {route: rank}
         per_result: dict[str, dict] = {}
@@ -342,11 +351,15 @@ class HybridRetriever(BaseRetriever):
         _record_route(dense_results, "dense")
         _record_route(sparse_results, "sparse")
         _record_route(bm25_results, "bm25")
+        _record_route(graph_results, "graph")
 
         # 2. RRF 融合
         all_results = [dense_results, sparse_results]
         if bm25_results:
             all_results.append(bm25_results)
+        # 图谱路仅在非空时并入融合：空列表对 RRF 名次无贡献，与 search_with_degraded 一致。
+        if graph_results:
+            all_results.append(graph_results)
         fused = self._rrf_fusion(all_results, k=config.rrf_k)
 
         for item in fused:
@@ -358,6 +371,7 @@ class HybridRetriever(BaseRetriever):
             {"name": "dense", "recalled": len(dense_results)},
             {"name": "sparse", "recalled": len(sparse_results)},
             {"name": "bm25", "recalled": len(bm25_results), "enabled": has_bm25},
+            {"name": "graph", "recalled": len(graph_results), "enabled": has_graph},
         ]
         funnel: list[dict] = [
             {"stage": "三路召回去重", "count": len(per_result)},

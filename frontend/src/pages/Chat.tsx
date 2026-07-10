@@ -13,6 +13,7 @@ import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
 import ChatMessagesSkeleton from '@/components/skeletons/ChatMessagesSkeleton'
 import SideRays from '@/components/SideRays'
+import { useSessionUploadEvents } from '@/hooks/useSessionUploadEvents'
 import { useSession } from '@/lib/session-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
@@ -74,6 +75,8 @@ function Chat() {
   const entryAnimateRef = useRef(false)
   // 入场平滑滚动的防抖定时器：每次内容高度变化都重置，停止变化一段时间后才真正平滑滚到底。
   const entryScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 入场 rAF 平滑滚动的句柄：每帧重读实时 scrollHeight 缓动逼近底部，跟随懒加载增长。
+  const entryRafRef = useRef<number | null>(null)
   // 入场平滑滚动的兜底超时：动画异常未到底时强制结束抑制。
   const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 是否「粘附底部」：true 时新内容自动滚到底；用户上滑后置 false，回到底部后恢复 true。
@@ -129,6 +132,32 @@ function Chat() {
     queryFn: () => sessionFileApi.list(currentSessionId!),
     enabled: !!currentSessionId,
   })
+
+  // 会话文件建索引实时状态（WS 推送 queued→processing→progress→completed/failed）。
+  // 见 useSessionUploadEvents / Design C10：把 live 状态 merge 进服务端列表，
+  // 让 chip 无需等 query refetch 即可实时前进。completed/removed 时该 hook 会自动
+  // invalidate ['session-files', sid]，服务端行随后携带真实 chunk_count 等落地。
+  const { fileStates } = useSessionUploadEvents(currentSessionId)
+
+  // 服务端列表叠加 live 状态：单一 merge 点，向下游（输入区/气泡）统一透出实时进度。
+  // 对每个服务端文件，若存在对应 live 状态则以其覆盖 status/progress/message/error
+  //（及 chunk_count，若 live 提供）；无 live 状态时保持服务端值不变。
+  const mergedSessionFiles = useMemo<SessionFileResponse[]>(
+    () =>
+      sessionFiles.map((f) => {
+        const live = fileStates[f.id]
+        if (!live) return f
+        return {
+          ...f,
+          status: live.status || f.status,
+          progress: typeof live.progress === 'number' ? live.progress : f.progress,
+          progress_message: live.progress_message ?? f.progress_message,
+          error_message: live.error_message ?? f.error_message,
+          chunk_count: typeof live.chunk_count === 'number' ? live.chunk_count : f.chunk_count,
+        }
+      }),
+    [sessionFiles, fileStates]
+  )
 
   // 切换会话时清掉本地占位（避免 A 会话上传中切到 B 仍显示）。
   // 用 ref 跟踪上一次会话：跳过「null -> 新建会话」首建场景——该场景是新对话首次
@@ -191,35 +220,54 @@ function Chat() {
     const pin = () => {
       if (!stickToBottomRef.current) return
       if (entryAnimateRef.current) {
-        // 入场动画阶段：防抖，等高度稳定后再平滑滚一次到底，避免被坍缩打断。
+        // 入场动画阶段：防抖，等高度初步稳定后启动一次「自定义 rAF 平滑滚动」。
+        // 不用原生 scrollTo({behavior:'smooth'})——它的目标在发起时就固定了，而懒加载会让
+        // 下方内容边滚边挂载、高度持续增长，原生动画滚到「旧底部」就停，随后兜底瞬时贴底，
+        // 表现为「平滑一段后突然触底」。改为每帧重新读取实时 scrollHeight 并缓动逼近，
+        // 内容增长时持续平滑跟随，最终精确落到真实底部。
         if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
         entryScrollTimerRef.current = setTimeout(() => {
           entryAnimateRef.current = false
           if (!stickToBottomRef.current) return
-          // 全程抑制粘附重算：smooth 动画会连续派发 scroll 事件，中途 scrollTop 未到底，
-          // 若被当作用户上滑就会打破粘附、停在半路。动画结束（到底）或超时后再解除。
           autoScrollingRef.current = true
-          programmaticScrollRef.current = true
-          container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-          if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
-          autoScrollTimerRef.current = setTimeout(() => {
-            // 兜底：动画应已到底，强制再贴一次并解除抑制。
-            if (stickToBottomRef.current) {
-              programmaticScrollRef.current = true
-              container.scrollTop = container.scrollHeight
+          let stableFrames = 0
+          let lastTarget = -1
+          const step = () => {
+            if (!stickToBottomRef.current) { autoScrollingRef.current = false; return }
+            const c = scrollContainerRef.current
+            if (!c) { autoScrollingRef.current = false; return }
+            const target = c.scrollHeight - c.clientHeight
+            const cur = c.scrollTop
+            const diff = target - cur
+            // 缓动：每帧前进剩余距离的一部分，但夹在 [最小步长, 最大步长] 之间。
+            // 上限防止距离大时初段冲太快，整体更慢更匀。
+            const stepPx = Math.min(Math.max(diff * 0.06, 8), 28)
+            programmaticScrollRef.current = true
+            if (diff <= 1) {
+              c.scrollTop = target
+            } else {
+              c.scrollTop = cur + Math.min(stepPx, diff)
             }
-            autoScrollingRef.current = false
-          }, 1000)
-        }, 260)
+            // 目标连续稳定（懒加载不再增高）且已贴底 → 结束。
+            if (target === lastTarget && diff <= 1) {
+              stableFrames += 1
+            } else {
+              stableFrames = 0
+              lastTarget = target
+            }
+            if (stableFrames >= 2) {
+              c.scrollTop = c.scrollHeight
+              autoScrollingRef.current = false
+              return
+            }
+            entryRafRef.current = requestAnimationFrame(step)
+          }
+          entryRafRef.current = requestAnimationFrame(step)
+        }, 200)
         return
       }
-      // 动画进行中高度又变（晚到的代码高亮坍缩）：重新发一次平滑滚动到新底部，保持过渡，
-      // 不要瞬时跳（否则用户看到的就是「直接蹦到底」而非滑动）。
-      if (autoScrollingRef.current) {
-        programmaticScrollRef.current = true
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-        return
-      }
+      // 入场 rAF 动画进行中：高度变化由 step 每帧自行读取跟随，这里不额外贴底（避免打断缓动）。
+      if (autoScrollingRef.current) return
       // 常规阶段（流式增量等）：瞬时贴底，绝不被打断。
       programmaticScrollRef.current = true
       container.scrollTop = container.scrollHeight
@@ -230,6 +278,7 @@ function Chat() {
       ro.disconnect()
       if (entryScrollTimerRef.current) clearTimeout(entryScrollTimerRef.current)
       if (autoScrollTimerRef.current) clearTimeout(autoScrollTimerRef.current)
+      if (entryRafRef.current) cancelAnimationFrame(entryRafRef.current)
     }
   }, [isLoadingMessages, currentSessionId])
 
@@ -1201,9 +1250,10 @@ function Chat() {
   }, [messages])
 
   // 输入区仅展示"尚未随消息发出"的会话文件（已发送的随气泡上移）。
+  // 用 merge 后的列表，chip 才能实时反映建索引进度。
   const stagedFiles = useMemo(
-    () => sessionFiles.filter((f) => !consumedFileIds.has(f.id)),
-    [sessionFiles, consumedFileIds]
+    () => mergedSessionFiles.filter((f) => !consumedFileIds.has(f.id)),
+    [mergedSessionFiles, consumedFileIds]
   )
 
   const isEmpty = messages.length === 0
@@ -1304,7 +1354,7 @@ function Chat() {
                     onToggleRef={toggleRef}
                     imagePreviewUrls={imagePreviewUrls}
                     sessionId={currentSessionId}
-                    sessionFiles={sessionFiles}
+                    sessionFiles={mergedSessionFiles}
                     onFeedback={handleFeedback}
                     onRetry={handleRetry}
                   />

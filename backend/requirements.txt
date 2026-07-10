@@ -1,6 +1,8 @@
 # Web 框架
 fastapi>=0.115.0
 uvicorn>=0.30.6
+# WebSocket 后端：uvicorn 需要它才能接受 WS 握手（会话上传状态实时推送 /api/sessions/{id}/files/events）
+websockets>=12.0
 pydantic>=2.12.0
 pydantic-settings>=2.5.2
 python-dotenv>=1.0.1
@@ -58,3 +60,4 @@ pytest>=8.3.3
 pytest-asyncio>=0.24.0
 nest-asyncio>=1.6.0
 hypothesis>=6.112.1
+fakeredis>=2.35.1    # Redis Stream 队列测试替身（TaskQueue / 会话上传队列 fakeredis 回归基线）

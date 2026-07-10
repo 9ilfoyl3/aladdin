@@ -78,7 +78,7 @@ class ApiKeyAuthenticator:
         self.session = session
 
     async def authenticate(self, raw_key: str, headers: Mapping[str, str]) -> IdentityContext:
-        # 1) SHA256 比对 + 启用校验
+        # 1) SHA256 比对 + 启用校验（Bearer sk-... 明文通道）
         key_hash = hash_key(raw_key)
         from sqlalchemy import select
 
@@ -88,12 +88,30 @@ class ApiKeyAuthenticator:
         api_key = result.scalar_one_or_none()
         if api_key is None:
             raise UnauthenticatedError("API Key 无效或已被撤销")
+        return await self._finalize(api_key, headers)
 
-        # 2) 租户启用校验（停用 403）
+    async def authenticate_by_id(
+        self, api_key_id: str, headers: Mapping[str, str]
+    ) -> IdentityContext:
+        """按 AK（api_key.id）合成身份，供 AK/SK 签名通道使用（签名已在上层校验）。
+
+        与 ``authenticate`` 的差异仅在定位方式：签名通道不上行明文密钥，故以 AK 定位；
+        密钥是否存在/被撤销在此确认（查不到 / 已停用 -> 401）。后续判型与副作用完全一致。
+        """
+        api_key = await self.session.get(ApiKey, api_key_id)
+        if api_key is None or not api_key.is_active:
+            raise UnauthenticatedError("API Key 无效或已被撤销")
+        return await self._finalize(api_key, headers)
+
+    async def _finalize(
+        self, api_key: ApiKey, headers: Mapping[str, str]
+    ) -> IdentityContext:
+        """已定位到启用的 ApiKey 后的统一收尾：租户校验 + 判型合成 + 计数。"""
+        # 租户启用校验（停用 403）
         if not await _tenant_active(self.session, api_key.tenant_id):
             raise TenantDisabledError()
 
-        # 3) 按 key_type 分支
+        # 按 key_type 分支
         key_type = api_key.key_type or ApiKeyTypeEnum.TENANT_LEVEL.value
         if key_type == ApiKeyTypeEnum.EXTERNAL_AGENT.value:
             identity = await self._auth_external_agent(api_key, headers)
@@ -102,7 +120,7 @@ class ApiKeyAuthenticator:
         else:
             identity = self._auth_tenant_level(api_key)
 
-        # 4) 副作用：计数 + last_used
+        # 副作用：计数 + last_used
         await _bump_usage(self.session, api_key.id)
         return identity
 

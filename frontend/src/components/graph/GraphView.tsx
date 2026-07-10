@@ -15,6 +15,7 @@ import GraphCanvas, { type GraphCanvasHandle } from './GraphCanvas'
 import GraphLegend from './GraphLegend'
 import GraphSearchBar from './GraphSearchBar'
 import GraphEntityDrawer from './GraphEntityDrawer'
+import GraphEventDrawer from './GraphEventDrawer'
 
 /**
  * 图谱交互视图。挂载时按 overview 拉总览，承载全部交互编排。
@@ -31,11 +32,14 @@ export default function GraphView() {
   const hiddenTypes = useGraphStore((s) => s.hiddenTypes)
   const selected = useGraphStore((s) => s.selected)
   const selectedLoading = useGraphStore((s) => s.selectedLoading)
+  const selectedEvent = useGraphStore((s) => s.selectedEvent)
+  const selectedEventLoading = useGraphStore((s) => s.selectedEventLoading)
   const loading = useGraphStore((s) => s.loading)
 
   const loadOverview = useGraphStore((s) => s.loadOverview)
   const loadEgo = useGraphStore((s) => s.loadEgo)
   const selectNode = useGraphStore((s) => s.selectNode)
+  const selectEvent = useGraphStore((s) => s.selectEvent)
   const bloomNode = useGraphStore((s) => s.bloomNode)
   const toggleTypeVisibility = useGraphStore((s) => s.toggleTypeVisibility)
   const clearSelected = useGraphStore((s) => s.clearSelected)
@@ -59,13 +63,26 @@ export default function GraphView() {
   }, [nodes])
 
   // 单击：选中 + 懒加载详情 + 画布居中（design.md 5.3.2）。
+  // 事件层节点走事件详情端点（selectEvent），实体走实体详情端点（selectNode）。
   const handleSingleClick = (entityId: string) => {
+    const node = nodes.find((n) => n.id === entityId)
+    if (node && node.node_type === 'event') {
+      selectEvent(entityId)
+      canvasRef.current?.centerNode(entityId)
+      return
+    }
     selectNode(entityId)
     canvasRef.current?.centerNode(entityId)
   }
 
   // 双击：pivot 到该节点 ego（重新拉子图，关闭抽屉避免错位）。
+  // 事件层节点不作为 ego 中心（后端 ego 以实体为中心），双击退化为居中。
   const handleDoubleClick = (entityId: string) => {
+    const node = nodes.find((n) => n.id === entityId)
+    if (node && node.node_type === 'event') {
+      canvasRef.current?.centerNode(entityId)
+      return
+    }
     clearSelected()
     loadEgo(entityId)
   }
@@ -80,6 +97,16 @@ export default function GraphView() {
   const handlePivotNeighbor = (entityId: string) => {
     clearSelected()
     loadEgo(entityId)
+  }
+
+  // Shift+单击：bloom 展开邻居。事件层节点无实体 ego，退化为居中不展开。
+  const handleShiftClick = (entityId: string) => {
+    const node = nodes.find((n) => n.id === entityId)
+    if (node && node.node_type === 'event') {
+      canvasRef.current?.centerNode(entityId)
+      return
+    }
+    bloomNode(entityId)
   }
 
   // 截断提示文案（design.md 5.3.2「showing X of Y」）。
@@ -128,10 +155,10 @@ export default function GraphView() {
         nodes={nodes}
         edges={edges}
         hiddenTypes={hiddenTypes}
-        selectedId={selected?.id ?? null}
+        selectedId={selected?.id ?? selectedEvent?.id ?? null}
         onSingleClick={handleSingleClick}
         onDoubleClick={handleDoubleClick}
-        onShiftClick={bloomNode}
+        onShiftClick={handleShiftClick}
       />
 
       {/* 实体详情抽屉（懒加载，右侧覆盖） */}
@@ -140,6 +167,14 @@ export default function GraphView() {
         loading={selectedLoading}
         onClose={clearSelected}
         onPivotNeighbor={handlePivotNeighbor}
+      />
+
+      {/* 事件详情抽屉（事件中心图谱，右侧覆盖；与实体抽屉互斥） */}
+      <GraphEventDrawer
+        detail={selectedEvent}
+        loading={selectedEventLoading}
+        onClose={clearSelected}
+        onPivotEntity={handlePivotNeighbor}
       />
     </div>
   )

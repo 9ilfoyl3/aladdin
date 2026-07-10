@@ -54,6 +54,10 @@ async def main():
     # 初始化数据库（确保表存在 + migration）
     await init_db()
 
+    # 会话文件异步上传新列迁移（progress / progress_message / error_message）
+    from app.startup import _auto_migrate_session_file_columns
+    await _auto_migrate_session_file_columns()
+
     # 加载 Embedding/Rerank 配置（与 API 共用逻辑）
     await load_embed_configs()
 
@@ -141,6 +145,41 @@ async def main():
         "tenant_config": _handle_tenant_config,
     })
 
+    # 会话文件异步上传 worker（REQ-2 / REQ-4 / REQ-9）：与文档入库快/慢道队列物理隔离，
+    # 消费独立 stream ``session_upload:tasks``，后台建索引并 publish 状态事件。
+    # 与文档 worker 一样在独立事件循环任务中运行，互不阻塞。
+    session_worker = None
+    session_worker_task = None
+
+    from app.session_upload.events import init_session_upload_event_bus
+    from app.session_upload.queue import SessionUploadQueue, set_session_upload_queue
+    from app.session_upload.service import get_session_upload_service
+    from app.session_upload.worker import SessionUploadWorker
+
+    session_upload_queue = await SessionUploadQueue.create(settings.redis_url)
+    if session_upload_queue is None:
+        # Redis 前面已校验可用（task_queue is None → sys.exit(1)），理论上不会到这；
+        # 仍防御式跳过，避免 worker 进程因会话上传队列缺失而无法启动。
+        print("[Worker] ⚠️ 会话上传队列不可用（Redis），跳过会话上传 worker")
+        logger.warning("SessionUploadQueue unavailable, skipping session upload worker")
+    else:
+        # 注入进程内单例，使 SessionUploadService 惰性解析到同一队列实例。
+        set_session_upload_queue(session_upload_queue)
+        # worker 进程只 publish 事件（不订阅、不持有 EventHub）→ local_hub=None。
+        # Redis 可用则跨进程广播；不可用则 publish 退化为记 WARNING 的 no-op。
+        await init_session_upload_event_bus(local_hub=None)
+        # 服务单例的 queue/event_bus 属性此时解析到上面刚注入的进程单例，
+        # process_task 的 publish 走 worker 侧事件总线。
+        session_service = get_session_upload_service()
+        # 并发/重试/超时等配置由 worker 内部防御式 getattr 读取（任务 9.1 补齐配置字段）。
+        session_worker = SessionUploadWorker(
+            queue=session_upload_queue,
+            service=session_service,
+            db_session_factory=async_session,
+        )
+        session_worker_task = asyncio.create_task(session_worker.start())
+        print("[Worker] 📤 会话文件异步上传 worker 已启动")
+
     # 知识图谱抽取慢道 worker（仅 graph_enable 开启时启动，避免未启用成本 —— Req 9.3）。
     # 独立队列 + 独立并发信号量，与文档入库 worker 物理隔离，绝不挤占主链路（Req 1.2）。
     graph_worker = None
@@ -202,6 +241,8 @@ async def main():
             async def _graceful_shutdown():
                 try:
                     await asyncio.wait_for(worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
+                    if session_worker is not None:
+                        await asyncio.wait_for(session_worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
                     if graph_worker is not None:
                         await asyncio.wait_for(graph_worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
                     if graph_housekeeping_stop is not None:
@@ -217,6 +258,12 @@ async def main():
 
     # 启动 Worker
     await worker.start()
+
+    # 主 worker 循环退出后，停止会话上传 worker 并回收其后台任务。
+    if session_worker is not None:
+        await session_worker.stop()
+    if session_worker_task is not None:
+        await asyncio.gather(session_worker_task, return_exceptions=True)
 
     # 主 worker 循环退出后，停止图谱 worker 并回收其后台任务。
     if graph_worker is not None:

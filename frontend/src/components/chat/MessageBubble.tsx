@@ -195,6 +195,7 @@ function MessageBubble({
               <div className="px-4 py-3 text-sm leading-relaxed">
                 <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
                   <Streamdown
+                    mode={isStreaming && isLast ? 'streaming' : 'static'}
                     plugins={{ cjk: cjk }}
                     isAnimating={isStreaming && isLast}
                     animated={STREAM_ANIMATION}
@@ -418,7 +419,7 @@ function AgentStreamContent({
         return (
           <div key={`ans-${i}`} className="text-sm leading-relaxed">
             <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-              <Streamdown plugins={{ cjk: cjk }} isAnimating={isLastSegment} animated={STREAM_ANIMATION}>
+              <Streamdown mode={isLastSegment ? 'streaming' : 'static'} plugins={{ cjk: cjk }} isAnimating={isLastSegment} animated={STREAM_ANIMATION}>
                 {seg.content}
               </Streamdown>
             </div>
@@ -831,7 +832,7 @@ function StepRow({
               </div>
             ) : (
               <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
-                <Streamdown plugins={{ cjk: cjk }} isAnimating={animating} animated={STREAM_ANIMATION}>
+                <Streamdown mode={animating ? 'streaming' : 'static'} plugins={{ cjk: cjk }} isAnimating={animating} animated={STREAM_ANIMATION}>
                   {seg.content}
                 </Streamdown>
               </div>

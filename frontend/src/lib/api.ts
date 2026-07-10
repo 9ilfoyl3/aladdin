@@ -778,9 +778,10 @@ export interface MessageAttachment {
 // 会话级文件上传（session-file-upload Task 8 / Design C8）
 //
 // 后端入口 /api/sessions/{session_id}/files：
-// - POST  multipart(file)  → 同步建索引，返回 SessionFileResponse
-// - GET                    → 列出本会话已上传文件
+// - POST  multipart(file)  → 秒回 + 后台异步建索引，返回 202 + SessionFileResponse(status=queued)
+// - GET                    → 列出本会话已上传文件（含最新 status/progress/error_message，轮询/对账兜底）
 // - DELETE /{file_id}      → 移除单文件并释放配额（204）
+// - WS   /events           → 实时推送建索引状态事件（见 useSessionUploadEvents）
 //
 // 鉴权：仅会话所有者本人；非 owner / 非存在 → 后端统一 404（存在性非泄露）。
 // 限制超额：413（FileTooLargeError / UploadCapExceeded），
@@ -792,8 +793,14 @@ export interface SessionFileResponse {
   file_type: string | null
   file_size: number | null
   chunk_count: number
-  /** processing | completed | failed —— 同步建索引完成后通常为 completed */
+  /** queued | processing | completed | failed —— 异步路径上传后初始为 queued */
   status: string
+  /** 建索引进度 0-100（异步路径由 worker 各阶段更新） */
+  progress: number
+  /** 当前阶段人类可读描述（可空） */
+  progress_message: string | null
+  /** 失败原因（status=failed 时有值） */
+  error_message: string | null
   created_at: string
 }
 
@@ -1211,6 +1218,26 @@ export interface GraphEntityDetail {
   chunks: GraphEntityChunk[]
 }
 
+/** 事件详情里关联（MENTIONS）的实体（可点击 pivot）。 */
+export interface GraphEventMention {
+  id: string
+  name: string
+  type: string
+}
+
+/** 事件详情（GET /graph/event/{id}，事件中心图谱，懒加载）。 */
+export interface GraphEventDetail {
+  id: string
+  title: string
+  summary: string
+  content: string
+  doc_id: string
+  /** 关联实体列表（可点击 pivot） */
+  mentions: GraphEventMention[]
+  /** 来源 chunk 原文预览（可为 null） */
+  chunk: GraphEntityChunk | null
+}
+
 /** KB 级图谱配置（config.graph，design.md 3.3 / 5.2）。 */
 export interface GraphConfig {
   enabled: boolean
@@ -1266,6 +1293,9 @@ export const graphApi = {
   // 实体详情（懒加载）：属性/别名/邻居/关联原文 chunk 预览。
   getGraphEntity: (kbId: string, entityId: string) =>
     request<GraphEntityDetail>(`/kb/${kbId}/graph/entity/${entityId}`),
+  // 事件详情（懒加载）：标题/摘要/完整内容/关联实体/来源原文预览（事件中心图谱）。
+  getGraphEvent: (kbId: string, eventId: string) =>
+    request<GraphEventDetail>(`/kb/${kbId}/graph/event/${eventId}`),
   // KB 图谱配置：后端尚无独立 GET config 端点（task 5.2 的 PUT 之外），
   // 故从 KB 详情的 config.graph 派生（逐字段兜底，缺失回退安全默认）。
   getGraphConfig: async (kbId: string): Promise<GraphConfig> => {

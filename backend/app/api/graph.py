@@ -43,6 +43,7 @@ from app.storage.database import async_session
 from app.storage.graph_store import (
     GraphEdgeDTO,
     GraphEntityDTO,
+    GraphEventDetailDTO,
     GraphNodeDTO,
     GraphStatsDTO,
     GraphStore,
@@ -240,6 +241,29 @@ def _entity_to_dict(entity: GraphEntityDTO) -> dict:
     }
 
 
+def _event_detail_to_dict(event: GraphEventDetailDTO) -> dict:
+    """事件详情 DTO -> 响应 dict（可视化事件详情面板用）。"""
+    return {
+        "id": event.id,
+        "title": event.title,
+        "summary": event.summary,
+        "content": event.content,
+        "doc_id": event.doc_id,
+        "mentions": [
+            {"id": m.id, "name": m.name, "type": m.type} for m in event.mentions
+        ],
+        "chunk": (
+            {
+                "chunk_id": event.chunk.chunk_id,
+                "doc_id": event.chunk.doc_id,
+                "content_preview": event.chunk.content_preview,
+            }
+            if event.chunk is not None
+            else None
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # center 解析（ego 模式）
 # ---------------------------------------------------------------------------
@@ -382,6 +406,24 @@ async def get_graph_entity(
     if entity is None:
         raise NotFoundError("实体不存在")
     return _entity_to_dict(entity)
+
+
+@router.get("/{kb_id}/graph/event/{event_id}")
+async def get_graph_event(
+    kb_id: str,
+    event_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+) -> dict:
+    """事件详情（事件中心图谱）：标题 / 摘要 / 完整内容 / 关联实体 / 来源原文预览。
+
+    事件不存在（或不属于该 kb）时 404。与实体详情同一鉴权 / 降级范式。
+    """
+    await _authorize_and_boundary(identity, kb_id)
+    store = await _require_store()
+    event = await _query_or_503(store.get_event(kb_id=kb_id, event_id=event_id))
+    if event is None:
+        raise NotFoundError("事件不存在")
+    return _event_detail_to_dict(event)
 
 
 # ---------------------------------------------------------------------------

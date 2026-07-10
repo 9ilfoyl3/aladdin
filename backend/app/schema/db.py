@@ -433,9 +433,13 @@ class SessionFile(Base, TenantScopedMixin):
     filename: Mapped[str] = mapped_column(String, nullable=False)
     file_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # 该文件 child chunk 数（会话累计配额聚合用）
+    # 该文件 child chunk 数（会话累计配额聚合用）；异步路径初始为 0，建索引完成后回填
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    status: Mapped[str] = mapped_column(String, default="completed")  # processing | completed | failed
+    # 异步路径默认 queued；同步兜底路径可直接写 completed
+    status: Mapped[str] = mapped_column(String, default="queued")  # queued | processing | completed | failed
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 0-100 建索引进度
+    progress_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 当前阶段人类可读描述
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 失败原因
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

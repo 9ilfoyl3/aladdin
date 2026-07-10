@@ -24,9 +24,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.retrieval.base import RetrievalResult
-from app.retrieval.bm25 import BM25Retriever
-from app.retrieval.hybrid import HybridRetriever
-from app.retrieval.sparse import SparseRetriever
+from app.retrieval.factory import build_hybrid_retriever
 from app.retrieval.vector import VectorRetriever
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, get_milvus_client
@@ -61,7 +59,10 @@ class RetrievalTestRequest(BaseModel):
 
     query: str = Field(..., min_length=1, description="查询文本")
     knowledge_base_id: str = Field(..., description="知识库 ID")
-    mode: str = Field(default="hybrid", description="检索模式: direct / hybrid")
+    mode: str = Field(
+        default="hybrid",
+        description="检索模式: direct（仅稠密）/ hybrid（三路混合 + 平台开启图谱时并入图谱第四路）",
+    )
     top_k: int = Field(default=10, ge=1, le=100, description="返回结果数量")
 
 
@@ -123,24 +124,24 @@ def _get_milvus() -> MilvusClient:
     return get_milvus_client()
 
 
-@router.post("/test", response_model=RetrievalTestResponse)
-async def retrieval_test(
-    body: RetrievalTestRequest,
-    identity: IdentityContext = Depends(require_authenticated()),
+async def _run_retrieval(
+    body: RetrievalTestRequest, identity: IdentityContext
 ) -> RetrievalTestResponse:
-    """纯检索测试：direct（稠密）/ hybrid（三路混合 + 链路追踪）
+    """执行纯检索召回（不经 LLM），供 ``/test`` 与 ``/search`` 共用同一实现。
 
-    不经过 LLM 生成，仅返回检索召回的 chunk 及其分数信号，专用于调参。
+    - ``direct``：仅稠密向量单路，最快，无 trace。
+    - ``hybrid``：三路（Dense + Sparse + BM25）+ 可选图谱第四路 + RRF + Rerank + MMR +
+      父块扩展，并返回链路追踪。图谱第四路经 ``build_hybrid_retriever`` 按全局开关 + 图存储
+      可用性注入，与生产问答链路（chat）同口径；未开启图谱时行为与三路完全一致。
     """
     # 触达 Milvus 前先校验 KB 读权限（跨租户/不可读 404）+ 内容边界
     await _authorize_and_boundary(identity, body.knowledge_base_id)
 
     start = time.perf_counter()
-    manager = get_model_manager()
-    milvus = _get_milvus()
 
     if body.mode == "direct":
-        retriever = VectorRetriever(manager.embedder, milvus)
+        manager = get_model_manager()
+        retriever = VectorRetriever(manager.embedder, _get_milvus())
         results = await retriever.search(body.query, body.knowledge_base_id, top_k=body.top_k)
         items = await _build_result_items(results)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -153,20 +154,8 @@ async def retrieval_test(
             trace=None,
         )
 
-    # hybrid 模式（三路：Dense + Sparse + BM25）+ 链路追踪
-    # 注：调参链路走 search_with_trace（不并入图谱第四路），故此处不注入 graph_retriever，
-    # 与生产 search_with_degraded 的第四路解耦；图谱召回效果在生产问答链路体现。
-    vector_retriever = VectorRetriever(manager.embedder, milvus)
-    sparse_retriever = SparseRetriever(manager.embedder, milvus)
-    bm25_retriever = BM25Retriever(milvus)
-    hybrid_retriever = HybridRetriever(
-        vector_retriever=vector_retriever,
-        sparse_retriever=sparse_retriever,
-        rerank_provider=manager.reranker,
-        db_session_factory=async_session,
-        bm25_retriever=bm25_retriever,
-    )
-
+    # hybrid 模式：三路 + 可选图谱第四路（由工厂按门控注入）+ 链路追踪。
+    hybrid_retriever = await build_hybrid_retriever()
     results, trace_data = await hybrid_retriever.search_with_trace(
         body.query, body.knowledge_base_id, top_k=body.top_k
     )
@@ -185,6 +174,33 @@ async def retrieval_test(
         results=items,
         trace=trace,
     )
+
+
+@router.post("/test", response_model=RetrievalTestResponse)
+async def retrieval_test(
+    body: RetrievalTestRequest,
+    identity: IdentityContext = Depends(require_authenticated()),
+) -> RetrievalTestResponse:
+    """纯检索测试：direct（稠密）/ hybrid（三路混合 + 可选图谱第四路 + 链路追踪）。
+
+    不经过 LLM 生成，仅返回检索召回的 chunk 及其分数信号，主要用于前端调参页。
+    与对外的 ``/search`` 行为一致（同一底层实现），保留此路径用于既有前端调用。
+    """
+    return await _run_retrieval(body, identity)
+
+
+@router.post("/search", response_model=RetrievalTestResponse)
+async def retrieval_search(
+    body: RetrievalTestRequest,
+    identity: IdentityContext = Depends(require_authenticated()),
+) -> RetrievalTestResponse:
+    """对外召回接口：direct（稠密）/ hybrid（三路 + 可选图谱第四路）。
+
+    与 ``/test`` 能力一致（同一底层实现），独立路径供第三方集成直接调用，语义上是"检索召回"
+    而非"测试"。hybrid 模式在平台开启图谱且图存储可用时自动并入图谱第四路，与生产问答链路
+    的召回口径一致。可用代理 Key + ``X-External-User-Id`` 调用。
+    """
+    return await _run_retrieval(body, identity)
 
 
 async def _build_result_items(

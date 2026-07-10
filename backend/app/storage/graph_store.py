@@ -138,6 +138,46 @@ class GraphEventDTO:
 
 
 @dataclass
+class GraphEventMentionDTO:
+    """事件详情里被 ``MENTIONS`` 的一个实体（``get_event`` 用，前端可点击 pivot）。
+
+    Attributes:
+        id: 实体 id。
+        name: 实体规范名。
+        type: 实体类型。
+    """
+
+    id: str
+    name: str
+    type: str
+
+
+@dataclass
+class GraphEventDetailDTO:
+    """事件详情传输对象（可视化事件详情面板用，``get_event``）。
+
+    Attributes:
+        id: 事件 id。
+        title: 事件短标题。
+        summary: 一句话摘要。
+        content: 完整语义内容。
+        chunk_id: 来源 chunk id。
+        doc_id: 来源文档 id。
+        mentions: 事件关联（MENTIONS）的实体列表（可点击 pivot）。
+        chunk: 来源 chunk 的原文预览（可为 None）。
+    """
+
+    id: str
+    title: str = ""
+    summary: str = ""
+    content: str = ""
+    chunk_id: str = ""
+    doc_id: str = ""
+    mentions: list[GraphEventMentionDTO] = field(default_factory=list)
+    chunk: "GraphChunkRefDTO | None" = None
+
+
+@dataclass
 class GraphNodeDTO:
     """子图中的一个节点（``GraphSubsetDTO.nodes`` 元素，对应可视化 API 的 node）。
 
@@ -449,6 +489,22 @@ class GraphStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_event(self, *, kb_id: str, event_id: str) -> "GraphEventDetailDTO | None":
+        """单个事件详情（可视化事件详情面板用）。
+
+        强制带 ``kb_id`` 隔离（Property 1）。返回事件本体（title/summary/content）+ 关联实体
+        （MENTIONS，可点击 pivot）+ 来源 chunk 原文预览。事件不存在（或不属于该 kb）返回 None。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_id: 事件 id。
+
+        Returns:
+            事件详情 DTO，不存在时 None。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def find_entities_by_names(
         self, *, kb_id: str, names: list[str], limit: int,
     ) -> list[GraphEntityDTO]:
@@ -714,6 +770,16 @@ _EXPAND_EVENTS_CYPHER = (
 _EVENTS_BY_IDS_CYPHER = (
     "MATCH (ev:Event {kb_id: $kb_id}) WHERE ev.id IN $event_ids "
     "RETURN " + _EVENT_RETURN_FIELDS
+)
+
+# get_event：按单个 id 取事件详情，附带关联实体的 id + 规范名 + 类型（前端详情面板用，
+# 邻居可点击 pivot）。强制带 kb_id 隔离。
+_GET_EVENT_CYPHER = (
+    "MATCH (ev:Event {kb_id: $kb_id, id: $event_id}) "
+    "RETURN ev.id AS id, coalesce(ev.title, '') AS title, "
+    "coalesce(ev.summary, '') AS summary, coalesce(ev.content, '') AS content, "
+    "coalesce(ev.chunk_id, '') AS chunk_id, coalesce(ev.doc_id, '') AS doc_id, "
+    "[(ev)-[:MENTIONS]->(me:Entity) | {id: me.id, name: me.name, type: me.type}] AS entities"
 )
 
 # events_by_doc（文档详情事件展示，Requirements 4.2）：取某文档抽取的全部事件，
@@ -1588,6 +1654,66 @@ class Neo4jGraphStore(GraphStore):
             async for record in result:
                 events.append(self._record_to_event_dto(record))
         return events
+
+    async def get_event(self, *, kb_id: str, event_id: str) -> "GraphEventDetailDTO | None":
+        """单个事件详情（可视化事件详情面板用，强制带 ``kb_id`` 隔离，Property 1）。
+
+        返回事件本体 + 关联实体（MENTIONS）+ 来源 chunk 原文预览。事件不存在则 None。
+        chunk 预览复用 ``_fetch_chunk_refs`` 的防御式拉取（缺失 / DB 异常不影响主体）。
+
+        Args:
+            kb_id: 知识库 id（隔离键）。
+            event_id: 事件 id。
+
+        Returns:
+            事件详情 DTO，不存在时 None。
+        """
+        if not event_id:
+            return None
+
+        settings = get_settings()
+        timeout = settings.graph_query_timeout
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                _GET_EVENT_CYPHER,
+                kb_id=kb_id,
+                event_id=event_id,
+                timeout=timeout,
+            )
+            record = await result.single()
+        if record is None:
+            return None
+
+        mentions: list[GraphEventMentionDTO] = []
+        for ent in record["entities"] or []:
+            eid = ent.get("id") if isinstance(ent, dict) else None
+            if not eid:
+                continue
+            mentions.append(
+                GraphEventMentionDTO(
+                    id=eid,
+                    name=(ent.get("name") or "") if isinstance(ent, dict) else "",
+                    type=(ent.get("type") or "") if isinstance(ent, dict) else "",
+                )
+            )
+
+        chunk_id = record["chunk_id"] or ""
+        chunk = None
+        if chunk_id:
+            refs = await self._fetch_chunk_refs(kb_id=kb_id, chunk_ids=[chunk_id])
+            chunk = refs[0] if refs else None
+
+        return GraphEventDetailDTO(
+            id=record["id"],
+            title=record["title"] or "",
+            summary=record["summary"] or "",
+            content=record["content"] or "",
+            chunk_id=chunk_id,
+            doc_id=record["doc_id"] or "",
+            mentions=mentions,
+            chunk=chunk,
+        )
 
     # ------------------------------------------------------------------
 
