@@ -10,8 +10,8 @@ import SessionFileList, { type PendingSessionFile } from '@/components/chat/Sess
 import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
 
 /** 会话上传支持的文件类型（与后端 _ALLOWED_EXTENSIONS 一致）。 */
-const UPLOAD_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png,.mp3,.wav,.m4a,.flac,.ogg'
-const UPLOAD_ACCEPT_LABEL = 'pdf、docx、xlsx、pptx、csv、txt、md、jpg、jpeg、png、mp3、wav、m4a、flac、ogg'
+const UPLOAD_ACCEPT = '.pdf,.doc,.docx,.xlsx,.pptx,.csv,.txt,.md,.jpg,.jpeg,.png,.mp3,.wav,.m4a,.flac,.ogg'
+const UPLOAD_ACCEPT_LABEL = 'pdf、doc、docx、xlsx、pptx、csv、txt、md、jpg、jpeg、png、mp3、wav、m4a、flac、ogg'
 
 interface KnowledgeBaseItem {
   id: string
