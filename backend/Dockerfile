@@ -31,10 +31,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 运行时系统依赖：libglib2.0-0（pymupdf 等）、curl（healthcheck）
+# 运行时系统依赖：
+#   libglib2.0-0        pymupdf 等
+#   curl                healthcheck
+#   libreoffice-writer  旧版 Word (.doc) 转 .docx（soffice --headless）
+#   fonts-noto-cjk      LibreOffice 转换中日韩文档时的字体，避免中文乱码/丢字
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     curl \
+    libreoffice-writer \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/data
 

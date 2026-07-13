@@ -140,7 +140,7 @@ router = APIRouter(tags=["Document"])
 
 # 支持的文件类型（含音频，音频走 ASR 语音转写链路）
 _ALLOWED_EXTENSIONS = {
-    "pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png",
+    "pdf", "doc", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png",
     "mp3", "wav", "m4a", "flac", "ogg",
 }
 
@@ -1520,6 +1520,7 @@ async def get_document_raw_file(
         "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
         "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8",
         "csv": "text/csv; charset=utf-8",
+        "doc": "application/msword",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",

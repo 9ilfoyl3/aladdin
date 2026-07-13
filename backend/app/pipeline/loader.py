@@ -39,7 +39,7 @@ AUDIO_TYPES = {"mp3", "wav", "m4a", "flac", "ogg"}
 
 # 支持的文件类型
 SUPPORTED_TYPES = {
-    "md", "txt", "pdf", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png",
+    "md", "txt", "pdf", "doc", "docx", "xlsx", "pptx", "csv", "jpg", "jpeg", "png",
 } | AUDIO_TYPES
 
 
@@ -73,6 +73,9 @@ def get_loader(file_type: str) -> BaseLoader:
     elif file_type == "docx":
         from app.pipeline.loaders.docx_loader import DocxLoader
         return DocxLoader()
+    elif file_type == "doc":
+        from app.pipeline.loaders.doc_loader import DocLoader
+        return DocLoader()
     elif file_type == "csv":
         from app.pipeline.loaders.csv_loader import CsvLoader
         return CsvLoader()

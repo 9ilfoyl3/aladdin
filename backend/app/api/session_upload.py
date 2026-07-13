@@ -377,6 +377,7 @@ async def get_session_file_raw(
         "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
         "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8",
         "csv": "text/csv; charset=utf-8",
+        "doc": "application/msword",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
