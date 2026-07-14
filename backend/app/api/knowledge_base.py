@@ -386,15 +386,69 @@ async def list_knowledge_bases(
     if relation_filter is not None:
         all_kbs = [kb for kb in all_kbs if _kb_relation(kb, subject, is_admin, granted_ids) == relation_filter]
 
-    # 文档数：一次分组查询覆盖全部已筛选 KB，供排序与展示复用（跨页排序需全量计数）
+    # 文档数：一次分组查询覆盖全部已筛选 KB，供排序与展示复用（跨页排序需全量计数）。
+    # 只读用户仅统计 completed 文档，与文档列表接口保持一致（避免数量不匹配的混淆）。
     filtered_ids = [kb.id for kb in all_kbs]
     count_map: dict[str, int] = {}
+    
+    # 预先批量判定每个 KB 的写权限（避免逐个判定）
+    write_allowed_kb_ids: set[str] = set()
     if filtered_ids:
-        cr = await db.execute(
-            select(Document.kb_id, func.count(Document.id))
-            .where(Document.kb_id.in_(filtered_ids)).group_by(Document.kb_id)
+        # 批量查询授权信息
+        grants_by_kb: dict[str, list] = {}
+        gr_rows = await db.execute(
+            select(KnowledgeBaseGrant).where(KnowledgeBaseGrant.kb_id.in_(filtered_ids))
         )
-        count_map = {row[0]: row[1] for row in cr.all()}
+        for grant in gr_rows.scalars().all():
+            grants_by_kb.setdefault(grant.kb_id, []).append(grant)
+        
+        # 判定每个 KB 的写权限
+        for kb in all_kbs:
+            grants = [
+                GrantView(
+                    grantee_type=g.grantee_type,
+                    grantee_id=g.grantee_id,
+                    permission=g.permission,
+                )
+                for g in grants_by_kb.get(kb.id, [])
+            ]
+            decision = kb_authorization_decision(
+                identity,
+                kb_id=kb.id,
+                kb_tenant_id=kb.tenant_id,
+                kb_owner_user_id=kb.owner_user_id,
+                kb_visibility=kb.visibility,
+                kb_org_permission=kb.org_permission,
+                access=KbAccessEnum.WRITE,
+                grants=grants,
+            )
+            if decision.allow:
+                write_allowed_kb_ids.add(kb.id)
+        
+        # 分别统计：有写权限的 KB 统计所有文档，无写权限的 KB 仅统计 completed
+        write_kb_ids = [kid for kid in filtered_ids if kid in write_allowed_kb_ids]
+        readonly_kb_ids = [kid for kid in filtered_ids if kid not in write_allowed_kb_ids]
+        
+        # 有写权限：统计所有状态文档
+        if write_kb_ids:
+            cr_write = await db.execute(
+                select(Document.kb_id, func.count(Document.id))
+                .where(Document.kb_id.in_(write_kb_ids))
+                .group_by(Document.kb_id)
+            )
+            count_map.update({row[0]: row[1] for row in cr_write.all()})
+        
+        # 只读权限：仅统计 completed 文档
+        if readonly_kb_ids:
+            cr_readonly = await db.execute(
+                select(Document.kb_id, func.count(Document.id))
+                .where(
+                    Document.kb_id.in_(readonly_kb_ids),
+                    Document.status == "completed"
+                )
+                .group_by(Document.kb_id)
+            )
+            count_map.update({row[0]: row[1] for row in cr_readonly.all()})
 
     # 排序
     if sort == "name":
