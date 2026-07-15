@@ -108,6 +108,20 @@ class SessionFileVO:
     error_message: str | None = None
 
 
+@dataclass(frozen=True)
+class SessionFileWithContentVO:
+    """会话文件元数据 + 解析后原文文本的组合 VO。
+
+    供「带原文内容的附件列表」使用：在 ``SessionFileVO`` 全量元数据之外，附带该文件的
+    解析原文（``content``，父块按 ``chunk_index`` 有序拼接）与父块粒度文本列表
+    （``chunks``）。与仅返回元数据的 ``list_files`` 区分。
+    """
+
+    file: SessionFileVO
+    content: str
+    chunks: list[str]
+
+
 def _row_to_vo(row: SessionFile) -> SessionFileVO:
     """ORM ``SessionFile`` -> ``SessionFileVO`` 的轻量映射（避免散落字段拷贝）。"""
     return SessionFileVO(
@@ -225,6 +239,51 @@ class SessionUploadService:
                 .order_by(SessionFile.created_at.desc())
             )
             return [_row_to_vo(row) for row in result.scalars().all()]
+
+    async def list_files_with_content(
+        self, session_id: str
+    ) -> list[SessionFileWithContentVO]:
+        """列出会话已上传文件，**每个文件附带解析后原文文本**（按上传时间倒序）。
+
+        与 ``list_files``（仅元数据）区分：额外返回每个文件的解析原文（父块按
+        ``chunk_index`` 有序拼接）与父块文本列表。采用「一次查文件 + 一次批量查父块 +
+        内存分组」避免 N+1；父块按 ``chunk_index`` 排序，分组时各文件内部相对顺序稳定，
+        故各文件 ``chunks`` 有序。
+
+        文件尚未建索引完成（``status != completed``）时其父块可能为空，对应 ``content``
+        为空串、``chunks`` 为空列表。
+        """
+        async with self._db_session_factory() as session:
+            result = await session.execute(
+                select(SessionFile)
+                .where(SessionFile.session_id == session_id)
+                .order_by(SessionFile.created_at.desc())
+            )
+            files = result.scalars().all()
+            if not files:
+                return []
+
+            file_ids = [f.id for f in files]
+            chunk_result = await session.execute(
+                select(SessionChunk)
+                .where(
+                    SessionChunk.file_id.in_(file_ids),
+                    SessionChunk.parent_id.is_(None),
+                )
+                .order_by(SessionChunk.chunk_index)
+            )
+            chunks_by_file: dict[str, list[str]] = {}
+            for c in chunk_result.scalars().all():
+                chunks_by_file.setdefault(c.file_id, []).append(c.content)
+
+            return [
+                SessionFileWithContentVO(
+                    file=_row_to_vo(f),
+                    content="\n\n".join(chunks_by_file.get(f.id, [])),
+                    chunks=chunks_by_file.get(f.id, []),
+                )
+                for f in files
+            ]
 
     async def get_file_raw(
         self, *, session_id: str, file_id: str

@@ -417,6 +417,40 @@ curl "$BASE/api/documents/<doc_id>/events?limit=50" \
   -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU"
 ```
 
+### 4.11 按 fileId 获取解析后原文文本（统一入口）
+
+`GET /api/files/{file_id}/content`
+
+按 **fileId 统一取解析后的原文文本**，自动识别两类来源，第三方无需预先知道该 id 是哪一类：
+
+- **KB 文档**（`Document.id`，如 references / 上传回执里的 `doc_id`）；
+- **会话临时文件**（`SessionFile.id`，如第 8 节上传返回的 `id`）。
+
+两类 id 均为全局唯一 UUID，服务端按「先文档、后会话文件」顺序解析并回显命中的 `source`。返回的是**已解析的可读文本**（父块按顺序拼接），与原件字节流 `/raw` 区分，无需二次解析。文件未建索引完成（`status != completed`）时 `content` 可能为空串，建议等 `completed` 后再取。
+
+```bash
+curl $BASE/api/files/<file_id>/content \
+  -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU"
+```
+
+响应：
+
+```json
+{
+  "file_id": "doc-71bc...",
+  "source": "document",
+  "filename": "manual.pdf",
+  "file_type": "pdf",
+  "status": "completed",
+  "content": "第一段父块文本…\n\n第二段父块文本…"
+}
+```
+
+- `source`：`document`（KB 文档）或 `session_file`（会话临时文件）。
+- `content`：完整解析原文（父块按 `chunk_index` 有序、以空行 `\n\n` 拼接）。
+- 鉴权与隔离：KB 文档跨租户不可见即 `404`；会话临时文件叠加归属校验（仅本人可读，外部用户之间互不可见）。id 不存在 / 无权 → `404`（存在性非泄露）。
+- 如只需要 KB 文档的分块（可分页、含子块高亮），仍可用 4.8 的 `GET /api/documents/{doc_id}/chunks`。
+
 ---
 
 ## 5. 文件夹
@@ -794,6 +828,32 @@ curl $BASE/api/sessions/<session_id>/files \
 ]
 ```
 
+### 8.2.1 会话文件列表（含解析原文内容）
+
+`GET /api/sessions/{session_id}/files/with-content`
+
+与 8.2 相同的列表语义（仅本人可见、按上传时间倒序），但**每项额外携带该文件解析后的原文文本**：`content`（父块按序拼接的完整原文）与 `chunks`（父块粒度文本数组）。适合「一次拉取即拿到所有附件正文」的场景（如批量喂给自有模型 / 一并展示原文），省去逐个文件再调 8.4.1 的往返。
+
+未建索引完成（`status != completed`）的文件其 `content` 为空串、`chunks` 为空数组。内容体积可能较大，若只需元数据请用 8.2 的不带内容列表。
+
+```bash
+curl $BASE/api/sessions/<session_id>/files/with-content \
+  -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU"
+```
+
+响应（在 8.2 各字段基础上，每项多出 `content` / `chunks`）：
+
+```json
+[
+  { "id": "sf-9a2b...", "session_id": "<session_id>", "filename": "contract.pdf",
+    "file_type": "pdf", "file_size": 33120, "chunk_count": 18, "status": "completed",
+    "progress": 100, "progress_message": null, "error_message": null,
+    "created_at": "2026-07-01T04:00:00Z",
+    "content": "第一段父块文本…\n\n第二段父块文本…",
+    "chunks": ["第一段父块文本…", "第二段父块文本…"] }
+]
+```
+
 ### 8.3 删除会话文件
 
 `DELETE /api/sessions/{session_id}/files/{file_id}` → `204`
@@ -813,6 +873,8 @@ curl -X DELETE $BASE/api/sessions/<session_id>/files/<file_id> \
 curl $BASE/api/sessions/<session_id>/files/<file_id>/raw \
   -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU" --output contract.pdf
 ```
+
+> 需要拿某个会话文件**解析后的原文文本**（而非二进制原件）时，用统一入口 `GET /api/files/{file_id}/content`（见 4.11）——它对 KB 文档与会话临时文件两类 id 都适用。
 
 ### 8.5 会话文件状态实时推送（WebSocket）
 

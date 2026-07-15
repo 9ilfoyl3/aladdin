@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,16 @@ from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
-from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
+from app.schema.db import (
+    Chunk,
+    Document,
+    Folder,
+    KnowledgeBase,
+    KnowledgeBaseGrant,
+    OCRConfig,
+    SessionChunk,
+    SessionFile,
+)
 from app.session_upload.limits import get_upload_limit_resolver
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, get_milvus_client
@@ -1607,6 +1616,88 @@ async def list_document_chunks(
         page_size=page_size,
         has_more=offset + len(items) < total,
     )
+
+
+class FileContentResponse(BaseModel):
+    """按 fileId 统一返回解析后原文文本（跨 KB 文档 / 会话临时文件两类来源）。
+
+    ``source`` 标明该 id 命中的来源：``document``（KB 文档）或 ``session_file``（会话临时
+    文件）。``content`` 为父块按 ``chunk_index`` 有序拼接的完整解析文本；文件未建索引完成
+    （``status != completed``）时可能为空串。此处返回解析后可读文本，与原件字节流
+    （``/raw``）区分。
+    """
+
+    file_id: str = Field(..., description="文件 ID（入参回显）")
+    source: str = Field(..., description="来源：document（KB 文档）| session_file（会话临时文件）")
+    filename: str = Field(..., description="原始文件名")
+    file_type: str | None = Field(None, description="文件类型扩展名（小写，无点）")
+    status: str = Field(..., description="文件状态")
+    content: str = Field(..., description="解析后的完整原文文本（父块按 chunk_index 有序拼接）")
+
+
+@router.get("/api/files/{file_id}/content", response_model=FileContentResponse)
+async def get_file_content_by_id(
+    file_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """按 fileId 返回解析后的原文文本，自动识别「KB 文档」与「会话临时文件」两类来源。
+
+    统一入口：第三方从 references / 上传回执拿到的 id 可能是 KB 文档（``Document.id``）
+    或会话临时文件（``SessionFile.id``），二者均为全局唯一 UUID，不撞号，故按「先文档、
+    后会话文件」顺序解析：
+
+    1. KB 文档：``select(Document)`` 命中即从 ``Chunk`` 父块（``parent_id is None``）按
+       ``chunk_index`` 拼接。跨租户由仓储层方案 B 兜底过滤自动不可见（→ 落到 404）。
+    2. 会话临时文件：``select(SessionFile)`` 命中后再校验归属
+       （``owner_user_id == acting_subject_id``）。外部用户共享同一租户，租户过滤不足以
+       区分不同外部用户，必须叠加归属校验；从 ``SessionChunk`` 父块拼接。
+    3. 两类均未命中 / 归属不符 → ``404``（存在性非泄露，与既有内容端点一致）。
+
+    内容边界：``_ensure_not_super_admin_content`` 禁止超管默认查看正文（与 ``/chunks`` 一致）。
+    """
+    _ensure_not_super_admin_content(identity)
+
+    # 1) 先按 KB 文档解析（方案 B 租户兜底过滤保证跨租户不可见 → 404）
+    doc = (
+        await db.execute(select(Document).where(Document.id == file_id))
+    ).scalar_one_or_none()
+    if doc is not None:
+        rows = await db.execute(
+            select(Chunk.content)
+            .where(Chunk.doc_id == file_id, Chunk.parent_id.is_(None))
+            .order_by(Chunk.chunk_index)
+        )
+        return FileContentResponse(
+            file_id=doc.id,
+            source="document",
+            filename=doc.filename,
+            file_type=doc.file_type,
+            status=doc.status,
+            content="\n\n".join(rows.scalars().all()),
+        )
+
+    # 2) 再按会话临时文件解析（租户兜底过滤 + 归属校验，缺一不可）
+    sf = (
+        await db.execute(select(SessionFile).where(SessionFile.id == file_id))
+    ).scalar_one_or_none()
+    if sf is not None and sf.owner_user_id == identity.acting_subject_id:
+        rows = await db.execute(
+            select(SessionChunk.content)
+            .where(SessionChunk.file_id == file_id, SessionChunk.parent_id.is_(None))
+            .order_by(SessionChunk.chunk_index)
+        )
+        return FileContentResponse(
+            file_id=sf.id,
+            source="session_file",
+            filename=sf.filename,
+            file_type=sf.file_type,
+            status=sf.status,
+            content="\n\n".join(rows.scalars().all()),
+        )
+
+    # 3) 都未命中 / 归属不符 → 404（存在性非泄露）
+    raise CrossTenantError()
 
 
 # 文档详情事件列表单次返回上限（避免大文档一次拉爆，前端展示足够）。
