@@ -294,6 +294,21 @@ def _get_milvus() -> MilvusClient:
     return get_milvus_client()
 
 
+async def _describe_doc_location(db: AsyncSession, folder_id: str | None) -> str:
+    """把文档所在位置翻译成用户可读描述，用于「文件已存在」提示。
+
+    去重为 KB 级（同一知识库内相同内容只保留一份，与 WeKnora 一致），命中的既有
+    文档可能不在用户当前所处文件夹，故提示需带上它的实际位置，避免用户在当前文件夹
+    看不到该文件时的困惑。folder_id 为空或文件夹已不存在时归为「根目录」。
+    """
+    if not folder_id:
+        return "根目录"
+    folder = await db.get(Folder, folder_id)
+    if folder is None:
+        return "根目录"
+    return f"「{folder.name}」文件夹"
+
+
 async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
     """后台执行文档处理管道"""
     try:
@@ -543,6 +558,7 @@ async def upload_document(
     )
     existing_doc = existing.scalar_one_or_none()
     if existing_doc is not None:
+        location = await _describe_doc_location(db, existing_doc.folder_id)
         return DocumentResponse(
             id=existing_doc.id,
             kb_id=existing_doc.kb_id,
@@ -550,7 +566,7 @@ async def upload_document(
             file_type=existing_doc.file_type,
             file_size=existing_doc.file_size,
             status="duplicate",
-            error_message=f"文件已存在（与 {existing_doc.filename} 内容相同）",
+            error_message=f"该文件已存在于{location}（与 {existing_doc.filename} 内容相同）",
             chunk_count=existing_doc.chunk_count,
             created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
         )
@@ -685,6 +701,7 @@ async def import_document_from_url(
     )
     existing_doc = existing.scalar_one_or_none()
     if existing_doc is not None:
+        location = await _describe_doc_location(db, existing_doc.folder_id)
         return DocumentResponse(
             id=existing_doc.id,
             kb_id=existing_doc.kb_id,
@@ -692,7 +709,7 @@ async def import_document_from_url(
             file_type=existing_doc.file_type,
             file_size=existing_doc.file_size,
             status="duplicate",
-            error_message=f"内容已存在（与 {existing_doc.filename} 相同）",
+            error_message=f"该内容已存在于{location}（与 {existing_doc.filename} 相同）",
             chunk_count=existing_doc.chunk_count,
             created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
         )
@@ -1346,9 +1363,13 @@ async def upload_folder(
     await db.flush()
 
     # 3. 逐个处理文件
+    import hashlib
+
     results: list[FolderUploadResultItem] = []
     uploaded_count = 0
     skipped_count = 0
+    # 批次内已入库的内容哈希，避免同一批里多份相同内容重复落库（DB 查重只覆盖已提交记录）。
+    seen_hashes: set[str] = set()
 
     for file, rel_path in zip(files, path_list):
         parts = rel_path.replace("\\", "/").split("/")
@@ -1388,12 +1409,38 @@ async def upload_folder(
 
         object_key: str | None = None
         try:
+            content = await file.read()
+            file_size = len(content)
+
+            # KB 级内容去重（与单文件上传一致）：命中既有文档或同批已入库内容则跳过，
+            # 不重复落 MinIO / 建记录 / 切片向量化。提示带既有文件的实际位置。
+            file_hash = hashlib.sha256(content).hexdigest()
+            existing = await db.execute(
+                select(Document).where(
+                    Document.kb_id == kb_id,
+                    Document.file_hash == file_hash,
+                )
+            )
+            existing_doc = existing.scalar_one_or_none()
+            if existing_doc is not None or file_hash in seen_hashes:
+                skipped_count += 1
+                if existing_doc is not None:
+                    location = await _describe_doc_location(db, existing_doc.folder_id)
+                    msg = f"该文件已存在于{location}（与 {existing_doc.filename} 内容相同）"
+                else:
+                    msg = "该文件与本次上传的另一文件内容相同，已跳过"
+                results.append(FolderUploadResultItem(
+                    relative_path=rel_path,
+                    filename=filename,
+                    status="skipped",
+                    message=msg,
+                ))
+                continue
+
             # 保存文件到 MinIO（权威存储）
             doc_id = str(uuid.uuid4())
             object_key = document_object_key(doc_id, ext)
 
-            content = await file.read()
-            file_size = len(content)
             store = get_object_store()
             if store is None:
                 raise RuntimeError("对象存储不可用")
@@ -1410,10 +1457,12 @@ async def upload_folder(
                 filename=filename,
                 file_type=ext,
                 file_size=file_size,
+                file_hash=file_hash,
                 status="pending",
                 tenant_id=kb.tenant_id,
             )
             db.add(doc)
+            seen_hashes.add(file_hash)
 
             # 更新知识库文档计数
             kb.doc_count = (kb.doc_count or 0) + 1
