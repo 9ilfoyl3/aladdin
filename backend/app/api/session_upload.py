@@ -62,6 +62,7 @@ from app.session_upload.events import get_event_hub
 from app.session_upload.limits import get_upload_limit_resolver
 from app.session_upload.service import (
     SessionFileVO,
+    SessionFileWithContentVO,
     get_session_upload_service,
 )
 
@@ -149,6 +150,43 @@ class SessionFileResponse(BaseModel):
             progress_message=vo.progress_message,
             error_message=vo.error_message,
             created_at=vo.created_at,
+        )
+
+
+class SessionFileWithContentResponse(SessionFileResponse):
+    """带解析原文内容的会话附件（VO）。
+
+    在 ``SessionFileResponse`` 全量元数据之外，附带该文件解析后的完整原文文本
+    （``content``）与父块粒度文本列表（``chunks``）。供「一次拉取附件列表即拿到各附件
+    正文」的场景使用，区别于仅返回元数据的 ``GET /api/sessions/{session_id}/files``。
+    """
+
+    content: str = Field(
+        ..., description="解析后的完整原文文本（父块按 chunk_index 有序拼接）"
+    )
+    chunks: list[str] = Field(
+        default_factory=list, description="父块粒度文本列表（有序），供按块渲染 / 溯源"
+    )
+
+    @classmethod
+    def from_with_content_vo(
+        cls, vo: SessionFileWithContentVO
+    ) -> "SessionFileWithContentResponse":
+        f = vo.file
+        return cls(
+            id=f.id,
+            session_id=f.session_id,
+            filename=f.filename,
+            file_type=f.file_type,
+            file_size=f.file_size,
+            chunk_count=f.chunk_count,
+            status=f.status,
+            progress=f.progress,
+            progress_message=f.progress_message,
+            error_message=f.error_message,
+            created_at=f.created_at,
+            content=vo.content,
+            chunks=vo.chunks,
         )
 
 
@@ -307,6 +345,30 @@ async def list_session_files(
     service = get_session_upload_service()
     files = await service.list_files(session_id)
     return [SessionFileResponse.from_vo(f) for f in files]
+
+
+@router.get(
+    "/with-content",
+    response_model=list[SessionFileWithContentResponse],
+    summary="列出会话已上传文件（含解析原文内容）",
+    description=(
+        "返回当前会话已上传文件列表，**每个文件附带解析后的原文文本**（仅本人可见），"
+        "按上传时间倒序（最新在前）。区别于 ``GET /api/sessions/{session_id}/files``"
+        "（仅元数据）：此接口每项额外含 ``content``（完整解析原文）与 ``chunks``（父块"
+        "文本列表）。未建索引完成（``status != completed``）的文件其 ``content`` 为空串。\n\n"
+        "内容体积可能较大，若只需元数据请用不带内容的列表接口。"
+    ),
+)
+async def list_session_files_with_content(
+    session_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[SessionFileWithContentResponse]:
+    """列出会话已上传文件（含解析原文内容）。"""
+    await _verify_session_owner(db, session_id, identity)
+    service = get_session_upload_service()
+    files = await service.list_files_with_content(session_id)
+    return [SessionFileWithContentResponse.from_with_content_vo(f) for f in files]
 
 
 @router.delete(

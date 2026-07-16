@@ -492,13 +492,22 @@ function Documents() {
     }
 
     try {
-      await documentApi.uploadFolder(kbId, filesToUpload, pathsToUpload, currentFolderId)
+      const res = await documentApi.uploadFolder(kbId, filesToUpload, pathsToUpload, currentFolderId)
       queryClient.invalidateQueries({ queryKey: ['folders', kbId, currentFolderId] })
       queryClient.invalidateQueries({ queryKey: ['documents', kbId, currentFolderId] })
+      // 反馈上传结果：跳过多为内容重复（KB 级去重），提示带首条原因方便定位。
+      if (res.skipped_count > 0) {
+        const firstSkip = res.results.find((r) => r.status === 'skipped')
+        const reason = firstSkip?.message ? `：${firstSkip.message}` : ''
+        toast(`已上传 ${res.uploaded_count} 个，跳过 ${res.skipped_count} 个${reason}`)
+      } else {
+        toast(`已上传 ${res.uploaded_count} 个文件`)
+      }
       setFolderUploadDialog(false)
       setFolderValidation(null)
     } catch (err) {
       console.error('文件夹上传失败:', err)
+      toast(`文件夹上传失败: ${err instanceof Error ? err.message : '未知错误'}`)
     } finally {
       setFolderUploading(false)
     }
