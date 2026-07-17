@@ -23,6 +23,7 @@ from app.api.query_understanding import understand_query
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import KbAccessEnum
 from app.auth.kb_scope import authorize_requested_kbs
+from app.auth.session_ownership import verify_session_owner
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
@@ -160,14 +161,11 @@ async def _verify_session_owner(session_id: str, identity: IdentityContext) -> N
     - 跨租户由 contextvar 兜底过滤为不可见 -> get 返回 None -> 404。
     - owner 不匹配（含同租户他人、无主历史会话）-> 404。
     - tenant_level 机器身份（acting_subject_id 为 None）不绑定自然人 -> 一律 404。
-    """
-    from app.api.errors import CrossTenantError
 
-    subject = identity.acting_subject_id
-    async with async_session() as session:
-        cs = await session.get(ChatSession, session_id)
-    if cs is None or subject is None or cs.owner_user_id != subject:
-        raise CrossTenantError()
+    安全逻辑已收敛到 ``app.auth.session_ownership.verify_session_owner``（单一权威实现），
+    此处委托复用，与开放检索的会话附件源校验保持一致。
+    """
+    await verify_session_owner(session_id, identity)
 
 
 # 历史检索结果占位符：历史轮次的工具输出不落库（避免膨胀，也避免模型复用过期检索
