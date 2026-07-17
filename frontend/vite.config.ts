@@ -23,6 +23,10 @@ export default defineConfig({
       '/api/': {
         target: backendTarget,
         changeOrigin: true,
+        // 开启 WebSocket 代理：会话文件上传状态推送走
+        // WS /api/sessions/{sid}/files/events，缺少 ws 时握手无法完成、
+        // 连接一直 pending，前端进度卡在 5%、收不到任何事件。
+        ws: true,
       },
       '/v1': {
         target: backendTarget,
