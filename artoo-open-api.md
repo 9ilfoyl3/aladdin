@@ -564,6 +564,7 @@ curl -X POST $BASE/api/retrieval/search \
   "query": "保修期多久", "mode": "hybrid", "total": 3, "elapsed_ms": 148,
   "results": [
     { "chunk_id": "ck-1", "doc_id": "doc-71bc...", "filename": "manual.pdf",
+      "source_type": "knowledge_base",
       "content": "父块文本…", "child_content": "命中子块…", "score": 0.83,
       "rrf_score": 0.031, "rerank_score": 0.79, "routes": ["dense","bm25","graph"] }
   ],
@@ -575,13 +576,36 @@ curl -X POST $BASE/api/retrieval/search \
       { "name":"graph","recalled":6,"enabled":true }
     ],
     "funnel": [{ "stage":"Rerank 输出","count":10 }]
-  }
+  },
+  "degraded": false,
+  "failed_source_count": 0
 }
 ```
 
 > `routes` 中 `graph` 项的 `enabled` 反映本次是否注入了图谱第四路（平台未开启图谱 / 图存储不可用时为 `false`、`recalled` 为 0）。
 
-> 需要命中来源的**原件**时，第三方前端按结果中的 `doc_id` 自行调用原件接口：知识库文档 `GET /api/documents/{doc_id}/raw`，会话附件 `GET /api/sessions/{session_id}/files/{doc_id}/raw`。
+> 每条结果的 `source_type` 标注命中来源：`knowledge_base`（知识库文档）或 `session`（会话附件）。需要**原件**时，前端据此按 `doc_id` 选对接口：知识库文档 `GET /api/documents/{doc_id}/raw`，会话附件 `GET /api/sessions/{session_id}/files/{doc_id}/raw`。
+
+多源（多库或含会话附件）响应：`trace` 为 `null`，命中项可能混含 `knowledge_base` 与 `session` 两类来源，顶层 `degraded` / `failed_source_count` 反映是否有源检索失败。
+
+```json
+{
+  "query": "保修期多久", "mode": "hybrid", "total": 2, "elapsed_ms": 176,
+  "results": [
+    { "chunk_id": "ck-1", "doc_id": "doc-71bc...", "filename": "manual.pdf",
+      "source_type": "knowledge_base",
+      "content": "父块文本…", "child_content": "命中子块…", "score": 0.83,
+      "rrf_score": 0.031, "rerank_score": 0.79, "routes": ["dense","bm25"] },
+    { "chunk_id": "ck-9", "doc_id": "file-2a3d...", "filename": "合同.pdf",
+      "source_type": "session",
+      "content": "会话附件父块…", "child_content": "命中子块…", "score": 0.77,
+      "rrf_score": 0.028, "rerank_score": 0.74, "routes": ["dense"] }
+  ],
+  "trace": null,
+  "degraded": false,
+  "failed_source_count": 0
+}
+```
 
 ### 6.1.1 Agent 检索召回（多步推理召回）
 

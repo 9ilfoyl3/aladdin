@@ -121,6 +121,10 @@ class RetrievalResultItem(BaseModel):
     chunk_id: str
     doc_id: str
     filename: str = ""
+    # 命中来源类型，供前端选对原件接口：
+    #   "knowledge_base" → 知识库文档，原件走 /api/documents/{doc_id}/raw
+    #   "session"        → 会话附件，原件走 /api/sessions/{session_id}/files/{doc_id}/raw
+    source_type: str = "knowledge_base"
     content: str
     child_content: str = ""
     score: float  # 最终分数（hybrid=composite，direct=稠密相似度）
@@ -358,16 +362,18 @@ async def _build_result_items(
 ) -> list[RetrievalResultItem]:
     """将检索结果转换为响应格式，附带文件名与（可选的）链路分数信号。
 
-    命中来源分两类，按 ``doc_id`` 归属识别文件名：
-    - 知识库文档：``doc_id`` 命中 ``documents`` 表。
-    - 会话附件：``doc_id`` 是 ``SessionFile.id``（不在 documents 表），仅在带 ``session_id``
-      的多源检索中出现，从 ``session_files`` 表补齐文件名（否则会话附件命中项文件名为空）。
+    命中来源分两类，按 ``doc_id`` 归属识别，并以 ``source_type`` 标注供前端选对原件接口：
+    - 知识库文档（``source_type="knowledge_base"``）：``doc_id`` 命中 ``documents`` 表，
+      原件走 ``/api/documents/{doc_id}/raw``。
+    - 会话附件（``source_type="session"``）：``doc_id`` 是 ``SessionFile.id``（不在 documents
+      表），仅在带 ``session_id`` 的多源检索中出现，从 ``session_files`` 表补齐文件名，
+      原件走 ``/api/sessions/{session_id}/files/{doc_id}/raw``。
 
-    原件获取由第三方前端按 ``doc_id`` 自行调用原件接口（知识库 ``/api/documents/{doc_id}/raw``、
-    会话附件 ``/api/sessions/{session_id}/files/{doc_id}/raw``），本响应不返回原件 URL。
+    原件获取由第三方前端按 ``doc_id`` + ``source_type`` 自行调用对应原件接口，本响应不返回原件 URL。
     """
     doc_ids = list({r.doc_id for r in results})
     doc_filenames: dict[str, str] = {}
+    session_file_ids: set[str] = set()
     if doc_ids:
         async with async_session() as session:
             from app.schema.db import Document
@@ -379,7 +385,8 @@ async def _build_result_items(
                 doc_filenames[row.id] = row.filename
 
             # 会话附件的 doc_id 是 SessionFile.id（不在 documents 表）。仅在带 session_id 的
-            # 多源检索中才可能出现，补查 session_files 表回填文件名，否则命中项文件名为空。
+            # 多源检索中才可能出现，补查 session_files 表回填文件名并标记来源，否则命中项
+            # 文件名为空、且前端无法区分来源类型。
             missing_ids = [d for d in doc_ids if d not in doc_filenames]
             if missing_ids and session_id:
                 from app.schema.db import SessionFile
@@ -391,15 +398,18 @@ async def _build_result_items(
                 )
                 for row in sf_result:
                     doc_filenames[row.id] = row.filename
+                    session_file_ids.add(row.id)
 
     items: list[RetrievalResultItem] = []
     for r in results:
         trace_entry = (per_result or {}).get(r.chunk_id, {})
+        source_type = "session" if r.doc_id in session_file_ids else "knowledge_base"
         items.append(
             RetrievalResultItem(
                 chunk_id=r.chunk_id,
                 doc_id=r.doc_id,
                 filename=doc_filenames.get(r.doc_id, ""),
+                source_type=source_type,
                 content=r.content,
                 child_content=r.child_content or r.content,
                 score=round(r.score, 4),
