@@ -530,16 +530,31 @@ curl $BASE/api/knowledge-bases/<kb_id>/folders/<folder_id>/breadcrumb \
 - `POST /api/retrieval/search`：**对外集成推荐**，语义为「检索召回」。
 - `POST /api/retrieval/test`：能力与 `/search` 完全一致（同一底层实现），保留供前端调参页调用。
 
-字段：`query`（必填）、`knowledge_base_id`（必填）、`mode`（`direct`|`hybrid`，默认 `hybrid`）、`top_k`（默认 10）。
+字段：`query`（必填）、`mode`（`direct`|`hybrid`，默认 `hybrid`）、`top_k`（默认 10），以及检索范围（下列三者可组合，**至少提供其一**）：
 
-- `direct`：仅稠密向量单路召回，最快，`trace` 为 `null`。
+- `knowledge_base_id`：单知识库 ID（与 `kb_ids` 二选一）。
+- `kb_ids`：多知识库联合检索的知识库 ID 列表（与 `knowledge_base_id` 二选一）。
+- `session_id`：把该会话**已上传的附件**作为一路检索源并入召回，**须为调用者本人会话**（非本人返回 404）。可单独使用，也可与知识库联合。
+
+模式说明：
+
+- `direct`：仅稠密向量单路召回，最快，`trace` 为 `null`。**仅在单库单源时生效。**
 - `hybrid`：三路混合（Dense + Sparse + BM25）+ RRF + Rerank + MMR + 父块扩展。**当平台开启图谱（`GRAPH_ENABLE`）且图存储（Neo4j）可用时，自动并入图谱召回第四路（`graph`）**，与生产问答链路 `hybrid` 召回口径一致；未开启图谱时行为与三路完全相同。
 
+多源说明：当指定 `kb_ids`（多库）或 `session_id`（会话附件）时，统一走**多源混合召回**（与问答链路同口径，各源同权、统一 rerank），此时 `trace` 为 `null`，改由响应顶层的 `degraded`（是否有源检索失败）与 `failed_source_count`（失败源数量）反映召回完整性。仅传 `session_id` 但该会话无附件时返回空结果（非错误）。
+
 ```bash
+# 单库（保留完整 trace）
 curl -X POST $BASE/api/retrieval/search \
   -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU" \
   -H "Content-Type: application/json" \
   -d '{"query":"保修期多久","knowledge_base_id":"<kb_id>","mode":"hybrid","top_k":10}'
+
+# 多库 + 会话附件联合召回
+curl -X POST $BASE/api/retrieval/search \
+  -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"保修期多久","kb_ids":["<kb_id_1>","<kb_id_2>"],"session_id":"<session_id>","mode":"hybrid","top_k":10}'
 ```
 
 响应：
@@ -565,6 +580,8 @@ curl -X POST $BASE/api/retrieval/search \
 ```
 
 > `routes` 中 `graph` 项的 `enabled` 反映本次是否注入了图谱第四路（平台未开启图谱 / 图存储不可用时为 `false`、`recalled` 为 0）。
+
+> 需要命中来源的**原件**时，第三方前端按结果中的 `doc_id` 自行调用原件接口：知识库文档 `GET /api/documents/{doc_id}/raw`，会话附件 `GET /api/sessions/{session_id}/files/{doc_id}/raw`。
 
 ### 6.1.1 Agent 检索召回（多步推理召回）
 
