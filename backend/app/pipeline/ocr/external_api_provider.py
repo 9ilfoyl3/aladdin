@@ -19,6 +19,68 @@ from .provider import OCRProvider, OCRResult
 logger = logging.getLogger(__name__)
 
 
+def _parse_paddle_line(line) -> tuple[str, float, tuple[float, float, float, float] | None] | None:
+    """解析 PaddleOCR 单行结果，兼容两种常见形状。
+
+    - ``[[[x,y]*4], [text, score]]``（PaddleOCR 原生）
+    - ``[[[x,y]*4], text, score]``（部分服务展平了文本与分数）
+
+    Args:
+        line: 单行原始结果。
+
+    Returns:
+        ``(text, confidence, bbox)``；无法解析时返回 None（调用方跳过该行）。
+    """
+    if not isinstance(line, (list, tuple)) or len(line) < 2:
+        return None
+
+    box = line[0]
+    payload = line[1]
+
+    if isinstance(payload, (list, tuple)):
+        # [box, [text, score]]
+        if not payload or not isinstance(payload[0], str):
+            return None
+        text = payload[0]
+        conf = float(payload[1]) if len(payload) > 1 and isinstance(payload[1], (int, float)) else 0.0
+    elif isinstance(payload, str):
+        # [box, text, score]
+        text = payload
+        conf = (
+            float(line[2])
+            if len(line) > 2 and isinstance(line[2], (int, float))
+            else 0.0
+        )
+    else:
+        return None
+
+    bbox: tuple[float, float, float, float] | None = None
+    try:
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        bbox = (min(xs), min(ys), max(xs), max(ys))
+    except (IndexError, TypeError, ValueError):
+        bbox = None
+
+    return text, conf, bbox
+
+
+def _normalize_payload(data) -> dict:
+    """把外部服务返回的 JSON 顶层结构统一成 dict。
+
+    部分 OCR 服务直接返回数组（如 ``[{page, content}, ...]`` 或 PaddleOCR 的嵌套数组），
+    此时包一层 ``{"data": ...}``，避免下游按 dict 取字段时抛
+    ``AttributeError: 'list' object has no attribute 'get'``。
+    """
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return {"data": data}
+    if isinstance(data, str):
+        return {"data": data}
+    return {}
+
+
 class BaseExternalAPIProvider(OCRProvider):
     """外部 HTTP API OCR 服务的抽象基类
 
@@ -57,7 +119,13 @@ class BaseExternalAPIProvider(OCRProvider):
         elapsed_ms = (time.time() - start) * 1000
         logger.info("[OCR][%s] 响应状态码: %d, 耗时: %.0fms", self.name, response.status_code, elapsed_ms)
 
-        result = self._adapt_response(data)
+        # 顶层可能是数组/字符串，统一成 dict 后再交给各 provider 适配
+        result = self._adapt_response(_normalize_payload(data))
+        if not result.full_text.strip():
+            # 解析不出文本时打印响应样本，便于定位是服务返回为空还是格式未适配
+            logger.warning(
+                "[OCR][%s] 未解析出文本，响应样本: %.500s", self.name, repr(data)
+            )
         logger.info(
             "[OCR][%s] 适配结果: full_text 长度=%d, pages=%d, confidence=%.3f",
             self.name, len(result.full_text), len(result.pages), result.avg_confidence,
@@ -109,22 +177,22 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
             inner          = [ page0, page1, ... ]
             page           = [ line0, line1, ... ]
             line           = [ [[x,y],[x,y],[x,y],[x,y]], ["文本", score] ]
+
+        扫描件常出现空白页（``page`` 为 ``[]`` / ``None``），因此**跳过空页**继续找第一个
+        有内容的页再判定；只要任一页存在可解析的 PaddleOCR 行即认定为该格式。
         """
-        try:
-            # inner[0] 可能是 dict（非 PaddleOCR 格式），此时 [0] 会抛 KeyError
-            first_page = inner[0]
-            if not isinstance(first_page, list):
-                return False
-            line = first_page[0]
-            return (
-                isinstance(line, list)
-                and len(line) == 2
-                and isinstance(line[0], list) and len(line[0]) == 4  # 四点框
-                and isinstance(line[1], (list, tuple)) and len(line[1]) >= 1
-                and isinstance(line[1][0], str)                      # 文本
-            )
-        except (IndexError, TypeError, KeyError):
+        if not isinstance(inner, list):
             return False
+
+        for page in inner:
+            if isinstance(page, dict):
+                # 结构化字段格式（{page, content} 等），不是 PaddleOCR 嵌套数组
+                return False
+            if not isinstance(page, list) or not page:
+                continue  # 空白页无法判定，看下一页
+            return _parse_paddle_line(page[0]) is not None
+
+        return False
 
     def _parse_paddleocr(self, inner: list) -> OCRResult:
         """解析 PaddleOCR 原生嵌套格式为统一 OCRResult。每个外层元素视为一页。"""
@@ -134,20 +202,13 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
         all_conf: list[float] = []
         for idx, page_lines in enumerate(inner):
             blocks: list[OCRBlock] = []
-            for line in page_lines or []:
-                try:
-                    box, (text, *rest) = line[0], line[1]
-                except (IndexError, TypeError, ValueError):
+            if not isinstance(page_lines, list):
+                page_lines = []
+            for line in page_lines:
+                parsed = _parse_paddle_line(line)
+                if parsed is None:
                     continue
-                conf = float(rest[0]) if rest else 0.0
-                # 四点框 [[x,y]*4] → (x1, y1, x2, y2)
-                bbox = None
-                try:
-                    xs = [float(p[0]) for p in box]
-                    ys = [float(p[1]) for p in box]
-                    bbox = (min(xs), min(ys), max(xs), max(ys))
-                except (IndexError, TypeError, ValueError):
-                    bbox = None
+                text, conf, bbox = parsed
                 blocks.append(OCRBlock(text=text, confidence=conf, bbox=bbox))
                 all_conf.append(conf)
             page_text = "\n".join(b.text for b in blocks)
@@ -165,8 +226,8 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
     def _adapt_response(self, data: dict) -> OCRResult:
         from .provider import OCRBlock, PageOCRResult
 
-        # 如果是包装格式 {code, data}，解包
-        if "code" in data and "data" in data:
+        # 包装格式 {code, data} / {data} 均解包（部分服务不返回 code）
+        if "data" in data:
             inner = data["data"]
             # PaddleOCR 原生嵌套格式优先识别（data[图][行]=[四点框,[文本,分数]]）
             if isinstance(inner, list) and self._looks_like_paddleocr(inner):
@@ -192,6 +253,28 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
         # 提取按页结果
         pages: list[PageOCRResult] = []
         for idx, page_data in enumerate(data.get("pages") or []):
+            # 页元素可能不是 dict：字符串（纯文本页）或数组（PaddleOCR 行数组，
+            # 探测因空白页/行结构差异未命中时会走到这里），逐类兜底避免 .get 崩溃。
+            if isinstance(page_data, str):
+                pages.append(PageOCRResult(page_num=idx + 1, blocks=[], full_text=page_data))
+                continue
+            if isinstance(page_data, list):
+                line_blocks: list[OCRBlock] = []
+                for line in page_data:
+                    parsed = _parse_paddle_line(line)
+                    if parsed is None:
+                        continue
+                    text, conf, bbox = parsed
+                    line_blocks.append(OCRBlock(text=text, confidence=conf, bbox=bbox))
+                pages.append(PageOCRResult(
+                    page_num=idx + 1,
+                    blocks=line_blocks,
+                    full_text="\n".join(b.text for b in line_blocks),
+                ))
+                continue
+            if not isinstance(page_data, dict):
+                continue
+
             page_num = page_data.get("page_num") or page_data.get("page", idx + 1)
             page_text = (
                 page_data.get("full_text")
@@ -202,6 +285,8 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
 
             blocks: list[OCRBlock] = []
             for block_data in page_data.get("blocks") or []:
+                if not isinstance(block_data, dict):
+                    continue
                 blocks.append(OCRBlock(
                     text=block_data.get("text", ""),
                     confidence=float(block_data.get("confidence", 0.0)),
@@ -217,12 +302,13 @@ class ExternalAPIProvider(BaseExternalAPIProvider):
         if not full_text and pages:
             full_text = "\n\n".join(p.full_text for p in pages if p.full_text)
 
+        metadata = data.get("metadata")
         return OCRResult(
             full_text=full_text,
             pages=pages,
             avg_confidence=avg_confidence,
             provider_name=self.name,
-            metadata=data.get("metadata") or {},
+            metadata=metadata if isinstance(metadata, dict) else {},
         )
 
 
@@ -241,10 +327,7 @@ class PaddleOCRProvider(BaseExternalAPIProvider):
         from .provider import OCRBlock, PageOCRResult
 
         # 解包 {code, data} 格式
-        if "code" in data and "data" in data:
-            inner = data["data"]
-        else:
-            inner = data.get("data", data)
+        inner = data.get("data", data)
 
         if not isinstance(inner, list):
             raise ValueError(
@@ -257,20 +340,14 @@ class PaddleOCRProvider(BaseExternalAPIProvider):
         for idx, page_lines in enumerate(inner):
             blocks: list[OCRBlock] = []
             if not isinstance(page_lines, list):
+                # 空白页可能返回 None，占位保持页码连续
+                pages.append(PageOCRResult(page_num=idx + 1, blocks=[], full_text=""))
                 continue
             for line in page_lines:
-                try:
-                    box, (text, *rest) = line[0], line[1]
-                except (IndexError, TypeError, ValueError):
+                parsed = _parse_paddle_line(line)
+                if parsed is None:
                     continue
-                conf = float(rest[0]) if rest else 0.0
-                bbox = None
-                try:
-                    xs = [float(p[0]) for p in box]
-                    ys = [float(p[1]) for p in box]
-                    bbox = (min(xs), min(ys), max(xs), max(ys))
-                except (IndexError, TypeError, ValueError):
-                    bbox = None
+                text, conf, bbox = parsed
                 blocks.append(OCRBlock(text=text, confidence=conf, bbox=bbox))
                 all_conf.append(conf)
             page_text = "\n".join(b.text for b in blocks)
@@ -306,8 +383,8 @@ class VLOCRProvider(BaseExternalAPIProvider):
     def _adapt_response(self, data: dict) -> OCRResult:
         from .provider import OCRBlock, PageOCRResult
 
-        # 解包 {code, data} 格式
-        if "code" in data and "data" in data:
+        # 解包 {code, data} / {data} 格式（部分服务不返回 code）
+        if "data" in data:
             inner = data["data"]
             if isinstance(inner, str):
                 return OCRResult(
@@ -346,6 +423,8 @@ class VLOCRProvider(BaseExternalAPIProvider):
 
             blocks: list[OCRBlock] = []
             for block_data in page_data.get("blocks") or []:
+                if not isinstance(block_data, dict):
+                    continue
                 blocks.append(OCRBlock(
                     text=block_data.get("text", ""),
                     confidence=float(block_data.get("confidence", 0.0)),
@@ -361,10 +440,11 @@ class VLOCRProvider(BaseExternalAPIProvider):
         if not full_text and pages:
             full_text = "\n\n".join(p.full_text for p in pages if p.full_text)
 
+        metadata = data.get("metadata")
         return OCRResult(
             full_text=full_text,
             pages=pages,
             avg_confidence=avg_confidence if avg_confidence else (1.0 if full_text else 0.0),
             provider_name=self.name,
-            metadata=data.get("metadata") or {},
+            metadata=metadata if isinstance(metadata, dict) else {},
         )

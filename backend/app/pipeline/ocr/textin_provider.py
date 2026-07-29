@@ -36,6 +36,11 @@ class TextInProvider(BaseExternalAPIProvider):
 
         pages: list[PageOCRResult] = []
         for idx, item in enumerate(pages_data):
+            if isinstance(item, str):
+                pages.append(PageOCRResult(page_num=idx + 1, blocks=[], full_text=item))
+                continue
+            if not isinstance(item, dict):
+                continue
             page_num = item.get("page", idx + 1)
             content = item.get("content") or ""
             pages.append(PageOCRResult(page_num=page_num, blocks=[], full_text=content))
