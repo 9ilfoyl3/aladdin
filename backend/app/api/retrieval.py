@@ -234,9 +234,12 @@ async def _run_single_kb_retrieval(
         )
 
     # hybrid 模式：三路 + 可选图谱第四路（由工厂按门控注入）+ 链路追踪。
+    # 纯检索召回接口跳过 rerank 软阈值过滤（apply_rerank_filter=False）：软阈值是问答链路
+    # 防幻觉机制，会把短/泛 query 的低分但相关结果连兜底一起滤空；召回接口应返回 rerank 排序
+    # 后的 top_k，由调用方参考 rerank_score 自行取舍。
     hybrid_retriever = await build_hybrid_retriever()
     results, trace_data = await hybrid_retriever.search_with_trace(
-        body.query, kb_id, top_k=body.top_k
+        body.query, kb_id, top_k=body.top_k, apply_rerank_filter=False
     )
     items = await _build_result_items(results, trace_data.get("per_result"))
     elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -302,8 +305,11 @@ async def _run_multi_source_retrieval(
 
     hybrid_retriever = await build_hybrid_retriever()
     multi_kb = MultiKBRetriever(hybrid_retriever)
+    # 纯检索召回接口跳过 rerank 软阈值过滤（与单库路径一致）：召回接口返回 rerank 排序结果，
+    # 不做问答链路的防幻觉软阈值截断，避免短/泛 query 被兜底也救不回而返回空。
     multi_result = await multi_kb.search(
-        body.query, kb_configs, top_k=body.top_k, tenant_id=identity.tenant_id
+        body.query, kb_configs, top_k=body.top_k, tenant_id=identity.tenant_id,
+        apply_rerank_filter=False,
     )
     items = await _build_result_items(multi_result.results, session_id=session_id)
     elapsed_ms = int((time.perf_counter() - start) * 1000)

@@ -102,6 +102,7 @@ class MultiKBRetriever:
         top_k: int = 10,
         filters: RetrievalFilter | None = None,
         tenant_id: str | None = None,
+        apply_rerank_filter: bool = True,
     ) -> MultiKBSearchResult:
         """并行检索多个知识库，加权合并后统一 Rerank
 
@@ -196,7 +197,9 @@ class MultiKBRetriever:
         merged = self._weighted_merge(valid_results, kb_configs)
 
         # 统一 Rerank + 父块扩展（显式下传 tenant_id，避免 rerank 阶段丢租户配置）
-        results = await self.retriever.rerank_and_expand(query, merged, top_k, tenant_id=tenant_id)
+        results = await self.retriever.rerank_and_expand(
+            query, merged, top_k, tenant_id=tenant_id, apply_rerank_filter=apply_rerank_filter
+        )
 
         return MultiKBSearchResult(
             results=results,

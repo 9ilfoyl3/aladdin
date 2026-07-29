@@ -543,6 +543,8 @@ curl $BASE/api/knowledge-bases/<kb_id>/folders/<folder_id>/breadcrumb \
 
 多源说明：当指定 `kb_ids`（多库）或 `session_id`（会话附件）时，统一走**多源混合召回**（与问答链路同口径，各源同权、统一 rerank），此时 `trace` 为 `null`，改由响应顶层的 `degraded`（是否有源检索失败）与 `failed_source_count`（失败源数量）反映召回完整性。仅传 `session_id` 但该会话无附件时返回空结果（非错误）。
 
+> 召回口径：本接口是**纯检索召回**，返回 rerank 排序后的 `top_k` 结果，**不施加问答链路的 rerank 软阈值过滤**（该软阈值用于问答时避免把低相关内容喂给 LLM，会导致短/泛 query 被整体滤空）。相关性由每条结果的 `rerank_score` 体现，是否采用由调用方按分数自行取舍。因此只要底层三路有召回，就不会出现"检索到内容却返回空数组"。
+
 ```bash
 # 单库（保留完整 trace）
 curl -X POST $BASE/api/retrieval/search \
