@@ -116,25 +116,21 @@ def _to_response(config: EmbedConfig) -> EmbedConfigResponse:
     )
 
 
-def _reload_provider(config: EmbedConfig) -> None:
-    """当配置被激活时，重新加载对应的 ModelManager Provider"""
-    from app.models.manager import get_model_manager
+async def _apply_config_change(db: AsyncSession, config_type: str) -> None:
+    """让 Embedding/Rerank 配置变更立即生效（本进程重载 + 广播其他进程）
 
-    try:
-        manager = get_model_manager()
-        kwargs = {
-            "model_name": config.model_name,
-            "base_url": config.base_url or "",
-            "api_key": config.api_key or "",
-            "timeout": config.timeout,
-            "sparse_enabled": config.sparse_enabled,
-        }
-        if config.config_type == "embedding":
-            manager.reload_embedder(**kwargs)
-        else:
-            manager.reload_reranker(**kwargs)
-    except Exception as e:
-        logger.error("重载 Provider 失败: %s", e)
+    先提交事务再重载：重载与其他进程都按"数据库现状"取 active 配置，
+    未提交则读到旧数据。按现状重载（而非用刚写入的对象）才能覆盖
+    停用与删除场景——那两种情况需要重新查库才知道现在谁是 active。
+
+    Args:
+        db: 当前请求的数据库会话
+        config_type: ``embedding`` 或 ``rerank``
+    """
+    from app.api.capability_reload import apply_and_broadcast
+
+    await db.commit()
+    await apply_and_broadcast(config_type)
 
 
 # ============================================================
@@ -163,19 +159,44 @@ class EmbedCurrentResponse(BaseModel):
     embed_sparse_enabled: bool
     rerank_model: str
     rerank_base_url: str
+    # 该项是否回落自环境变量（数据库无 active 配置时为 True）
+    embed_from_env: bool = False
+    rerank_from_env: bool = False
 
 
 @router.get("/current", response_model=EmbedCurrentResponse)
-async def get_current_embed_config():
-    """获取当前生效的 Embedding/Rerank 配置（来自环境变量）"""
+async def get_current_embed_config(db: AsyncSession = Depends(get_db)):
+    """获取当前生效的 Embedding/Rerank 配置
+
+    以数据库中 ``is_active`` 的配置为准（那才是运行时真正加载的），
+    无 active 记录时回落环境变量并以 ``*_from_env`` 标注来源。
+    """
     from app.config import get_settings
+
     settings = get_settings()
+
+    async def _active(config_type: str) -> Optional[EmbedConfig]:
+        result = await db.execute(
+            select(EmbedConfig).where(
+                EmbedConfig.config_type == config_type,
+                EmbedConfig.is_active == True,  # noqa: E712 — SQLAlchemy 表达式
+            )
+        )
+        return result.scalars().first()
+
+    embed = await _active("embedding")
+    rerank = await _active("rerank")
+
     return EmbedCurrentResponse(
-        embed_model=settings.embed_model,
-        embed_base_url=settings.embed_base_url,
-        embed_sparse_enabled=settings.embed_sparse_enabled,
-        rerank_model=settings.rerank_model,
-        rerank_base_url=settings.rerank_base_url,
+        embed_model=embed.model_name if embed else settings.embed_model,
+        embed_base_url=(embed.base_url or "") if embed else settings.embed_base_url,
+        embed_sparse_enabled=(
+            embed.sparse_enabled if embed else settings.embed_sparse_enabled
+        ),
+        rerank_model=rerank.model_name if rerank else settings.rerank_model,
+        rerank_base_url=(rerank.base_url or "") if rerank else settings.rerank_base_url,
+        embed_from_env=embed is None,
+        rerank_from_env=rerank is None,
     )
 
 
@@ -212,11 +233,10 @@ async def create_embed_config(body: EmbedConfigCreate, db: AsyncSession = Depend
     await db.flush()
     await db.refresh(config)
 
-    # 如果设为启用，立即重载对应 Provider
-    if body.is_active:
-        _reload_provider(config)
-
-    return _to_response(config)
+    # 无条件热生效：新增非 active 配置也可能改变了同类型其他配置的 active 状态
+    response = _to_response(config)
+    await _apply_config_change(db, config.config_type)
+    return response
 
 
 @router.put("/{config_id}", response_model=EmbedConfigResponse)
@@ -247,11 +267,10 @@ async def update_embed_config(config_id: str, body: EmbedConfigUpdate, db: Async
     await db.flush()
     await db.refresh(config)
 
-    # 如果当前配置是启用状态，重载对应 Provider
-    if config.is_active:
-        _reload_provider(config)
-
-    return _to_response(config)
+    # 无条件热生效：停用当前 active 配置同样需要重载（回落到环境变量或其他 active 配置）
+    response = _to_response(config)
+    await _apply_config_change(db, config.config_type)
+    return response
 
 
 @router.delete("/{config_id}", status_code=204)
@@ -261,8 +280,12 @@ async def delete_embed_config(config_id: str, db: AsyncSession = Depends(get_db)
     config = result.scalar_one_or_none()
     if config is None:
         raise HTTPException(status_code=404, detail="配置不存在")
+    config_type = config.config_type
     await db.delete(config)
     await db.flush()
+
+    # 删除后热生效：避免进程继续使用已删除的服务
+    await _apply_config_change(db, config_type)
 
 
 @router.post("/test", response_model=EmbedTestResponse)

@@ -178,6 +178,18 @@ def _config_to_response(config: OCRConfig) -> OCRConfigResponse:
     )
 
 
+async def _apply_ocr_config_change(db: AsyncSession) -> None:
+    """让 OCR 配置变更立即生效（提交事务 + 广播通知各进程重载）
+
+    先提交再广播：Worker 进程收到信号后会重新查库构建 Provider 集合，
+    未提交则读到旧数据。API 进程不持有常驻 OCRManager，本地重载为 no-op。
+    """
+    from app.api.capability_reload import CAPABILITY_OCR, apply_and_broadcast
+
+    await db.commit()
+    await apply_and_broadcast(CAPABILITY_OCR)
+
+
 @router.get("/provider-types", response_model=list[OCRProviderTypeMeta])
 async def list_provider_types():
     """列出支持的 OCR 服务类型及其能力元数据
@@ -253,7 +265,9 @@ async def create_ocr_config(body: OCRConfigCreate, db: AsyncSession = Depends(ge
     await db.flush()
     await db.refresh(config)
 
-    return _config_to_response(config)
+    response = _config_to_response(config)
+    await _apply_ocr_config_change(db)
+    return response
 
 async def _perform_ocr_test(
     provider_type: str,
@@ -468,7 +482,9 @@ async def update_ocr_config(config_id: str, body: OCRConfigUpdate, db: AsyncSess
     await db.flush()
     await db.refresh(config)
 
-    return _config_to_response(config)
+    response = _config_to_response(config)
+    await _apply_ocr_config_change(db)
+    return response
 
 
 @router.delete("/{config_id}", status_code=204)
@@ -480,4 +496,7 @@ async def delete_ocr_config(config_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="OCR 配置不存在")
     await db.delete(config)
     await db.flush()
+
+    # 删除后热生效：避免 Worker 继续调用已删除的 OCR 服务
+    await _apply_ocr_config_change(db)
 

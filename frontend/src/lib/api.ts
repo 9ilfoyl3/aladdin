@@ -514,6 +514,9 @@ export interface EmbedCurrentConfig {
   embed_sparse_enabled: boolean
   rerank_model: string
   rerank_base_url: string
+  /** 该项是否回落自环境变量（数据库无启用配置时为 true） */
+  embed_from_env?: boolean
+  rerank_from_env?: boolean
 }
 
 // Embedding/Rerank 配置接口

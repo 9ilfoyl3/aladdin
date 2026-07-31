@@ -19,7 +19,6 @@ from app.api.validators import NameValidationError, validate_filename, validate_
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.models.manager import get_model_manager
-from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
@@ -29,7 +28,6 @@ from app.schema.db import (
     Folder,
     KnowledgeBase,
     KnowledgeBaseGrant,
-    OCRConfig,
     SessionChunk,
     SessionFile,
 )
@@ -316,16 +314,10 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
         manager = get_model_manager()
         milvus = _get_milvus()
 
-        # 从数据库加载 OCR 配置
-        ocr_manager = None
-        async with async_session() as session:
-            result = await session.execute(select(OCRConfig))
-            configs = result.scalars().all()
-        if configs:
-            ocr_manager = OCRManager(configs)
+        # 从数据库加载 OCR / ASR 配置（本降级路径每篇文档重建，本就取最新配置）
+        from app.startup import load_asr_manager, load_ocr_manager
 
-        # 从数据库加载 ASR 配置
-        from app.startup import load_asr_manager
+        ocr_manager = await load_ocr_manager()
         asr_manager = await load_asr_manager()
 
         pipeline = DocumentPipeline(

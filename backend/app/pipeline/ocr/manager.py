@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from .errors import OCRError
@@ -17,45 +18,68 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _ProviderState:
+    """Provider 集合与选路信息的不可变快照
+
+    热重载时整体替换本对象（单次引用赋值），避免出现"providers 已换、
+    default_name 还是旧的"这类半更新中间态。
+    """
+
+    providers: dict[str, OCRProvider] = field(default_factory=dict)
+    default_name: str = ""
+    fallback_name: str = ""
+
+
 class OCRManager:
     """OCR Provider 管理器
 
     职责：从数据库配置注册 Provider、按 default/fallback 选择、
     依据 Provider 能力编排输入（整文件直送 / 按页图片逐页识别）。
     不涉及任何响应格式判断——那是各 Provider 的契约。
+
+    支持配置热重载：:meth:`reload_from_configs` 原子替换内部 Provider 集合，
+    Manager 实例对象本身不变，因此所有持有该实例引用的位置
+    （如 ``DocumentPipeline.ocr_manager``）自动同步生效，无需重建 pipeline。
     """
 
     def __init__(self, configs: list[OCRConfig]) -> None:
         """初始化 OCR Manager
 
         Args:
-            configs: 数据库中的 OCR 配置列表
+            configs: 数据库中的 OCR 配置列表（可为空列表，此时 Manager 视为未配置）
         """
-        self._providers: dict[str, OCRProvider] = {}
-        self._default_name: str = ""
-        self._fallback_name: str = ""
-        self._init_from_db(configs)
+        self._state = self._build_state(configs)
 
-    def _init_from_db(self, configs: list[OCRConfig]) -> None:
-        """根据数据库配置初始化所有可用 Provider
+    @classmethod
+    def _build_state(cls, configs: list[OCRConfig]) -> _ProviderState:
+        """按数据库配置构建 Provider 集合快照（不触碰实例状态）
 
-        仅注册 provider_type 在注册表内、且 is_available() 为 True 的配置。
+        仅注册 provider_type 在注册表内、且 is_available() 为 True 的配置；
+        单条配置构建失败只跳过该条，不影响其余配置。
 
         Args:
             configs: 数据库中的 OCR 配置列表
+
+        Returns:
+            构建好的 :class:`_ProviderState` 快照
         """
-        logger.info("[OCR] 开始从数据库初始化 OCR Manager, 配置数量: %d", len(configs))
+        logger.info("[OCR] 开始构建 OCR Provider 集合, 配置数量: %d", len(configs))
+
+        providers: dict[str, OCRProvider] = {}
+        default_name = ""
+        fallback_name = ""
 
         for config in configs:
-            provider = self._create_provider(config)
+            provider = cls._create_provider(config)
             if provider and provider.is_available():
-                self._providers[config.id] = provider
+                providers[config.id] = provider
                 logger.info("[OCR] 已注册 Provider: %s (id=%s)", provider.name, config.id)
 
                 if config.is_default:
-                    self._default_name = config.id
+                    default_name = config.id
                 if config.is_fallback:
-                    self._fallback_name = config.id
+                    fallback_name = config.id
             else:
                 logger.warning(
                     "[OCR] Provider '%s' (id=%s) 不可用或类型未注册，跳过",
@@ -63,11 +87,50 @@ class OCRManager:
                 )
 
         logger.info(
-            "[OCR] 初始化完成，已注册 %d 个 Provider, 默认: %s, Fallback: %s",
-            len(self._providers),
-            self._default_name or "(无)",
-            self._fallback_name or "(无)",
+            "[OCR] 构建完成，已注册 %d 个 Provider, 默认: %s, Fallback: %s",
+            len(providers),
+            default_name or "(无)",
+            fallback_name or "(无)",
         )
+        return _ProviderState(
+            providers=providers, default_name=default_name, fallback_name=fallback_name
+        )
+
+    def reload_from_configs(self, configs: list[OCRConfig]) -> None:
+        """按新配置热重载 Provider 集合（原子替换，无需重启进程）
+
+        先完整构建新快照，成功后再单次赋值替换；构建期抛异常则保留原有配置继续
+        服务（宁可用旧配置，也不让 Manager 处于不可用状态）。
+
+        正在执行中的识别调用已解析到旧 Provider 对象，继续跑完不受影响；
+        后续新任务经 :meth:`get_provider` 拿到新集合。
+
+        Args:
+            configs: 数据库中的最新 OCR 配置列表
+        """
+        try:
+            new_state = self._build_state(configs)
+        except Exception as e:  # noqa: BLE001 — 重载失败不能打断既有服务
+            logger.warning("[OCR] 配置热重载失败，保留原有配置: %s", e)
+            return
+
+        self._state = new_state
+        logger.info(
+            "[OCR] 配置热重载完成，当前 %d 个 Provider 可用", len(new_state.providers)
+        )
+
+    def has_provider(self) -> bool:
+        """是否存在可用 Provider（即该能力是否真正可用）"""
+        return bool(self._state.providers)
+
+    def __bool__(self) -> bool:
+        """无可用 Provider 的 Manager 语义上等价于"未配置 OCR"。
+
+        使调用方既有的 ``if self.ocr_manager`` 真值判断保持原语义：启动时数据库无
+        配置也会创建空 Manager（为"首次配置后热生效"留下可重载的对象），此时真值
+        为 False，pipeline 行为与过去 ``ocr_manager is None`` 完全一致。
+        """
+        return self.has_provider()
 
     @staticmethod
     def _create_provider(config: OCRConfig) -> OCRProvider | None:
@@ -108,19 +171,20 @@ class OCRManager:
         Raises:
             ValueError: 指定的 Provider 未注册或不可用
         """
-        target_name = name if name is not None else self._default_name
+        state = self._state
+        target_name = name if name is not None else state.default_name
 
-        if target_name not in self._providers:
-            available = list(self._providers.keys())
+        if target_name not in state.providers:
+            available = list(state.providers.keys())
             raise ValueError(
                 f"OCR Provider '{target_name}' 未注册或不可用，当前可用: {available}"
             )
 
-        return self._providers[target_name]
+        return state.providers[target_name]
 
     def list_providers(self) -> list[str]:
         """列出所有已注册的可用 Provider ID"""
-        return list(self._providers.keys())
+        return list(self._state.providers.keys())
 
     async def recognize(
         self, file_path: str, provider_name: Optional[str] = None
@@ -162,7 +226,7 @@ class OCRManager:
             ValueError: 无可用 Provider
             OCRError: 识别失败且无可用 fallback（含契约不符、输入不支持）
         """
-        primary_name = provider_name or self._default_name
+        primary_name = provider_name or self._state.default_name
         primary = self.get_provider(provider_name)
         logger.info(
             "[OCR] 开始识别文档: %s, Provider: %s (accepts=%s)",
@@ -194,12 +258,13 @@ class OCRManager:
 
     def _pick_fallback(self, primary_name: str) -> OCRProvider | None:
         """取可用的 fallback Provider（与 primary 不同才有意义）"""
+        state = self._state
         if (
-            self._fallback_name
-            and self._fallback_name in self._providers
-            and self._fallback_name != primary_name
+            state.fallback_name
+            and state.fallback_name in state.providers
+            and state.fallback_name != primary_name
         ):
-            return self._providers[self._fallback_name]
+            return state.providers[state.fallback_name]
         return None
 
     async def _run_with_capability(

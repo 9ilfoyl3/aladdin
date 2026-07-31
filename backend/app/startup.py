@@ -6,6 +6,7 @@ API 服务和 Worker 进程共用的初始化函数，避免代码重复。
 import asyncio
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, func
 
@@ -14,6 +15,9 @@ from app.models.manager import get_model_manager
 from app.pipeline.ocr.manager import OCRManager
 from app.schema.db import ASRConfig, EmbedConfig, OCRConfig
 from app.storage.database import async_session
+
+if TYPE_CHECKING:
+    from app.pipeline.asr.manager import ASRManager
 
 logger = logging.getLogger(__name__)
 
@@ -150,46 +154,68 @@ async def load_embed_configs() -> None:
         logger.warning("加载数据库 Embed/Rerank 配置失败，使用环境变量默认值: %s", e)
 
 
-async def load_ocr_manager() -> OCRManager | None:
-    """从数据库加载 OCR 配置并创建 OCRManager
+async def load_ocr_configs() -> list[OCRConfig]:
+    """读取数据库中全部 OCR 配置（纯读取，不构造 Manager）
+
+    供启动时构造 Manager 与运行时热重载（``reload_from_configs``）共用。
+    读失败时返回空列表并记 WARNING——OCR 不可用属可降级情形，不阻断启动。
 
     Returns:
-        OCRManager 实例，如果没有配置则返回 None
+        OCR 配置列表（读失败或无配置时为空列表）
     """
     try:
         async with async_session() as session:
             result = await session.execute(select(OCRConfig))
-            configs = result.scalars().all()
-        if configs:
-            logger.info("load_ocr_manager: 找到 %d 条 OCR 配置", len(configs))
-            return OCRManager(configs)
-        logger.info("load_ocr_manager: 数据库中无 OCR 配置")
-        return None
+            configs = list(result.scalars().all())
+        logger.info("load_ocr_configs: 找到 %d 条 OCR 配置", len(configs))
+        return configs
     except Exception as e:
-        logger.warning("加载 OCR 配置失败: %s", e)
-        return None
+        logger.warning("读取 OCR 配置失败（视为无配置）: %s", e)
+        return []
 
 
-async def load_asr_manager():
-    """从数据库加载 ASR 配置并创建 ASRManager
+async def load_asr_configs() -> list[ASRConfig]:
+    """读取数据库中全部 ASR 配置（纯读取，不构造 Manager）
 
     Returns:
-        ASRManager 实例，如果没有配置则返回 None
+        ASR 配置列表（读失败或无配置时为空列表）
     """
-    from app.pipeline.asr.manager import ASRManager
-
     try:
         async with async_session() as session:
             result = await session.execute(select(ASRConfig))
-            configs = result.scalars().all()
-        if configs:
-            logger.info("load_asr_manager: 找到 %d 条 ASR 配置", len(configs))
-            return ASRManager(configs)
-        logger.info("load_asr_manager: 数据库中无 ASR 配置")
-        return None
+            configs = list(result.scalars().all())
+        logger.info("load_asr_configs: 找到 %d 条 ASR 配置", len(configs))
+        return configs
     except Exception as e:
-        logger.warning("加载 ASR 配置失败: %s", e)
-        return None
+        logger.warning("读取 ASR 配置失败（视为无配置）: %s", e)
+        return []
+
+
+async def load_ocr_manager() -> OCRManager:
+    """从数据库加载 OCR 配置并创建 OCRManager
+
+    **即使数据库无任何配置也返回实例**（内部 Provider 集合为空）：持有方
+    （``DocumentPipeline.ocr_manager``）因此恒不为 None，"从无配置到首次配置"
+    才有对象可以热重载。空 Manager 的真值为 False（见 ``OCRManager.__bool__``），
+    调用方既有的 ``if self.ocr_manager`` 判断语义与过去一致。
+
+    Returns:
+        OCRManager 实例（无配置时为空 Manager）
+    """
+    return OCRManager(await load_ocr_configs())
+
+
+async def load_asr_manager() -> "ASRManager":
+    """从数据库加载 ASR 配置并创建 ASRManager
+
+    与 :func:`load_ocr_manager` 同理：无配置时返回空 Manager 而非 None。
+
+    Returns:
+        ASRManager 实例（无配置时为空 Manager）
+    """
+    from app.pipeline.asr.manager import ASRManager
+
+    return ASRManager(await load_asr_configs())
 
 
 async def _auto_migrate_session_file_columns() -> None:
