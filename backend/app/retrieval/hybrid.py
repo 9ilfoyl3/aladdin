@@ -273,7 +273,7 @@ class HybridRetriever(BaseRetriever):
 
     async def search_with_trace(
         self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
-        tenant_id: str | None = None, **kwargs
+        tenant_id: str | None = None, apply_rerank_filter: bool = True, **kwargs
     ) -> tuple[list[RetrievalResult], dict]:
         """带链路追踪的混合检索，供检索测试页展示各阶段中间信号
 
@@ -385,7 +385,9 @@ class HybridRetriever(BaseRetriever):
         rerank_candidates = fused[:config.rerank_candidate_k]
         funnel.append({"stage": "Rerank 候选", "count": len(rerank_candidates)})
         try:
-            reranked = await self._rerank(query, rerank_candidates, top_k, config)
+            reranked = await self._rerank(
+                query, rerank_candidates, top_k, config, apply_filter=apply_rerank_filter
+            )
         except Exception as e:
             logger.warning("[Trace] Reranker 异常，跳过重排序: %s", e)
             reranked = fused[:top_k]
@@ -418,7 +420,7 @@ class HybridRetriever(BaseRetriever):
 
     async def rerank_and_expand(
         self, query: str, results: list[RetrievalResult], top_k: int = 10,
-        tenant_id: str | None = None
+        tenant_id: str | None = None, apply_rerank_filter: bool = True
     ) -> list[RetrievalResult]:
         """对已合并的结果执行 rerank 精排 + 父块扩展
 
@@ -447,7 +449,9 @@ class HybridRetriever(BaseRetriever):
         rerank_candidates = results[: config.rerank_candidate_k]
 
         try:
-            reranked = await self._rerank(query, rerank_candidates, top_k, config)
+            reranked = await self._rerank(
+                query, rerank_candidates, top_k, config, apply_filter=apply_rerank_filter
+            )
             print(f"[Retrieval] 统一 Rerank 后: {len(reranked)} 条")
         except Exception as e:
             logger.warning("Reranker 异常，跳过重排序: %s", e)
@@ -714,6 +718,7 @@ class HybridRetriever(BaseRetriever):
         results: list[RetrievalResult],
         top_k: int,
         config: RetrievalConfig | None = None,
+        apply_filter: bool = True,
     ) -> list[RetrievalResult]:
         """调用 Reranker 对融合结果精排，返回 top_k 结果
 
@@ -727,6 +732,10 @@ class HybridRetriever(BaseRetriever):
         Args:
             config: 本次检索的 ``RetrievalConfig`` 快照。为 None 时（兼容旧调用点 / 单测）
                 用全 Safe_Default 配置，使阈值过滤行为可预期。
+            apply_filter: 是否应用软阈值过滤（默认 True，问答链路保持防幻觉过滤）。
+                对外「纯检索召回」接口（/retrieval/search、/test）传 False：软阈值是为问答
+                避免把低相关内容喂给 LLM 而设，检索召回接口应返回 rerank 排序后的 top_k 由
+                调用方按分数自行取舍，不应被问答阈值静默滤空（否则短/泛 query 常被兜底也救不回）。
         """
         if not results:
             return []
@@ -764,7 +773,9 @@ class HybridRetriever(BaseRetriever):
         reranked.sort(key=lambda x: x.score, reverse=True)
 
         # 软阈值过滤 + 多重兜底（B2）：作用在 rerank 原始分数上，返回前统一应用。
-        reranked = self._apply_rerank_filter(reranked, config)
+        # 纯检索召回接口传 apply_filter=False 跳过此过滤，直接返回 rerank 排序结果。
+        if apply_filter:
+            reranked = self._apply_rerank_filter(reranked, config)
         return reranked
 
     @staticmethod

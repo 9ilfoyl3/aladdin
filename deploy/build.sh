@@ -64,7 +64,7 @@ if [[ "$APP_ONLY" == false ]]; then
     if [[ -n "$ARCH" ]]; then
       local_arch=$(docker image inspect "$img" --format '{{.Architecture}}' 2>/dev/null || true)
       if [[ -n "$local_arch" && "$local_arch" != "$ARCH" ]]; then
-        echo "  本地 $img 为 $local_arch，与目标 $ARCH 不符，删除后重新拉取..."
+        echo "  本地 ${img} 为 ${local_arch}，与目标 ${ARCH} 不符，删除后重新拉取..."
         docker rmi "$img" >/dev/null 2>&1 || true
       fi
     fi
@@ -82,6 +82,8 @@ mkdir -p "$OUT/deploy"
 cp deploy/milvus-user.yaml "$OUT/deploy/"
 cp deploy/install.sh "$OUT/"
 chmod +x "$OUT/install.sh"
+# 运维部署手册：随包交付，运维在服务器上可直接查阅
+cp deploy/DEPLOY.md "$OUT/"
 # 前端运行时配置：compose 把 ./frontend/public/config.js 只读挂载进容器覆盖镜像内默认。
 # 离线包必须带上此文件，否则宿主路径不存在时 Docker 会按目录创建，导致挂载失败
 # （Are you trying to mount a directory onto a file）。

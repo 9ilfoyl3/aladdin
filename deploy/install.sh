@@ -292,6 +292,21 @@ do_update() {
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate $APP_SERVICES
   fi
 
+  # 清理被新镜像顶替下来的旧 artoo 悬空镜像（docker load 只加载不删旧镜像，
+  # 同名 latest tag 会移到新镜像上，旧镜像变成 <none> 越积越多，占用磁盘）。
+  # 仅删除本次加载前记录的旧 backend/frontend，且确认已被新镜像替换，
+  # 不做全局 prune，避免误删同主机其它项目的镜像。
+  local removed=0
+  for old in "$before_backend" "$before_frontend"; do
+    if [[ -n "$old" && "$old" != "$after_backend" && "$old" != "$after_frontend" ]]; then
+      if docker rmi "$old" >/dev/null 2>&1; then
+        echo "  清理旧镜像 $old"
+        removed=1
+      fi
+    fi
+  done
+  [[ "$removed" -eq 1 ]] && echo "  ✓ 已清理上一版应用镜像"
+
   echo ""
   echo "=== 更新完成 ==="
   show_info

@@ -131,9 +131,22 @@ async def lifespan(app: FastAPI):
             logger.warning("查询租户 %s KB 列表失败（跳过结果缓存失效）: %s", tenant_id, e)
             return []
 
+    async def _handle_capability_config(capability: str):
+        """收到 capability_config 失效信号：重载本进程持有的能力运行时对象
+
+        API 进程持有 ModelManager 单例（embedding / rerank），需要重载；
+        OCR / ASR 在 API 侧无常驻 Manager（降级路径每篇文档重建），为 no-op。
+        多 API 进程部署时，本 handler 保证非发起进程也能同步生效。
+        """
+        from app.api.capability_reload import reload_capability_locally
+
+        await reload_capability_locally(capability)
+        logger.info("InvalidationBus: capability_config 处理完成 capability=%s", capability)
+
     await start_invalidation_bus({
         "kb_data": _handle_kb_data,
         "tenant_config": _handle_tenant_config,
+        "capability_config": _handle_capability_config,
     })
 
     # 初始化知识图谱存储（失败仅 warning 不阻断启动；未启用/不可用则降级关闭）

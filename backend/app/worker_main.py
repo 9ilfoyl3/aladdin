@@ -140,9 +140,45 @@ async def main():
             logger.warning("查询租户 %s KB 列表失败（跳过结果缓存失效）: %s", tenant_id, e)
             return []
 
+    async def _handle_capability_config(capability: str):
+        """收到 capability_config 失效信号：重载 Worker 持有的能力运行时对象
+
+        - embedding / rerank：重载 ModelManager 单例（走 load_embed_configs）。
+        - ocr / asr：对 pipeline 持有的 Manager 调 reload_from_configs 原子替换内部
+          Provider 集合。Manager 实例对象不变，故无需重建 pipeline；正在处理中的
+          文档继续用旧 Provider 跑完，新任务用新配置。
+        """
+        from app.api.capability_reload import (
+            CAPABILITY_ASR,
+            CAPABILITY_OCR,
+            reload_capability_locally,
+        )
+        from app.startup import load_asr_configs, load_ocr_configs
+
+        try:
+            if capability == CAPABILITY_OCR:
+                if pipeline.ocr_manager is None:
+                    logger.warning("capability_config: pipeline 无 OCR Manager，跳过重载")
+                else:
+                    pipeline.ocr_manager.reload_from_configs(await load_ocr_configs())
+            elif capability == CAPABILITY_ASR:
+                if pipeline.asr_manager is None:
+                    logger.warning("capability_config: pipeline 无 ASR Manager，跳过重载")
+                else:
+                    pipeline.asr_manager.reload_from_configs(await load_asr_configs())
+            else:
+                # embedding / rerank 走共用的本地重载逻辑
+                await reload_capability_locally(capability)
+        except Exception as e:  # noqa: BLE001 — 重载失败不能打断 worker 消费
+            logger.warning("capability_config 重载失败 capability=%s: %s", capability, e)
+            return
+
+        logger.info("InvalidationBus: capability_config 处理完成 capability=%s", capability)
+
     await start_invalidation_bus({
         "kb_data": _handle_kb_data,
         "tenant_config": _handle_tenant_config,
+        "capability_config": _handle_capability_config,
     })
 
     # 会话文件异步上传 worker（REQ-2 / REQ-4 / REQ-9）：与文档入库快/慢道队列物理隔离，

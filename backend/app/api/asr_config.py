@@ -181,7 +181,21 @@ async def create_asr_config(body: ASRConfigCreate, db: AsyncSession = Depends(ge
     await db.flush()
     await db.refresh(config)
 
-    return _config_to_response(config)
+    response = _config_to_response(config)
+    await _apply_asr_config_change(db)
+    return response
+
+
+async def _apply_asr_config_change(db: AsyncSession) -> None:
+    """让 ASR 配置变更立即生效（提交事务 + 广播通知各进程重载）
+
+    先提交再广播：Worker 进程收到信号后会重新查库构建 Provider 集合，
+    未提交则读到旧数据。API 进程不持有常驻 ASRManager，本地重载为 no-op。
+    """
+    from app.api.capability_reload import CAPABILITY_ASR, apply_and_broadcast
+
+    await db.commit()
+    await apply_and_broadcast(CAPABILITY_ASR)
 
 
 async def _perform_asr_test(provider_type: str, api_url: str, api_key: Optional[str], timeout: float) -> ASRTestResponse:
@@ -311,7 +325,9 @@ async def update_asr_config(config_id: str, body: ASRConfigUpdate, db: AsyncSess
     await db.flush()
     await db.refresh(config)
 
-    return _config_to_response(config)
+    response = _config_to_response(config)
+    await _apply_asr_config_change(db)
+    return response
 
 
 @router.delete("/{config_id}", status_code=204)
@@ -323,3 +339,6 @@ async def delete_asr_config(config_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="ASR 配置不存在")
     await db.delete(config)
     await db.flush()
+
+    # 删除后热生效：避免 Worker 继续调用已删除的 ASR 服务
+    await _apply_asr_config_change(db)
