@@ -57,6 +57,17 @@ if [[ "$APP_ONLY" == false ]]; then
   # 开图谱时额外导出 Neo4j 镜像（与 docker-compose.yml graph profile 一致）。
   [[ "$WITH_GRAPH" == true ]] && INFRA_IMAGES+=(neo4j:5-community)
   for img in "${INFRA_IMAGES[@]}"; do
+    # containerd 镜像存储只保留“实际 pull 过的架构”的层。若本地残留的是其它架构副本，
+    # 后续 docker save --platform 会因找不到目标架构的导出目标而报
+    # “no suitable export target found ... does not provide the specified platform”。
+    # 因此跨架构打包前先删除架构不符的本地副本，确保 pull 抓取到目标架构的层。
+    if [[ -n "$ARCH" ]]; then
+      local_arch=$(docker image inspect "$img" --format '{{.Architecture}}' 2>/dev/null || true)
+      if [[ -n "$local_arch" && "$local_arch" != "$ARCH" ]]; then
+        echo "  本地 ${img} 为 ${local_arch}，与目标 ${ARCH} 不符，删除后重新拉取..."
+        docker rmi "$img" >/dev/null 2>&1 || true
+      fi
+    fi
     docker pull $PLATFORM_ARG "$img"
   done
   docker save $SAVE_PLATFORM_ARG "${INFRA_IMAGES[@]}" -o "$OUT/infra-images.tar"
@@ -71,6 +82,8 @@ mkdir -p "$OUT/deploy"
 cp deploy/milvus-user.yaml "$OUT/deploy/"
 cp deploy/install.sh "$OUT/"
 chmod +x "$OUT/install.sh"
+# 运维部署手册：随包交付，运维在服务器上可直接查阅
+cp deploy/DEPLOY.md "$OUT/"
 # 前端运行时配置：compose 把 ./frontend/public/config.js 只读挂载进容器覆盖镜像内默认。
 # 离线包必须带上此文件，否则宿主路径不存在时 Docker 会按目录创建，导致挂载失败
 # （Are you trying to mount a directory onto a file）。

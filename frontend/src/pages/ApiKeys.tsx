@@ -23,12 +23,14 @@ interface ApiKeyItem {
   created_at: string
 }
 
-// 创建响应类型（包含完整 key）
+// 创建响应类型（包含完整 key + AK/SK 签名凭据）
 interface CreateKeyResponse {
   id: string
   key: string
   prefix: string
   name: string
+  access_key: string
+  secret_key: string
 }
 
 // API Key 管理页面：创建 + 列表 + 撤销
@@ -37,8 +39,8 @@ function ApiKeys() {
   const confirm = useConfirm()
   const [showCreate, setShowCreate] = useState(false)
   const [keyName, setKeyName] = useState('')
-  const [newKey, setNewKey] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [newKeyData, setNewKeyData] = useState<CreateKeyResponse | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
 
   // 获取 API Key 列表
   const { data: apiKeys = [], isLoading } = useQuery({
@@ -50,7 +52,7 @@ function ApiKeys() {
   const createMutation = useMutation({
     mutationFn: (name: string) => apiKeyApi.create({ name }) as Promise<CreateKeyResponse>,
     onSuccess: (data) => {
-      setNewKey(data.key)
+      setNewKeyData(data)
       queryClient.invalidateQueries({ queryKey: ['api-keys'] })
     },
   })
@@ -87,17 +89,15 @@ function ApiKeys() {
   function closeCreate() {
     setShowCreate(false)
     setKeyName('')
-    setNewKey(null)
-    setCopied(false)
+    setNewKeyData(null)
+    setCopied(null)
   }
 
-  // 复制 Key
-  function copyKey() {
-    if (newKey) {
-      copyToClipboard(newKey)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
+  // 复制指定文本
+  function handleCopy(text: string, label: string) {
+    copyToClipboard(text)
+    setCopied(label)
+    setTimeout(() => setCopied(null), 2000)
   }
 
   // 格式化时间
@@ -180,23 +180,49 @@ function ApiKeys() {
       {/* 创建对话框 */}
       <Dialog open={showCreate} onOpenChange={closeCreate}>
         <DialogContent>
-          {newKey ? (
-            // 显示新创建的 Key
+          {newKeyData ? (
+            // 显示新创建的凭据（Bearer Key + AK/SK 签名凭据）
             <div>
               <DialogHeader>
                 <DialogTitle>API Key 已创建</DialogTitle>
                 <DialogDescription>
-                  请立即复制此 Key，关闭后将无法再次查看。
+                  以下凭据仅显示一次，关闭后无法再次查看，请妥善保存。
                 </DialogDescription>
               </DialogHeader>
-              <div className="flex items-center gap-2 p-3 bg-muted rounded-md mt-4">
-                <code className="flex-1 text-sm break-all">{newKey}</code>
-                <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={copyKey}>
-                  {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
-                </Button>
+              <div className="space-y-3 mt-4">
+                {/* Bearer Key */}
+                <div>
+                  <Label className="text-xs text-muted-foreground">Bearer Key（明文通道）</Label>
+                  <div className="flex items-center gap-2 p-2 bg-muted rounded-md mt-1">
+                    <code className="flex-1 text-xs break-all">{newKeyData.key}</code>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => handleCopy(newKeyData.key, 'key')}>
+                      {copied === 'key' ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+                </div>
+                {/* AK */}
+                <div>
+                  <Label className="text-xs text-muted-foreground">Access Key（AK，签名通道用）</Label>
+                  <div className="flex items-center gap-2 p-2 bg-muted rounded-md mt-1">
+                    <code className="flex-1 text-xs break-all">{newKeyData.access_key}</code>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => handleCopy(newKeyData.access_key, 'ak')}>
+                      {copied === 'ak' ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+                </div>
+                {/* SK */}
+                <div>
+                  <Label className="text-xs text-muted-foreground">Secret Key（SK，签名通道用，切勿外泄）</Label>
+                  <div className="flex items-center gap-2 p-2 bg-muted rounded-md mt-1">
+                    <code className="flex-1 text-xs break-all">{newKeyData.secret_key}</code>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => handleCopy(newKeyData.secret_key, 'sk')}>
+                      {copied === 'sk' ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+                </div>
               </div>
-              <DialogFooter>
-                <Button onClick={closeCreate}>完成</Button>
+              <DialogFooter className="mt-4">
+                <Button onClick={closeCreate}>已保存，关闭</Button>
               </DialogFooter>
             </div>
           ) : (

@@ -1,9 +1,8 @@
 """启动引导（tenant-rbac-refactor）：全新初始化，幂等。不做历史数据迁移。
 
 职责：
-- TenantBootstrap：创建内置 External_User_Tenant 及其内置管理员
-  (External_User_Builtin_Admin，直接写 ``User.role="admin"``) 与内置公共库
-  (visibility=organization)。不再预置权限点字典与自定义角色（固定角色模型）。
+- TenantBootstrap：创建内置 External_User_Tenant（不预置默认管理员，也不预置公共库）。
+  不再预置权限点字典与自定义角色（固定角色模型）。
 - SuperAdminBootstrap：首次启动且无 Super_Admin 时按环境变量创建
   (``is_super_admin=True``/``role=None``/``must_change_password=True``)，强制改密；
   缺必需环境变量时 fail-fast（禁止默认口令兜底）。
@@ -23,31 +22,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.constants import (
     EXTERNAL_USER_TENANT_ID,
     EXTERNAL_USER_TENANT_NAME,
-    KbVisibilityEnum,
     TenantTypeEnum,
 )
 from app.auth.password import hash_password
 from app.config import get_settings
 from app.schema.db import (
-    KnowledgeBase,
     Tenant,
     User,
 )
 
 logger = logging.getLogger(__name__)
 
-# 内置外部用户公共库的固定标识（幂等可查）
-_EXTERNAL_PUBLIC_KB_ID = "kb-external-public"
-_EXTERNAL_PUBLIC_KB_NAME = "外部用户公共库"
-
 
 async def _tenant_bootstrap(session: AsyncSession) -> None:
-    """内置 External_User_Tenant（含内置公共库，不再预置默认管理员）。
+    """内置 External_User_Tenant（不预置默认管理员，也不预置公共库）。
 
     固定角色模型下不预置权限点 / 自定义角色 / 角色关联行。外部用户在认证时合成为
     member；该租户的治理由平台 Super_Admin 经管理端点完成（按需补充管理员），
-    故引导阶段**不再创建默认管理员**。内置公共库为无主（owner_user_id=None）的组织库，
-    供全体外部用户读取，其内容维护由超管或超管补建的管理员负责。
+    故引导阶段**不再创建默认管理员**。每个外部用户按 (代理Key, X-External-User-Id)
+    懒创建独立身份，各自在自有私有库内读写；不再预置无主公共库。
     """
     # 内置 External_User_Tenant
     ext_tenant = await session.get(Tenant, EXTERNAL_USER_TENANT_ID)
@@ -61,20 +54,6 @@ async def _tenant_bootstrap(session: AsyncSession) -> None:
             )
         )
         await session.flush()
-
-    # 内置公共库（无主组织库，供全体外部用户读取；治理走平台超管/超管补建的管理员）
-    pub_kb = await session.get(KnowledgeBase, _EXTERNAL_PUBLIC_KB_ID)
-    if pub_kb is None:
-        session.add(
-            KnowledgeBase(
-                id=_EXTERNAL_PUBLIC_KB_ID,
-                name=_EXTERNAL_PUBLIC_KB_NAME,
-                tenant_id=EXTERNAL_USER_TENANT_ID,
-                owner_user_id=None,  # 无主：内置公共库不归属任何用户
-                visibility=KbVisibilityEnum.ORGANIZATION.value,
-                doc_count=0,
-            )
-        )
 
     await session.commit()
 

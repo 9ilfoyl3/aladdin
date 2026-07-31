@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -257,7 +257,7 @@ async def update_folder(
                 raise HTTPException(status_code=400, detail="不能将文件夹移动到其子文件夹中")
         folder.parent_id = body.parent_id if body.parent_id else None
 
-    folder.updated_at = datetime.utcnow()
+    folder.updated_at = datetime.now(timezone.utc)
     await db.flush()
     await db.refresh(folder)
     await db.commit()

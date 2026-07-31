@@ -1,46 +1,105 @@
 /**
- * 跨环境剪贴板复制（兼容 HTTP 部署）。
+ * 复制文本到剪贴板的公用方法。
  *
- * navigator.clipboard.writeText 仅在安全上下文（HTTPS / localhost）下可用；
- * 非安全上下文（如 http://IP:port）下调用会 reject 或不存在。
+ * 兼容性说明：
+ * - `navigator.clipboard` 仅在安全上下文（HTTPS 或 localhost）下可用。
+ *   在 HTTP 部署环境、旧版 Chrome（如 86）、火狐等浏览器下，
+ *   `navigator.clipboard` 可能为 undefined，直接调用会抛错或静默失败。
+ * - 因此这里优先使用现代 Clipboard API，失败时降级到 `document.execCommand("copy")`。
  *
- * 关键点：浏览器要求 execCommand('copy') 必须在用户手势（点击）的同步调用栈内执行。
- * 若先 `await` 一个会 reject 的 clipboard.writeText，再降级 execCommand，
- * 此时用户手势上下文已失效，降级同样静默失败。
- * 因此这里在“非安全上下文”下直接走同步的 execCommand 降级，不经过 await。
+ * @param text 待复制的文本
+ * @returns 是否复制成功
  */
-function legacyCopy(text: string): boolean {
-  try {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    // 避免页面滚动 / 闪烁，同时保证元素可被选中（不能用 display:none）
-    textarea.style.position = 'fixed'
-    textarea.style.left = '-9999px'
-    textarea.style.top = '0'
-    textarea.style.opacity = '0'
-    textarea.setAttribute('readonly', '')
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    // iOS Safari 需要显式设置选区
-    textarea.setSelectionRange(0, text.length)
-    const ok = document.execCommand('copy')
-    document.body.removeChild(textarea)
-    return ok
-  } catch {
-    return false
-  }
-}
-
 export async function copyToClipboard(text: string): Promise<boolean> {
-  // 仅在安全上下文下使用现代异步 API；否则直接走同步降级，保住用户手势上下文。
-  if (window.isSecureContext && navigator.clipboard?.writeText) {
+  // 优先使用现代 Clipboard API（仅安全上下文可用）
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    window.isSecureContext
+  ) {
     try {
       await navigator.clipboard.writeText(text)
       return true
     } catch {
-      // 安全上下文下仍可能因权限失败，继续尝试降级
+      // 失败则继续走降级方案
     }
   }
-  return legacyCopy(text)
+
+  // 降级方案：临时 textarea + execCommand("copy")
+  return fallbackCopy(text)
+}
+
+/**
+ * 降级复制方案：临时元素 + Range/Selection + execCommand("copy")。
+ *
+ * 为什么不用 textarea.select()：
+ * - textarea/input 的 select() 依赖元素自身处于聚焦状态。当复制发生在 Dialog/Modal
+ *   内时，reka-ui / Radix 的 Focus Trap 会在 focusin 时把焦点抢回弹窗，
+ *   导致 textarea 的选区被清空。此时 execCommand("copy") 仍会返回 true
+ *   （命令本身可用），但实际剪贴板内容为空，表现为“复制成功却没复制到东西”。
+ *
+ * 解决方式：
+ * - 改用 Range + window.getSelection() 选中一个普通（非表单、不可聚焦）元素的文本。
+ *   文档级 Selection 不依赖元素焦点，Focus Trap 抢焦点不会清空它。
+ * - 元素挂载到当前打开的弹窗容器内（若存在），进一步避免被 Focus Trap 干扰。
+ * - 复制后通过读取 selection 是否仍有内容来辅助判断，execCommand 返回值不可靠。
+ */
+function fallbackCopy(text: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    if (typeof document === "undefined") {
+      resolve(false)
+      return
+    }
+    if (typeof document.execCommand !== "function") {
+      resolve(false)
+      return
+    }
+
+    // 优先挂载到当前打开的弹窗内，避免 Focus Trap 把焦点/选区限制在弹窗内时丢失选区
+    const host =
+      (document.querySelector(
+        '[role="dialog"][data-state="open"]',
+      ) as HTMLElement | null) ?? document.body
+
+    const span = document.createElement("span")
+    span.textContent = text
+    // 保留换行与空白，避免多行文本被折叠
+    span.style.whiteSpace = "pre"
+    // 视觉上隐藏但仍可被 Range 选中（不能用 display:none / visibility:hidden）
+    span.style.position = "fixed"
+    span.style.top = "0"
+    span.style.left = "0"
+    span.style.opacity = "0"
+    span.style.pointerEvents = "none"
+    // iOS Safari：font-size < 16px 触发自动缩放
+    span.style.fontSize = "16px"
+    host.appendChild(span)
+
+    const selection = window.getSelection()
+    const previousRange =
+      selection && selection.rangeCount > 0
+        ? selection.getRangeAt(0).cloneRange()
+        : null
+
+    const range = document.createRange()
+    range.selectNodeContents(span)
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+
+    let ok = false
+    try {
+      ok = document.execCommand("copy")
+    } catch {
+      ok = false
+    }
+
+    // 清理：移除临时元素并恢复用户原有选区
+    span.remove()
+    selection?.removeAllRanges()
+    if (previousRange) {
+      selection?.addRange(previousRange)
+    }
+
+    resolve(ok)
+  })
 }

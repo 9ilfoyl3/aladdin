@@ -118,6 +118,14 @@ class Settings(BaseSettings):
     pipeline_asr_concurrency: int = 2
     pipeline_embed_max_connections: int = 20  # httpx 连接池上限
 
+    # 会话文件异步上传（session-upload-async-ws）——与文档入库快/慢道物理隔离，
+    # 全部带安全默认值，缺配置不影响启动。
+    session_upload_max_concurrent: int = 4  # 会话上传 worker 并发建索引数
+    session_upload_max_retries: int = 3  # 单任务失败重试上限（超限进 DLQ）
+    session_upload_task_timeout_minutes: int = 30  # 单任务建索引总超时（分钟）
+    session_upload_ws_max_conn_per_session: int = 20  # 单会话 WS 连接数上限（超限拒绝新连接）
+    session_upload_ws_ping_interval: int = 30  # WS 服务端心跳/keepalive 间隔（秒）
+
     # 大文件分道（fast/slow 双队列）：文件大小 ≥ 此阈值走 slow 道，避免大文件占满快道。
     # 该值须低于业务中常见「大文件」的体积，否则大文件全部落入快道、占满 max_concurrent，
     # 慢道机制失效、小文件被队头阻塞。
@@ -137,6 +145,11 @@ class Settings(BaseSettings):
     # JWT（HS256）。jwt_secret 为启动期硬依赖：缺失则在 get_settings() fail-fast。
     jwt_secret: str = ""
     jwt_expire_minutes: int = 720  # JWT 有效期（分钟），默认 12 小时
+
+    # ---- API Key AK/SK 签名（aksk-signing）：供无后端的可信调用方免明文密钥上行 ----
+    # 请求以 HMAC-SHA256 签名认证：AK=api_key.id（可公开），SK 由服务端从
+    # jwt_secret 派生（不落库，DB 泄露也无法伪造）。此处仅时间窗；nonce 防重放走 Redis。
+    apikey_sign_window_seconds: int = 300  # 签名时间窗（秒），|now-ts|>窗口即拒绝（防重放）
 
     # Super_Admin 引导（SuperAdminBootstrap）。首次启动且无 Super_Admin 时据此创建，
     # 并强制改密。缺失时 fail-fast，禁止用默认口令静默兜底。

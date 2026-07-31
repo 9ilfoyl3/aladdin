@@ -57,6 +57,10 @@ async def lifespan(app: FastAPI):
     # 自动迁移：添加可能缺失的新列
     await _auto_migrate_columns()
 
+    # 会话文件异步上传新列迁移（progress / progress_message / error_message）
+    from app.startup import _auto_migrate_session_file_columns
+    await _auto_migrate_session_file_columns()
+
     # 初始化对象存储 bucket（知识库源文件权威存储）
     await _init_object_store()
 
@@ -68,6 +72,9 @@ async def lifespan(app: FastAPI):
 
     # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
     await _init_task_queue(app)
+
+    # 初始化会话文件异步上传基础设施（EventHub + SessionUploadEventBus + 订阅循环 + 入队队列）
+    await _init_session_upload_infra(app)
 
     # 启动 API Key 用量追踪器（内存合并 + 周期批量落库，使鉴权关键路径零写库）
     from app.auth.apikey_usage import init_usage_tracker, shutdown_usage_tracker
@@ -124,9 +131,22 @@ async def lifespan(app: FastAPI):
             logger.warning("查询租户 %s KB 列表失败（跳过结果缓存失效）: %s", tenant_id, e)
             return []
 
+    async def _handle_capability_config(capability: str):
+        """收到 capability_config 失效信号：重载本进程持有的能力运行时对象
+
+        API 进程持有 ModelManager 单例（embedding / rerank），需要重载；
+        OCR / ASR 在 API 侧无常驻 Manager（降级路径每篇文档重建），为 no-op。
+        多 API 进程部署时，本 handler 保证非发起进程也能同步生效。
+        """
+        from app.api.capability_reload import reload_capability_locally
+
+        await reload_capability_locally(capability)
+        logger.info("InvalidationBus: capability_config 处理完成 capability=%s", capability)
+
     await start_invalidation_bus({
         "kb_data": _handle_kb_data,
         "tenant_config": _handle_tenant_config,
+        "capability_config": _handle_capability_config,
     })
 
     # 初始化知识图谱存储（失败仅 warning 不阻断启动；未启用/不可用则降级关闭）
@@ -140,6 +160,9 @@ async def lifespan(app: FastAPI):
 
     # 关闭 TaskQueue 连接
     await _close_task_queue(app)
+
+    # 关闭会话文件异步上传基础设施（停订阅循环、关队列连接、清理单例）
+    await _close_session_upload_infra(app)
 
 
 async def _auto_migrate_columns() -> None:
@@ -207,6 +230,92 @@ async def _close_task_queue(app: FastAPI) -> None:
                 await queue._redis.aclose()
             except Exception:
                 pass
+
+
+async def _init_session_upload_infra(app: FastAPI) -> None:
+    """初始化会话文件异步上传基础设施（API 进程侧）。
+
+    - 创建进程内 ``EventHub`` 单例并注入（``set_event_hub``），供 WS 路由注册/注销连接。
+    - 初始化 ``SessionUploadEventBus``（跨进程事件广播；Redis 不可用降级进程内直推）。
+    - 启动 ``subscribe_loop`` 后台任务：订阅广播 → fan-out 给本进程 WS 连接
+      （Redis 不可用时 subscribe_loop 立即返回，安全 no-op）。
+    - 初始化 ``SessionUploadQueue``（仅用于入队，建索引由独立 worker 进程执行），
+      注入进程内单例（``set_session_upload_queue``）并存 app.state。
+
+    全程 Redis 缺失/不可用均优雅降级，不阻塞启动。
+    """
+    from app.session_upload.events import (
+        EventHub,
+        init_session_upload_event_bus,
+        set_event_hub,
+    )
+    from app.session_upload.queue import (
+        SessionUploadQueue,
+        set_session_upload_queue,
+    )
+
+    settings = get_settings()
+
+    # 进程内 EventHub 单例（WS 路由据此注册连接）
+    hub = EventHub()
+    set_event_hub(hub)
+    app.state.session_upload_hub = hub
+
+    # 跨进程事件广播总线（Redis 不可用则降级进程内直推 / no-op）
+    bus = await init_session_upload_event_bus(local_hub=hub)
+    app.state.session_upload_event_bus = bus
+
+    # 启动订阅循环后台任务（Redis 不可用时 subscribe_loop 立即返回，安全）
+    app.state.session_upload_sub_task = asyncio.create_task(bus.subscribe_loop(hub))
+
+    # 会话上传入队队列（enqueue 用，Worker 在独立进程消费）
+    queue = await SessionUploadQueue.create(settings.redis_url)
+    set_session_upload_queue(queue)
+    app.state.session_upload_queue = queue
+
+    if queue is not None:
+        print("[API] SessionUploadQueue 已连接 Redis，会话文件上传将入队由独立 Worker 建索引")
+        logger.info("SessionUploadQueue connected to Redis")
+    else:
+        print("[API] ⚠️ Redis 不可用，会话文件异步上传队列不可用（上传将快速失败 503）")
+        logger.warning("SessionUploadQueue unavailable (Redis down)")
+
+
+async def _close_session_upload_infra(app: FastAPI) -> None:
+    """关闭会话文件异步上传基础设施：停订阅循环、关队列连接、清理进程内单例。"""
+    from app.session_upload.events import set_event_hub
+    from app.session_upload.queue import set_session_upload_queue
+
+    # 停止事件总线订阅循环
+    bus = getattr(app.state, "session_upload_event_bus", None)
+    if bus is not None and hasattr(bus, "stop"):
+        try:
+            bus.stop()
+        except Exception:
+            pass
+
+    # 取消并等待订阅循环后台任务
+    sub_task = getattr(app.state, "session_upload_sub_task", None)
+    if sub_task is not None:
+        sub_task.cancel()
+        try:
+            await sub_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    # 关闭会话上传队列的 Redis 连接
+    queue = getattr(app.state, "session_upload_queue", None)
+    if queue is not None and hasattr(queue, "_redis"):
+        try:
+            await queue._redis.aclose()
+        except Exception:
+            pass
+
+    # 清理进程内单例，避免重启/测试残留旧引用
+    set_event_hub(None)
+    set_session_upload_queue(None)
 
 
 async def _init_object_store() -> None:

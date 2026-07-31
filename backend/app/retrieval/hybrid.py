@@ -273,7 +273,7 @@ class HybridRetriever(BaseRetriever):
 
     async def search_with_trace(
         self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
-        tenant_id: str | None = None, **kwargs
+        tenant_id: str | None = None, apply_rerank_filter: bool = True, **kwargs
     ) -> tuple[list[RetrievalResult], dict]:
         """带链路追踪的混合检索，供检索测试页展示各阶段中间信号
 
@@ -312,10 +312,18 @@ class HybridRetriever(BaseRetriever):
         if has_bm25:
             tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs))
 
+        # 第四路：图谱召回（可选）。与 search_with_degraded 同构——仅当注入了 graph_retriever
+        # 时追加；未注入（None）→ tasks/RRF 输入与三路时逐字节一致（Property 8 零回归）。
+        # 这样调参/召回接口在图谱开启时也能看到并用上第四路，与生产问答链路同口径。
+        has_graph = self.graph_retriever is not None
+        graph_idx = len(tasks) if has_graph else -1
+        if has_graph:
+            tasks.append(self.graph_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
+
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         def _safe(idx: int) -> list[RetrievalResult]:
-            if idx >= len(results_list):
+            if idx < 0 or idx >= len(results_list):
                 return []
             r = results_list[idx]
             if isinstance(r, Exception):
@@ -326,6 +334,7 @@ class HybridRetriever(BaseRetriever):
         dense_results = _safe(0)
         sparse_results = _safe(1)
         bm25_results = _safe(2) if has_bm25 else []
+        graph_results = _safe(graph_idx) if has_graph else []
 
         # 路由归属：chunk_id -> {route: rank}
         per_result: dict[str, dict] = {}
@@ -342,11 +351,15 @@ class HybridRetriever(BaseRetriever):
         _record_route(dense_results, "dense")
         _record_route(sparse_results, "sparse")
         _record_route(bm25_results, "bm25")
+        _record_route(graph_results, "graph")
 
         # 2. RRF 融合
         all_results = [dense_results, sparse_results]
         if bm25_results:
             all_results.append(bm25_results)
+        # 图谱路仅在非空时并入融合：空列表对 RRF 名次无贡献，与 search_with_degraded 一致。
+        if graph_results:
+            all_results.append(graph_results)
         fused = self._rrf_fusion(all_results, k=config.rrf_k)
 
         for item in fused:
@@ -358,6 +371,7 @@ class HybridRetriever(BaseRetriever):
             {"name": "dense", "recalled": len(dense_results)},
             {"name": "sparse", "recalled": len(sparse_results)},
             {"name": "bm25", "recalled": len(bm25_results), "enabled": has_bm25},
+            {"name": "graph", "recalled": len(graph_results), "enabled": has_graph},
         ]
         funnel: list[dict] = [
             {"stage": "三路召回去重", "count": len(per_result)},
@@ -371,7 +385,9 @@ class HybridRetriever(BaseRetriever):
         rerank_candidates = fused[:config.rerank_candidate_k]
         funnel.append({"stage": "Rerank 候选", "count": len(rerank_candidates)})
         try:
-            reranked = await self._rerank(query, rerank_candidates, top_k, config)
+            reranked = await self._rerank(
+                query, rerank_candidates, top_k, config, apply_filter=apply_rerank_filter
+            )
         except Exception as e:
             logger.warning("[Trace] Reranker 异常，跳过重排序: %s", e)
             reranked = fused[:top_k]
@@ -404,7 +420,7 @@ class HybridRetriever(BaseRetriever):
 
     async def rerank_and_expand(
         self, query: str, results: list[RetrievalResult], top_k: int = 10,
-        tenant_id: str | None = None
+        tenant_id: str | None = None, apply_rerank_filter: bool = True
     ) -> list[RetrievalResult]:
         """对已合并的结果执行 rerank 精排 + 父块扩展
 
@@ -433,7 +449,9 @@ class HybridRetriever(BaseRetriever):
         rerank_candidates = results[: config.rerank_candidate_k]
 
         try:
-            reranked = await self._rerank(query, rerank_candidates, top_k, config)
+            reranked = await self._rerank(
+                query, rerank_candidates, top_k, config, apply_filter=apply_rerank_filter
+            )
             print(f"[Retrieval] 统一 Rerank 后: {len(reranked)} 条")
         except Exception as e:
             logger.warning("Reranker 异常，跳过重排序: %s", e)
@@ -700,6 +718,7 @@ class HybridRetriever(BaseRetriever):
         results: list[RetrievalResult],
         top_k: int,
         config: RetrievalConfig | None = None,
+        apply_filter: bool = True,
     ) -> list[RetrievalResult]:
         """调用 Reranker 对融合结果精排，返回 top_k 结果
 
@@ -713,6 +732,10 @@ class HybridRetriever(BaseRetriever):
         Args:
             config: 本次检索的 ``RetrievalConfig`` 快照。为 None 时（兼容旧调用点 / 单测）
                 用全 Safe_Default 配置，使阈值过滤行为可预期。
+            apply_filter: 是否应用软阈值过滤（默认 True，问答链路保持防幻觉过滤）。
+                对外「纯检索召回」接口（/retrieval/search、/test）传 False：软阈值是为问答
+                避免把低相关内容喂给 LLM 而设，检索召回接口应返回 rerank 排序后的 top_k 由
+                调用方按分数自行取舍，不应被问答阈值静默滤空（否则短/泛 query 常被兜底也救不回）。
         """
         if not results:
             return []
@@ -750,7 +773,9 @@ class HybridRetriever(BaseRetriever):
         reranked.sort(key=lambda x: x.score, reverse=True)
 
         # 软阈值过滤 + 多重兜底（B2）：作用在 rerank 原始分数上，返回前统一应用。
-        reranked = self._apply_rerank_filter(reranked, config)
+        # 纯检索召回接口传 apply_filter=False 跳过此过滤，直接返回 rerank 排序结果。
+        if apply_filter:
+            reranked = self._apply_rerank_filter(reranked, config)
         return reranked
 
     @staticmethod

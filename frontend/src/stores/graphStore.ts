@@ -4,6 +4,7 @@ import {
   graphApi,
   type GraphEdge,
   type GraphEntityDetail,
+  type GraphEventDetail,
   type GraphMeta,
   type GraphNode,
 } from '../lib/api'
@@ -52,6 +53,10 @@ interface GraphState {
   selected: GraphEntityDetail | null
   selectedLoading: boolean
 
+  // —— 选中事件详情（懒加载，事件中心图谱） ——
+  selectedEvent: GraphEventDetail | null
+  selectedEventLoading: boolean
+
   // —— 加载 / 错误 / 不可用 ——
   loading: boolean
   error: string | null
@@ -71,6 +76,8 @@ interface GraphState {
   toggleTypeVisibility: (type: string) => void
   /** 点击节点：选中并懒加载实体详情 */
   selectNode: (entityId: string) => Promise<void>
+  /** 点击事件节点：选中并懒加载事件详情（事件中心图谱） */
+  selectEvent: (eventId: string) => Promise<void>
   /** Shift+单击：bloom 展开某节点邻居（depth=1）并并入当前画布，不开抽屉 */
   bloomNode: (center: string) => Promise<void>
   /** 关闭实体详情抽屉（清空选中） */
@@ -92,6 +99,8 @@ const EMPTY_RESULT = {
   meta: null as GraphMeta | null,
   selected: null as GraphEntityDetail | null,
   selectedLoading: false,
+  selectedEvent: null as GraphEventDetail | null,
+  selectedEventLoading: false,
   error: null as string | null,
   unavailable: false,
 }
@@ -184,13 +193,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   selectNode: async (entityId) => {
     const { kbId } = get()
     if (!kbId) return
-    set({ selectedLoading: true })
+    set({ selectedLoading: true, selectedEvent: null })
     try {
       const detail = await graphApi.getGraphEntity(kbId, entityId)
       set({ selected: detail, selectedLoading: false })
     } catch (err) {
       const { message } = classifyError(err)
       set({ selectedLoading: false, error: message })
+    }
+  },
+
+  selectEvent: async (eventId) => {
+    const { kbId } = get()
+    if (!kbId) return
+    // 选中事件时清掉实体选中态（两个抽屉互斥，同一时刻只展示一个）。
+    set({ selectedEventLoading: true, selected: null })
+    try {
+      const detail = await graphApi.getGraphEvent(kbId, eventId)
+      set({ selectedEvent: detail, selectedEventLoading: false })
+    } catch (err) {
+      const { message } = classifyError(err)
+      set({ selectedEventLoading: false, error: message })
     }
   },
 
@@ -228,7 +251,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
-  clearSelected: () => set({ selected: null }),
+  clearSelected: () => set({ selected: null, selectedEvent: null }),
 
   reset: () =>
     set({

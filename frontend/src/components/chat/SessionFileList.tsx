@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X, FileText, AlertTriangle, CheckCircle2, Image as ImageIcon } from 'lucide-react'
+import { X, FileText, AlertTriangle, CheckCircle2, Clock, Image as ImageIcon } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
@@ -40,9 +40,13 @@ interface ChipModel {
   key: string
   filename: string
   sizeBytes: number | null
-  status: 'completed' | 'processing' | 'failed'
+  status: 'queued' | 'completed' | 'processing' | 'failed'
   chunkCount?: number
   errorMessage?: string
+  /** 建索引进度 0-100（processing 阶段由 worker 推送） */
+  progress?: number
+  /** 当前阶段人类可读描述（优先于「处理中 N%」展示） */
+  progressMessage?: string
   /** 取消/移除该 chip 的行为（全状态可取消，悬浮时由状态图标处触发） */
   onCancel: () => void
   /** 取消按钮的无障碍文案（上传中=取消上传 / 其余=移除） */
@@ -67,6 +71,7 @@ function formatSize(bytes: number | null | undefined): string {
 }
 
 const STATUS_TEXT: Record<ChipModel['status'], string> = {
+  queued: '排队中',
   completed: '已就绪',
   processing: '处理中',
   failed: '失败',
@@ -74,6 +79,8 @@ const STATUS_TEXT: Record<ChipModel['status'], string> = {
 
 // 不同状态用不同边框/底色区分（Req：分状态给不同的边框）。
 const STATUS_CHIP_CLASS: Record<ChipModel['status'], string> = {
+  queued:
+    'bg-amber-500/5 border-amber-500/40 text-foreground',
   completed:
     'bg-card border-border text-foreground hover:border-primary/40 hover:bg-muted/40',
   processing:
@@ -118,19 +125,26 @@ function SessionFileList({
     const ext = (f.file_type || fileExt(f.filename)).toLowerCase()
     // 已完成 + 有会话上下文 + 支持的类型（含图片）→ 点击 chip 在 Artifact 面板预览。
     const previewable = f.status === 'completed' && !!sessionId && isPreviewable(ext)
+    const status: ChipModel['status'] =
+      f.status === 'queued'
+        ? 'queued'
+        : f.status === 'processing'
+          ? 'processing'
+          : f.status === 'failed'
+            ? 'failed'
+            : 'completed'
     return {
       key: f.id,
       filename: f.filename,
       sizeBytes: f.file_size,
-      status:
-        f.status === 'processing'
-          ? 'processing'
-          : f.status === 'failed'
-            ? 'failed'
-            : 'completed',
+      status,
       chunkCount: f.chunk_count,
+      progress: typeof f.progress === 'number' ? f.progress : undefined,
+      progressMessage: f.progress_message ?? undefined,
+      errorMessage: f.error_message ?? undefined,
       onCancel: () => onRemove(f.id),
-      cancelLabel: f.status === 'processing' ? `取消上传 ${f.filename}` : `移除 ${f.filename}`,
+      cancelLabel:
+        f.status === 'completed' ? `移除 ${f.filename}` : `取消上传 ${f.filename}`,
       onPreview: previewable
         ? () =>
             openArtifact({
@@ -166,7 +180,14 @@ function SessionFileList({
     const sz = formatSize(c.sizeBytes)
     if (sz) parts.push(sz)
     if (typeof c.chunkCount === 'number' && c.chunkCount > 0) parts.push(`${c.chunkCount} 段`)
-    parts.push(STATUS_TEXT[c.status])
+    if (c.status === 'processing') {
+      // 处理中：优先展示阶段描述，否则回退「处理中 N%」（有进度时带百分比）。
+      if (c.progressMessage) parts.push(c.progressMessage)
+      else if (typeof c.progress === 'number' && c.progress > 0) parts.push(`处理中 ${c.progress}%`)
+      else parts.push(STATUS_TEXT[c.status])
+    } else {
+      parts.push(STATUS_TEXT[c.status])
+    }
     return parts.join(' · ')
   }
 
@@ -194,9 +215,11 @@ function SessionFileList({
             </button>
           )
 
-          // 状态图标（默认态）：处理中转圈 / 失败警告 / 图片或文件图标。
+          // 状态图标（默认态）：排队时钟 / 处理中转圈 / 失败警告 / 图片或文件图标。
           const statusIcon =
-            c.status === 'processing' ? (
+            c.status === 'queued' ? (
+              <Clock className="h-3.5 w-3.5 text-amber-500" />
+            ) : c.status === 'processing' ? (
               <Spinner size="sm" />
             ) : c.status === 'failed' ? (
               <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
@@ -251,9 +274,13 @@ function SessionFileList({
 
                   <span className="truncate font-medium">{c.filename}</span>
 
-                  {/* 尾随状态标识：就绪=绿勾；图片处理中补转圈。悬浮时（图片 chip）让位给前导取消按钮，此处隐藏。 */}
+                  {/* 尾随状态标识：就绪=绿勾；处理中带进度时显示百分比；图片处理中补转圈。
+                      悬浮时（图片 chip）让位给前导取消按钮，此处隐藏。 */}
                   {!showCancel && c.status === 'completed' && (
                     <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                  )}
+                  {!showCancel && c.status === 'processing' && typeof c.progress === 'number' && c.progress > 0 && (
+                    <span className="shrink-0 text-[11px] tabular-nums text-primary/80">{c.progress}%</span>
                   )}
                   {!showCancel && c.status === 'processing' && canPreview && (
                     <Spinner size="sm" className="shrink-0" />

@@ -7,11 +7,12 @@
 // fit 经 onFit（→ 父组件命令式 canvas.fitToView）。组件内不发起请求。
 
 import { Maximize2 } from 'lucide-react'
+import { useMemo } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
-import { colorForType } from './graphColors'
+import { colorForType, getEventColors, EVENT_LAYER_LABEL } from './graphColors'
 
 interface Props {
   /** 当前图中出现的类型（去重，按出现顺序），用于生成图例项 */
@@ -29,10 +30,34 @@ interface Props {
  */
 export default function GraphLegend({ types, hiddenTypes, onToggleType, onFit }: Props) {
   const hidden = new Set(hiddenTypes)
+  // 事件层（后端 type='event'）与实体类型分开渲染：改名「事件脉络」+ 主题事件色，
+  // 消除与实体类型「事件」的语义/配色冲突。
+  const hasEventLayer = types.includes('event')
+  const entityTypes = types.filter((t) => t !== 'event')
+  const eventColors = useMemo(() => getEventColors(), [])
 
   return (
     <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-1.5">
-      {types.map((type) => {
+      {/* 事件层图例：置于首位（事件是图谱中心）。与实体类型同款边框，仅用色块颜色区分。 */}
+      {hasEventLayer && (
+        <button
+          type="button"
+          onClick={() => onToggleType('event')}
+          className={cn(
+            'pointer-events-auto flex items-center gap-1.5 rounded-full border bg-card/90 px-2.5 py-1 text-xs font-medium shadow-sm backdrop-blur transition-opacity',
+            hidden.has('event') ? 'opacity-40' : 'opacity-100',
+          )}
+          title={hidden.has('event') ? `点击显示「${EVENT_LAYER_LABEL}」` : `点击隐藏「${EVENT_LAYER_LABEL}」`}
+        >
+          <span
+            className="h-2.5 w-2.5 rounded-full"
+            style={{ backgroundColor: eventColors.fill }}
+          />
+          <span className={cn(hidden.has('event') && 'line-through')}>{EVENT_LAYER_LABEL}</span>
+        </button>
+      )}
+
+      {entityTypes.map((type) => {
         const isHidden = hidden.has(type)
         return (
           <button

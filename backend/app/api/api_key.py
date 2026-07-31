@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import generate_api_key, get_key_prefix, hash_key
+from app.auth.signing import derive_signing_secret
 from app.api.deps import (
     get_db_session,
     require_authenticated,
@@ -72,11 +73,15 @@ class UpdateScopeRequest(BaseModel):
 class CreateApiKeyResponse(BaseModel):
     """创建响应（含明文，仅此一次）"""
     id: str
-    key: str = Field(description="完整 API Key，仅在创建时返回")
+    key: str = Field(description="完整 API Key（Bearer 通道明文），仅在创建时返回")
     prefix: str
     name: Optional[str] = None
     key_type: str
     created_at: datetime
+    # AK/SK 签名通道凭据（aksk-signing）：AK=id（可公开），SK 由 jwt_secret 派生、不落库，
+    # 仅创建时返回一次。可信调用方用 SK 对每次请求做 HMAC 签名，免明文密钥上行。
+    access_key: str = Field(description="签名通道 AK（= id，可公开）")
+    secret_key: str = Field(description="签名通道 SK，仅在创建时返回一次，请妥善保存")
 
 
 class ApiKeyItem(BaseModel):
@@ -156,6 +161,7 @@ async def create_tenant_key(
     return CreateApiKeyResponse(
         id=key_id, key=raw_key, prefix=api_key.prefix, name=api_key.name,
         key_type=api_key.key_type, created_at=api_key.created_at,
+        access_key=key_id, secret_key=derive_signing_secret(key_id),
     )
 
 
@@ -222,6 +228,7 @@ async def create_user_key(
     return CreateApiKeyResponse(
         id=key_id, key=raw_key, prefix=api_key.prefix, name=api_key.name,
         key_type=api_key.key_type, created_at=api_key.created_at,
+        access_key=key_id, secret_key=derive_signing_secret(key_id),
     )
 
 
@@ -263,6 +270,7 @@ async def create_proxy_key(
     return CreateApiKeyResponse(
         id=key_id, key=raw_key, prefix=api_key.prefix, name=api_key.name,
         key_type=api_key.key_type, created_at=api_key.created_at,
+        access_key=key_id, secret_key=derive_signing_secret(key_id),
     )
 
 

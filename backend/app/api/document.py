@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,11 +19,18 @@ from app.api.validators import NameValidationError, validate_filename, validate_
 from app.auth.identity import IdentityContext
 from app.auth.kb_authz import GrantView, KbAccessEnum, kb_authorization_decision
 from app.models.manager import get_model_manager
-from app.pipeline.ocr.manager import OCRManager
 from app.pipeline.pipeline import DocumentPipeline
 from app.pipeline.queue import TaskMessage, TaskQueue
 from app.schema.api import PageResult
-from app.schema.db import Chunk, Document, Folder, KnowledgeBase, KnowledgeBaseGrant, OCRConfig
+from app.schema.db import (
+    Chunk,
+    Document,
+    Folder,
+    KnowledgeBase,
+    KnowledgeBaseGrant,
+    SessionChunk,
+    SessionFile,
+)
 from app.session_upload.limits import get_upload_limit_resolver
 from app.storage.database import async_session
 from app.storage.milvus import MilvusClient, get_milvus_client
@@ -140,7 +147,7 @@ router = APIRouter(tags=["Document"])
 
 # 支持的文件类型（含音频，音频走 ASR 语音转写链路）
 _ALLOWED_EXTENSIONS = {
-    "pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png",
+    "pdf", "doc", "docx", "xlsx", "pptx", "csv", "txt", "md", "jpg", "jpeg", "png",
     "mp3", "wav", "m4a", "flac", "ogg",
 }
 
@@ -285,6 +292,21 @@ def _get_milvus() -> MilvusClient:
     return get_milvus_client()
 
 
+async def _describe_doc_location(db: AsyncSession, folder_id: str | None) -> str:
+    """把文档所在位置翻译成用户可读描述，用于「文件已存在」提示。
+
+    去重为 KB 级（同一知识库内相同内容只保留一份，与 WeKnora 一致），命中的既有
+    文档可能不在用户当前所处文件夹，故提示需带上它的实际位置，避免用户在当前文件夹
+    看不到该文件时的困惑。folder_id 为空或文件夹已不存在时归为「根目录」。
+    """
+    if not folder_id:
+        return "根目录"
+    folder = await db.get(Folder, folder_id)
+    if folder is None:
+        return "根目录"
+    return f"「{folder.name}」文件夹"
+
+
 async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
     """后台执行文档处理管道"""
     try:
@@ -292,16 +314,10 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
         manager = get_model_manager()
         milvus = _get_milvus()
 
-        # 从数据库加载 OCR 配置
-        ocr_manager = None
-        async with async_session() as session:
-            result = await session.execute(select(OCRConfig))
-            configs = result.scalars().all()
-        if configs:
-            ocr_manager = OCRManager(configs)
+        # 从数据库加载 OCR / ASR 配置（本降级路径每篇文档重建，本就取最新配置）
+        from app.startup import load_asr_manager, load_ocr_manager
 
-        # 从数据库加载 ASR 配置
-        from app.startup import load_asr_manager
+        ocr_manager = await load_ocr_manager()
         asr_manager = await load_asr_manager()
 
         pipeline = DocumentPipeline(
@@ -534,6 +550,7 @@ async def upload_document(
     )
     existing_doc = existing.scalar_one_or_none()
     if existing_doc is not None:
+        location = await _describe_doc_location(db, existing_doc.folder_id)
         return DocumentResponse(
             id=existing_doc.id,
             kb_id=existing_doc.kb_id,
@@ -541,7 +558,7 @@ async def upload_document(
             file_type=existing_doc.file_type,
             file_size=existing_doc.file_size,
             status="duplicate",
-            error_message=f"文件已存在（与 {existing_doc.filename} 内容相同）",
+            error_message=f"该文件已存在于{location}（与 {existing_doc.filename} 内容相同）",
             chunk_count=existing_doc.chunk_count,
             created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
         )
@@ -676,6 +693,7 @@ async def import_document_from_url(
     )
     existing_doc = existing.scalar_one_or_none()
     if existing_doc is not None:
+        location = await _describe_doc_location(db, existing_doc.folder_id)
         return DocumentResponse(
             id=existing_doc.id,
             kb_id=existing_doc.kb_id,
@@ -683,7 +701,7 @@ async def import_document_from_url(
             file_type=existing_doc.file_type,
             file_size=existing_doc.file_size,
             status="duplicate",
-            error_message=f"内容已存在（与 {existing_doc.filename} 相同）",
+            error_message=f"该内容已存在于{location}（与 {existing_doc.filename} 相同）",
             chunk_count=existing_doc.chunk_count,
             created_at=existing_doc.created_at.isoformat() if existing_doc.created_at else "",
         )
@@ -1337,9 +1355,13 @@ async def upload_folder(
     await db.flush()
 
     # 3. 逐个处理文件
+    import hashlib
+
     results: list[FolderUploadResultItem] = []
     uploaded_count = 0
     skipped_count = 0
+    # 批次内已入库的内容哈希，避免同一批里多份相同内容重复落库（DB 查重只覆盖已提交记录）。
+    seen_hashes: set[str] = set()
 
     for file, rel_path in zip(files, path_list):
         parts = rel_path.replace("\\", "/").split("/")
@@ -1379,12 +1401,38 @@ async def upload_folder(
 
         object_key: str | None = None
         try:
+            content = await file.read()
+            file_size = len(content)
+
+            # KB 级内容去重（与单文件上传一致）：命中既有文档或同批已入库内容则跳过，
+            # 不重复落 MinIO / 建记录 / 切片向量化。提示带既有文件的实际位置。
+            file_hash = hashlib.sha256(content).hexdigest()
+            existing = await db.execute(
+                select(Document).where(
+                    Document.kb_id == kb_id,
+                    Document.file_hash == file_hash,
+                )
+            )
+            existing_doc = existing.scalar_one_or_none()
+            if existing_doc is not None or file_hash in seen_hashes:
+                skipped_count += 1
+                if existing_doc is not None:
+                    location = await _describe_doc_location(db, existing_doc.folder_id)
+                    msg = f"该文件已存在于{location}（与 {existing_doc.filename} 内容相同）"
+                else:
+                    msg = "该文件与本次上传的另一文件内容相同，已跳过"
+                results.append(FolderUploadResultItem(
+                    relative_path=rel_path,
+                    filename=filename,
+                    status="skipped",
+                    message=msg,
+                ))
+                continue
+
             # 保存文件到 MinIO（权威存储）
             doc_id = str(uuid.uuid4())
             object_key = document_object_key(doc_id, ext)
 
-            content = await file.read()
-            file_size = len(content)
             store = get_object_store()
             if store is None:
                 raise RuntimeError("对象存储不可用")
@@ -1401,10 +1449,12 @@ async def upload_folder(
                 filename=filename,
                 file_type=ext,
                 file_size=file_size,
+                file_hash=file_hash,
                 status="pending",
                 tenant_id=kb.tenant_id,
             )
             db.add(doc)
+            seen_hashes.add(file_hash)
 
             # 更新知识库文档计数
             kb.doc_count = (kb.doc_count or 0) + 1
@@ -1520,6 +1570,7 @@ async def get_document_raw_file(
         "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
         "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8",
         "csv": "text/csv; charset=utf-8",
+        "doc": "application/msword",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -1606,6 +1657,88 @@ async def list_document_chunks(
         page_size=page_size,
         has_more=offset + len(items) < total,
     )
+
+
+class FileContentResponse(BaseModel):
+    """按 fileId 统一返回解析后原文文本（跨 KB 文档 / 会话临时文件两类来源）。
+
+    ``source`` 标明该 id 命中的来源：``document``（KB 文档）或 ``session_file``（会话临时
+    文件）。``content`` 为父块按 ``chunk_index`` 有序拼接的完整解析文本；文件未建索引完成
+    （``status != completed``）时可能为空串。此处返回解析后可读文本，与原件字节流
+    （``/raw``）区分。
+    """
+
+    file_id: str = Field(..., description="文件 ID（入参回显）")
+    source: str = Field(..., description="来源：document（KB 文档）| session_file（会话临时文件）")
+    filename: str = Field(..., description="原始文件名")
+    file_type: str | None = Field(None, description="文件类型扩展名（小写，无点）")
+    status: str = Field(..., description="文件状态")
+    content: str = Field(..., description="解析后的完整原文文本（父块按 chunk_index 有序拼接）")
+
+
+@router.get("/api/files/{file_id}/content", response_model=FileContentResponse)
+async def get_file_content_by_id(
+    file_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """按 fileId 返回解析后的原文文本，自动识别「KB 文档」与「会话临时文件」两类来源。
+
+    统一入口：第三方从 references / 上传回执拿到的 id 可能是 KB 文档（``Document.id``）
+    或会话临时文件（``SessionFile.id``），二者均为全局唯一 UUID，不撞号，故按「先文档、
+    后会话文件」顺序解析：
+
+    1. KB 文档：``select(Document)`` 命中即从 ``Chunk`` 父块（``parent_id is None``）按
+       ``chunk_index`` 拼接。跨租户由仓储层方案 B 兜底过滤自动不可见（→ 落到 404）。
+    2. 会话临时文件：``select(SessionFile)`` 命中后再校验归属
+       （``owner_user_id == acting_subject_id``）。外部用户共享同一租户，租户过滤不足以
+       区分不同外部用户，必须叠加归属校验；从 ``SessionChunk`` 父块拼接。
+    3. 两类均未命中 / 归属不符 → ``404``（存在性非泄露，与既有内容端点一致）。
+
+    内容边界：``_ensure_not_super_admin_content`` 禁止超管默认查看正文（与 ``/chunks`` 一致）。
+    """
+    _ensure_not_super_admin_content(identity)
+
+    # 1) 先按 KB 文档解析（方案 B 租户兜底过滤保证跨租户不可见 → 404）
+    doc = (
+        await db.execute(select(Document).where(Document.id == file_id))
+    ).scalar_one_or_none()
+    if doc is not None:
+        rows = await db.execute(
+            select(Chunk.content)
+            .where(Chunk.doc_id == file_id, Chunk.parent_id.is_(None))
+            .order_by(Chunk.chunk_index)
+        )
+        return FileContentResponse(
+            file_id=doc.id,
+            source="document",
+            filename=doc.filename,
+            file_type=doc.file_type,
+            status=doc.status,
+            content="\n\n".join(rows.scalars().all()),
+        )
+
+    # 2) 再按会话临时文件解析（租户兜底过滤 + 归属校验，缺一不可）
+    sf = (
+        await db.execute(select(SessionFile).where(SessionFile.id == file_id))
+    ).scalar_one_or_none()
+    if sf is not None and sf.owner_user_id == identity.acting_subject_id:
+        rows = await db.execute(
+            select(SessionChunk.content)
+            .where(SessionChunk.file_id == file_id, SessionChunk.parent_id.is_(None))
+            .order_by(SessionChunk.chunk_index)
+        )
+        return FileContentResponse(
+            file_id=sf.id,
+            source="session_file",
+            filename=sf.filename,
+            file_type=sf.file_type,
+            status=sf.status,
+            content="\n\n".join(rows.scalars().all()),
+        )
+
+    # 3) 都未命中 / 归属不符 → 404（存在性非泄露）
+    raise CrossTenantError()
 
 
 # 文档详情事件列表单次返回上限（避免大文档一次拉爆，前端展示足够）。

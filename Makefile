@@ -1,5 +1,5 @@
 .PHONY: install install-backend install-frontend install-graph dev dev-backend dev-worker dev-frontend \
-	infra infra-graph infra-down test clean build build-app
+	infra infra-graph infra-down test clean build build-app build-graph build-app-graph
 
 # Python 解释器（可通过 make install-backend PYTHON=python3.12 覆盖）
 PYTHON ?= python3

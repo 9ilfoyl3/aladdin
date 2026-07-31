@@ -232,10 +232,11 @@ class DocumentPipeline:
                 and (not stripped_content or len(stripped_content) < 10)
                 and self.ocr_manager
             )
-            has_embedded_images = bool(load_result.images and self.ocr_manager)
-
             if needs_ocr:
-                ocr_result = await self._recognize_with_limit(file_path)
+                # recognize_document 按 Provider 能力准备输入：接受 PDF 的服务整文件直送，
+                # 只接受图片的服务（如 PaddleOCR）由其内部按页渲染整页图片后逐页识别。
+                # pipeline 不感知能力细节，也不再靠"返回空再回落"在运行时试探。
+                ocr_result = await self.ocr_manager.recognize_document(file_path)
                 load_result = LoadResult(
                     content=ocr_result.full_text,
                     metadata={
@@ -301,7 +302,7 @@ class DocumentPipeline:
                 and not needs_ocr
                 and not is_audio
             ):
-                ocr_result = await self._recognize_with_limit(file_path)
+                ocr_result = await self.ocr_manager.recognize_document(file_path)
                 final_content = ocr_result.full_text
                 load_result = LoadResult(
                     content=final_content,
@@ -310,6 +311,17 @@ class DocumentPipeline:
                         "ocr_provider": ocr_result.provider_name,
                     },
                     images=[],
+                )
+
+            # OCR / 转写 / 清洗全部走完仍无内容 → 明确失败，而不是入库一个 0 chunk 的空文档。
+            # 常见成因：OCR 服务不支持该文件类型（如只收图片的服务收到 PDF），
+            # 或扫描件质量过差。此处给出可操作的提示，避免"处理成功但检索不到"。
+            if not final_content.strip() and not load_result.pre_chunked:
+                from app.api.errors import EmptyDocumentContentError
+
+                raise EmptyDocumentContentError(
+                    "文档未提取到任何文本："
+                    "若为扫描件请确认 OCR 服务可用且支持该文件类型"
                 )
 
             # ─── 3. Chunk ───
@@ -1113,16 +1125,6 @@ class DocumentPipeline:
 
         return final_content
 
-    async def _recognize_with_limit(self, file_path: str):
-        """整文件 OCR：通过进程级全局 OCR 信号量限流后调用 ocr_manager.recognize。
-
-        与图片 OCR 共用同一个全局信号量，保证无论多少文档并发，对远程 OCR
-        服务的总并发恒定可控。
-        """
-        from app.pipeline.concurrency import get_ocr_semaphore
-        async with get_ocr_semaphore():
-            return await self.ocr_manager.recognize(file_path)
-
     async def _transcribe_with_limit(self, file_path: str):
         """整文件 ASR：通过进程级全局 ASR 信号量限流后调用 asr_manager.transcribe。
 
@@ -1135,7 +1137,11 @@ class DocumentPipeline:
     async def _concurrent_ocr_images(
         self, images: list[EmbeddedImage], doc_id: str
     ) -> list[str]:
-        """并发调用 OCR 识别多张图片，使用进程级全局 OCR 信号量控制并发数
+        """并发调用 OCR 识别多张嵌入图片
+
+        并发上限由 ``OCRManager.recognize`` 内部的进程级全局 OCR 信号量统一控制
+        （限流职责归 Manager，此处不再自持信号量——否则与 Manager 内层形成嵌套，
+        在并发度为 1 时会自锁）。
 
         Args:
             images: 嵌入图片列表
@@ -1144,27 +1150,23 @@ class DocumentPipeline:
         Returns:
             与 images 等长的列表，每个元素为 OCR 识别文本（失败为空字符串）
         """
-        from app.pipeline.concurrency import get_ocr_semaphore
-        # 进程级全局 OCR 信号量：所有文档的所有图片共享，保护远程 OCR 服务。
-        semaphore = get_ocr_semaphore()
 
         async def _ocr_single(idx: int, img: EmbeddedImage) -> str:
-            async with semaphore:
-                try:
-                    ocr_result = await self.ocr_manager.recognize(img.file_path)
-                    text = ocr_result.full_text.strip()
-                    if text:
-                        logger.debug(
-                            "文档 %s 图片 %d/%d OCR 成功，文本长度: %d",
-                            doc_id, idx + 1, len(images), len(text),
-                        )
-                    return text
-                except Exception as e:
-                    logger.warning(
-                        "文档 %s 图片 %d/%d OCR 失败: %s",
-                        doc_id, idx + 1, len(images), e,
+            try:
+                ocr_result = await self.ocr_manager.recognize(img.file_path)
+                text = ocr_result.full_text.strip()
+                if text:
+                    logger.debug(
+                        "文档 %s 图片 %d/%d OCR 成功，文本长度: %d",
+                        doc_id, idx + 1, len(images), len(text),
                     )
-                    return ""
+                return text
+            except Exception as e:
+                logger.warning(
+                    "文档 %s 图片 %d/%d OCR 失败: %s",
+                    doc_id, idx + 1, len(images), e,
+                )
+                return ""
 
         tasks = [_ocr_single(i, img) for i, img in enumerate(images)]
         results = await asyncio.gather(*tasks)
