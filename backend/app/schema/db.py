@@ -165,7 +165,9 @@ class OCRConfig(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    provider_type: Mapped[str] = mapped_column(String, nullable=False)  # external_api | textin
+    # vl | paddle | mineru：取值域由 app.pipeline.ocr.registry 的 Provider 注册表派生。
+    # 不在注册表内的存量取值运行时被 OCRManager 跳过，配置接口标记为无效待重建。
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)
     api_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timeout: Mapped[float] = mapped_column(Float, default=30.0)

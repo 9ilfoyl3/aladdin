@@ -564,6 +564,8 @@ export interface OCRConfigItem {
   id: string
   name: string
   provider_type: string
+  /** provider_type 是否在后端 Provider 注册表内，false 表示该配置已失效需重建 */
+  provider_type_valid: boolean
   api_url: string
   api_key_set: boolean
   timeout: number
@@ -574,15 +576,39 @@ export interface OCRConfigItem {
   updated_at: string
 }
 
+/** OCR 服务类型元数据（能力与展示信息由后端注册表派生，前端不硬编码） */
+export interface OCRProviderTypeMeta {
+  provider_type: string
+  label: string
+  summary: string
+  api_url_example: string
+  accepts: string[]
+  accepts_pdf: boolean
+  outputs_markdown: boolean
+  recommended_timeout: number
+  extra_config_keys: Record<string, string>
+}
+
+/** 单种输入形态（image / pdf）的真实链路验证结果 */
+export interface OCRTestCheck {
+  input_kind: string
+  ok: boolean
+  elapsed_ms: number | null
+  text_preview: string | null
+  error: string | null
+}
+
 export interface OCRTestResult {
   success: boolean
   message: string
   elapsed_ms: number | null
+  checks?: OCRTestCheck[]
 }
 
 // OCR 服务配置接口
 export const ocrConfigApi = {
   list: () => request<OCRConfigItem[]>('/ocr-configs'),
+  providerTypes: () => request<OCRProviderTypeMeta[]>('/ocr-configs/provider-types'),
   create: (data: { name: string; provider_type: string; api_url: string; api_key?: string; timeout?: number; is_default?: boolean; is_fallback?: boolean; extra_config?: Record<string, unknown> }) =>
     request<OCRConfigItem>('/ocr-configs', {
       method: 'POST',
@@ -595,7 +621,7 @@ export const ocrConfigApi = {
     }),
   delete: (id: string) =>
     request<void>(`/ocr-configs/${id}`, { method: 'DELETE' }),
-  test: (data: { provider_type: string; api_url: string; api_key?: string; timeout?: number }) =>
+  test: (data: { provider_type: string; api_url: string; api_key?: string; timeout?: number; extra_config?: Record<string, unknown> }) =>
     request<OCRTestResult>('/ocr-configs/test', {
       method: 'POST',
       body: JSON.stringify(data),

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Globe, Loader2, CheckCircle, XCircle } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Shield, Zap, ScanText, Globe, Loader2, CheckCircle, XCircle, AlertTriangle, FileText, Image as ImageIcon } from 'lucide-react'
 import { ocrConfigApi } from '@/lib/api'
 import type { OCRConfigItem, OCRTestResult } from '@/lib/api'
 import { useConfirm } from '@/lib/confirm-context'
@@ -26,12 +26,58 @@ interface OCRFormData {
 
 const emptyForm: OCRFormData = {
   name: '',
-  provider_type: 'external_api',
+  provider_type: '',
   api_url: '',
   api_key: '',
-  timeout: '30',
+  timeout: '',
   is_default: false,
   is_fallback: false,
+}
+
+/** 输入形态的中文标签 */
+const INPUT_KIND_LABEL: Record<string, string> = {
+  image: '图片',
+  pdf: 'PDF',
+}
+
+/** 真实链路测试结果展示：总体结论 + 各输入形态明细（含识别文本片段） */
+function OcrTestResultPanel({ result }: { result: OCRTestResult }) {
+  return (
+    <div
+      className={`p-2.5 rounded-lg text-xs ${result.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}
+    >
+      <div className="flex items-start gap-1.5">
+        {result.success ? (
+          <CheckCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        ) : (
+          <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        )}
+        <span className="break-words">{result.message}</span>
+      </div>
+
+      {result.checks && result.checks.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {result.checks.map((check) => (
+            <div key={check.input_kind} className="pl-5">
+              <div className="flex items-center gap-1.5">
+                <span className="font-medium">{INPUT_KIND_LABEL[check.input_kind] ?? check.input_kind}</span>
+                <span>{check.ok ? '识别成功' : '失败'}</span>
+                {check.elapsed_ms != null && <span className="opacity-70">{Math.round(check.elapsed_ms)}ms</span>}
+              </div>
+              {check.text_preview && (
+                <p className="mt-0.5 font-mono opacity-80 break-all">识别文本: {check.text_preview}</p>
+              )}
+              {check.error && <p className="mt-0.5 opacity-90 break-words">{check.error}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {result.elapsed_ms != null && (
+        <p className="mt-1.5 opacity-70">总耗时: {Math.round(result.elapsed_ms)}ms</p>
+      )}
+    </div>
+  )
 }
 
 function OcrServices() {
@@ -51,6 +97,45 @@ function OcrServices() {
     queryFn: () => ocrConfigApi.list(),
   })
 
+  // 服务类型元数据（能力说明 / 地址示例 / 推荐超时）由后端注册表提供
+  const { data: providerTypes = [] } = useQuery({
+    queryKey: ['ocr-provider-types'],
+    queryFn: () => ocrConfigApi.providerTypes(),
+    staleTime: Infinity,
+  })
+
+  const metaByType = new Map(providerTypes.map((m) => [m.provider_type, m]))
+  const selectedMeta = metaByType.get(form.provider_type)
+
+  // 新建时默认选中第一种类型，并带出其推荐超时
+  useEffect(() => {
+    if (!showDialog || editingItem || form.provider_type || providerTypes.length === 0) return
+    const first = providerTypes[0]
+    setForm((prev) => ({
+      ...prev,
+      provider_type: first.provider_type,
+      timeout: String(first.recommended_timeout),
+    }))
+  }, [showDialog, editingItem, form.provider_type, providerTypes])
+
+  // 超时留空时按所选类型的推荐值兜底
+  function resolveTimeout(data: OCRFormData): number {
+    const parsed = parseFloat(data.timeout)
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed
+    return metaByType.get(data.provider_type)?.recommended_timeout ?? 60
+  }
+
+  // 切换服务类型时，把超时同步为该类型的推荐值（不同服务耗时量级差异很大）
+  function handleProviderTypeChange(value: string) {
+    const meta = metaByType.get(value)
+    setForm((prev) => ({
+      ...prev,
+      provider_type: value,
+      timeout: meta ? String(meta.recommended_timeout) : prev.timeout,
+    }))
+    setDialogTestResult(null)
+  }
+
   const createMutation = useMutation({
     mutationFn: (data: OCRFormData) => {
       return ocrConfigApi.create({
@@ -58,7 +143,7 @@ function OcrServices() {
         provider_type: data.provider_type,
         api_url: data.api_url,
         api_key: data.api_key || undefined,
-        timeout: parseFloat(data.timeout) || 30,
+        timeout: resolveTimeout(data),
         is_default: data.is_default,
         is_fallback: data.is_fallback,
       })
@@ -78,7 +163,7 @@ function OcrServices() {
         name: data.name,
         provider_type: data.provider_type,
         api_url: data.api_url,
-        timeout: parseFloat(data.timeout) || 30,
+        timeout: resolveTimeout(data),
         is_default: data.is_default,
         is_fallback: data.is_fallback,
       }
@@ -170,7 +255,7 @@ function OcrServices() {
           provider_type: form.provider_type,
           api_url: form.api_url,
           api_key: form.api_key || undefined,
-          timeout: parseFloat(form.timeout) || 30,
+          timeout: parseFloat(form.timeout) || selectedMeta?.recommended_timeout || 60,
         })
       }
       setDialogTestResult(result)
@@ -203,7 +288,7 @@ function OcrServices() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">OCR 服务管理</h1>
-          <p className="text-muted-foreground text-sm mt-1">配置远程 OCR 服务（TextIn / 通用外部 API），支持默认 + 备用自动切换</p>
+          <p className="text-muted-foreground text-sm mt-1">配置远程 OCR 服务（VL / PaddleOCR / MinerU），支持默认 + 备用自动切换</p>
         </div>
         <Button onClick={openCreate} className="gap-2 cursor-pointer">
           <Plus className="h-4 w-4" />
@@ -250,15 +335,32 @@ function OcrServices() {
               </div>
 
               {/* 名称 + Provider Type */}
-              <div className="flex items-center gap-2 mb-3">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <h3 className="font-semibold text-base truncate">{config.name}</h3>
-                <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
-                  {config.provider_type === 'textin' ? 'TextIn'
-                    : config.provider_type === 'external_api_paddle' ? 'PaddleOCR'
-                    : config.provider_type === 'external_api_vl' ? 'VL 模型'
-                    : '外部 API'}
-                </Badge>
+                {config.provider_type_valid ? (
+                  <Badge variant="outline" className="text-xs bg-primary/5 text-primary border-primary/20 shrink-0">
+                    {metaByType.get(config.provider_type)?.label ?? config.provider_type}
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="text-xs bg-red-50 text-red-700 border-red-200 shrink-0 gap-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    类型已失效
+                  </Badge>
+                )}
               </div>
+
+              {/* 能力标签 */}
+              {config.provider_type_valid && metaByType.get(config.provider_type) && (
+                <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+                  <Badge variant="outline" className="text-xs gap-1 text-muted-foreground">
+                    {metaByType.get(config.provider_type)!.accepts_pdf ? <FileText className="h-3 w-3" /> : <ImageIcon className="h-3 w-3" />}
+                    {metaByType.get(config.provider_type)!.accepts_pdf ? '直接支持 PDF' : '仅图片（PDF 按页渲染）'}
+                  </Badge>
+                  {metaByType.get(config.provider_type)!.outputs_markdown && (
+                    <Badge variant="outline" className="text-xs text-muted-foreground">保留版面 Markdown</Badge>
+                  )}
+                </div>
+              )}
 
               {/* 详细信息 */}
               <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
@@ -272,6 +374,14 @@ function OcrServices() {
                   <span className="text-foreground/60">超时:</span> {config.timeout}s
                 </p>
               </div>
+
+              {/* 失效类型提示：运行时会被跳过，必须重建 */}
+              {!config.provider_type_valid && (
+                <div className="mb-4 p-2.5 rounded-lg text-xs bg-red-50 text-red-700 border border-red-200">
+                  该配置的服务类型 <code className="font-mono">{config.provider_type}</code> 已不再支持，
+                  运行时会被跳过。请删除后按新类型重新创建。
+                </div>
+              )}
 
               {/* 操作按钮 */}
               <div className="flex items-center gap-1 pt-3 border-t border-border/60">
@@ -311,14 +421,8 @@ function OcrServices() {
 
               {/* 测试结果 */}
               {testResults[config.id] && (
-                <div className={`mt-3 p-2.5 rounded-lg text-xs ${testResults[config.id].success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-                  <div className="flex items-center gap-1.5">
-                    {testResults[config.id].success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                    <span>{testResults[config.id].message}</span>
-                  </div>
-                  {testResults[config.id].elapsed_ms != null && (
-                    <p className="mt-1 text-muted-foreground">耗时: {testResults[config.id].elapsed_ms}ms</p>
-                  )}
+                <div className="mt-3">
+                  <OcrTestResultPanel result={testResults[config.id]} />
                 </div>
               )}
             </div>
@@ -345,15 +449,16 @@ function OcrServices() {
             </div>
             <div>
               <Label>服务类型</Label>
-              <Select value={form.provider_type} onValueChange={(val) => setForm({ ...form, provider_type: val })}>
+              <Select value={form.provider_type} onValueChange={handleProviderTypeChange}>
                 <SelectTrigger className="mt-1.5">
-                  <SelectValue />
+                  <SelectValue placeholder="选择服务类型" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="textin">TextIn</SelectItem>
-                  <SelectItem value="external_api">外部 API（通用/自动探测）</SelectItem>
-                  <SelectItem value="external_api_paddle">外部 API（PaddleOCR）</SelectItem>
-                  <SelectItem value="external_api_vl">外部 API（VL 模型）</SelectItem>
+                  {providerTypes.map((meta) => (
+                    <SelectItem key={meta.provider_type} value={meta.provider_type}>
+                      {meta.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -362,10 +467,11 @@ function OcrServices() {
               <Input
                 value={form.api_url}
                 onChange={(e) => setForm({ ...form, api_url: e.target.value })}
-                placeholder="如：http://10.30.1.2:8909/parse"
+                placeholder={selectedMeta ? `如：${selectedMeta.api_url_example}` : '请先选择服务类型'}
                 className="mt-1.5"
                 required
               />
+              <p className="text-xs text-muted-foreground mt-1.5">需填写完整的识别接口路径，不是服务根地址</p>
             </div>
             <div>
               <Label>API Key</Label>
@@ -382,11 +488,16 @@ function OcrServices() {
                 type="number"
                 value={form.timeout}
                 onChange={(e) => setForm({ ...form, timeout: e.target.value })}
-                placeholder="30"
+                placeholder={selectedMeta ? String(selectedMeta.recommended_timeout) : '60'}
                 min={1}
-                max={300}
+                max={900}
                 className="mt-1.5"
               />
+              {selectedMeta && (
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  该类型推荐 {selectedMeta.recommended_timeout} 秒，多页扫描件耗时较长时请适当放大（上限 900）
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -409,18 +520,8 @@ function OcrServices() {
               <Label htmlFor="ocr_is_fallback" className="text-sm font-normal cursor-pointer">设为备用服务</Label>
             </div>
 
-            {/* 对话框内测试结果 */}
-            {dialogTestResult && (
-              <div className={`p-2.5 rounded-lg text-xs ${dialogTestResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-                <div className="flex items-center gap-1.5">
-                  {dialogTestResult.success ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                  <span>{dialogTestResult.message}</span>
-                </div>
-                {dialogTestResult.elapsed_ms != null && (
-                  <p className="mt-1 text-muted-foreground">耗时: {dialogTestResult.elapsed_ms}ms</p>
-                )}
-              </div>
-            )}
+            {/* 对话框内测试结果（真实链路：上传样张 → 识别 → 契约校验） */}
+            {dialogTestResult && <OcrTestResultPanel result={dialogTestResult} />}
 
             {/* 表单错误提示 */}
             {formError && (
