@@ -107,12 +107,20 @@ class ApiKeyAuthenticator:
         self, api_key: ApiKey, headers: Mapping[str, str]
     ) -> IdentityContext:
         """已定位到启用的 ApiKey 后的统一收尾：租户校验 + 判型合成 + 计数。"""
+        # 先把后续要用的标量快照到局部变量，之后一律用快照，不再回读 ORM 属性。
+        # 原因：代理 Key 分支里的外部用户懒创建可能触发 session.rollback()（唯一约束
+        # 竞态兜底），rollback 会 expire 会话内**所有**实例（``expire_on_commit=False``
+        # 只免除 commit 路径）；此后访问 api_key.id 会触发同步懒加载 IO，在 async 上下文
+        # 抛 MissingGreenlet 直接把请求打成 500。
+        api_key_id = api_key.id
+        key_tenant_id = api_key.tenant_id
+        key_type = api_key.key_type or ApiKeyTypeEnum.TENANT_LEVEL.value
+
         # 租户启用校验（停用 403）
-        if not await _tenant_active(self.session, api_key.tenant_id):
+        if not await _tenant_active(self.session, key_tenant_id):
             raise TenantDisabledError()
 
         # 按 key_type 分支
-        key_type = api_key.key_type or ApiKeyTypeEnum.TENANT_LEVEL.value
         if key_type == ApiKeyTypeEnum.EXTERNAL_AGENT.value:
             identity = await self._auth_external_agent(api_key, headers)
         elif key_type == ApiKeyTypeEnum.USER_LEVEL.value:
@@ -121,7 +129,7 @@ class ApiKeyAuthenticator:
             identity = self._auth_tenant_level(api_key)
 
         # 副作用：计数 + last_used
-        await _bump_usage(self.session, api_key.id)
+        await _bump_usage(self.session, api_key_id)
         return identity
 
     def _auth_tenant_level(self, api_key: ApiKey) -> IdentityContext:
@@ -176,17 +184,20 @@ class ApiKeyAuthenticator:
 
         # 命名空间隔离键：key_source = 该代理 Key 自身标识（api_key.id），
         # 与调用方传入的 external_user_id 组成复合键。
-        key_source = api_key.id
+        # 先取快照：懒创建内部的竞态兜底会 rollback，之后回读 api_key.id 会触发
+        # 懒加载 IO → MissingGreenlet（见 _finalize 的同类说明）。
+        api_key_id = api_key.id
         external_user = await self._get_or_create_external_user(
-            key_source, external_user_id_raw
+            api_key_id, external_user_id_raw
         )
+        external_user_pk = external_user.id
 
         return IdentityContext(
             source=IdentitySourceEnum.API_KEY,
             op_level=OperationLevelEnum.TENANT,
             tenant_id=EXTERNAL_USER_TENANT_ID,  # 硬锁定，忽略任何目标租户入口
-            external_user_id=external_user.id,
-            api_key_id=api_key.id,
+            external_user_id=external_user_pk,
+            api_key_id=api_key_id,
             role=TenantRoleEnum.MEMBER,  # 外部用户固定为 member
         )
 

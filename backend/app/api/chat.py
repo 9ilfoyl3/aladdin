@@ -108,6 +108,7 @@ def _resolve_retrieval_route(
     session_has_files: bool,
     skip_retrieval: bool,
     multi_kb_requested: bool = False,
+    external_tools_available: bool = False,
 ) -> Route:
     """统一路由决策纯函数（design「Route Resolution 真值表」），流式/非流式两入口共用。
 
@@ -127,6 +128,11 @@ def _resolve_retrieval_route(
         skip_retrieval: 查询理解判定为闲聊/纯历史追问。
         multi_kb_requested: 请求是否使用了多选字段 ``request.kb_ids``（非空）。仅影响非 agent
             模式 MULTI_KB vs SINGLE_KB 的区分，agent 模式不受影响（统一进 _build_agent_runtime）。
+        external_tools_available: 本次生效预设的 allowed_tools 白名单里是否存在**已启用的
+            外部 MCP 工具**。用于修正"agent 无检索源必降级"的旧假设：MCP 工具（如文书精修
+            的 read_document / propose_doc_edit）本身不依赖知识库，调用方常常不带任何 kb，
+            此时若降级为纯 LLM 生成，工具定义根本不会下发给模型（payload 无 tools），模型
+            只能把工具名当普通文本吐出来（外部租户"没按工具方法调用"的直接原因）。
 
     Returns:
         Route 枚举。
@@ -139,7 +145,13 @@ def _resolve_retrieval_route(
             return Route.CHITCHAT
         if has_any_source:
             return Route.AGENT
-        # agent 无任何检索源 → 纯 LLM 作答兜底（既有行为）。
+        # agent 无检索源但有可用的外部 MCP 工具 → 仍走 ReAct：Agent 的价值不止检索，
+        # 工具调用本身就是目的。检索类工具因 search_targets 为空自然不注册，
+        # _build_agent_runtime 对 kb_ids=[] 已是安全路径（primary_kb_id=None）。
+        if external_tools_available:
+            return Route.AGENT
+        # agent 既无检索源也无外部工具 → 纯 LLM 作答兜底（既有行为，避免为闲聊
+        # 多付一轮 ReAct 开销）。
         return Route.NONE
 
     # 非 agent（hybrid / direct）：保持改造前路由。
@@ -945,6 +957,22 @@ async def _register_mcp_tools(
         logger.warning("[Agent][Runtime] MCP tool discovery failed: %s", e)
 
 
+async def _has_whitelisted_mcp_tools(preset_allowed: list[str] | None) -> bool:
+    """预设白名单里是否存在已启用的外部 MCP 工具（供路由判定是否必须走 ReAct）。
+
+    与 :func:`_register_mcp_tools` 共用同一份带 TTL 缓存的发现结果，故不产生额外
+    远端请求；未配置 MCP server / 预设无白名单时恒为 False，路由行为与改造前一致。
+    发现失败按 False 处理（fail-safe：不因远端抖动把闲聊请求拖进 ReAct）。
+    """
+    if not preset_allowed:
+        return False
+    try:
+        return any(t.name in preset_allowed for t in await get_mcp_tools())
+    except Exception as e:  # noqa: BLE001 - 发现失败不阻塞主流程
+        logger.warning("[Chat] MCP 工具发现失败，本次按无外部工具路由: %s", sanitize_for_log(e))
+        return False
+
+
 async def _build_agent_runtime(
     kb_ids: list[str],
     llm: LLMProvider,
@@ -1263,8 +1291,12 @@ async def _stream_response(
     requested_kb_ids = list(requested_kb_ids or [])
 
     # 统一路由决策（与非流式入口共用纯函数）。
+    # 外部 MCP 工具在白名单内时，agent 即使没有任何检索源也必须走 ReAct（否则工具
+    # 定义不会下发给模型）。
     route = _resolve_retrieval_route(
-        mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=multi_kb_requested
+        mode, requested_kb_ids, session_has_files, skip_retrieval,
+        multi_kb_requested=multi_kb_requested,
+        external_tools_available=await _has_whitelisted_mcp_tools(preset_cfg.get("allowed_tools")),
     )
 
     # 发起对话即入库：在检索/生成之前先保存用户消息并播种标题，使新会话立即出现在
@@ -1736,7 +1768,9 @@ async def chat_completions(
     # 非流式响应
     # 统一路由决策（与流式入口共用纯函数）。
     route = _resolve_retrieval_route(
-        mode, requested_kb_ids, session_has_files, skip_retrieval, multi_kb_requested=bool(request.kb_ids)
+        mode, requested_kb_ids, session_has_files, skip_retrieval,
+        multi_kb_requested=bool(request.kb_ids),
+        external_tools_available=await _has_whitelisted_mcp_tools(preset_cfg.get("allowed_tools")),
     )
 
     # 发起对话即入库：生成回答前先保存用户消息并播种标题（与流式入口一致）。

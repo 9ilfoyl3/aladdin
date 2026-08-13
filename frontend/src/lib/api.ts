@@ -783,8 +783,27 @@ export interface AgentPresetItem {
   owner_username: string | null
 }
 
+// 可配进预设 allowed_tools 的工具选项。内置工具 + 平台已启用 MCP server 发现的外部工具。
+// 后端只回工具名/描述/来源 server 名，不含 url 与凭据。
+export interface AgentToolOption {
+  name: string
+  label: string
+  description: string
+  source: 'builtin' | 'mcp'
+  // 基础设施工具：恒注册，取消勾选也关不掉，前端显示为「始终启用」
+  always_on: boolean
+  server_name: string | null
+}
+
+export interface AgentAvailableTools {
+  tools: AgentToolOption[]
+  // 非空表示外部工具发现失败（远端不可达等），此时 tools 仅含内置工具
+  mcp_error: string | null
+}
+
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
+  availableTools: () => request<AgentAvailableTools>('/agent-presets/available-tools'),
   rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
     request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
       method: 'POST',
