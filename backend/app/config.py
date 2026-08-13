@@ -167,6 +167,26 @@ class Settings(BaseSettings):
     content_view_boundary_open: bool = False
 
     # ============================================================
+    # MCP（Model Context Protocol）
+    # ============================================================
+    # ---- inbound：Artoo 作为 MCP server（标准 JSON-RPC over Streamable HTTP）----
+    # 单次工具调用最多并发检索的知识库数。身份可读库很多时，逐库检索会把一次调用放大
+    # 成几十次检索并拖到客户端超时；取分数最高的前 N 个库并发检索后统一归并。
+    mcp_max_kb_fanout: int = 8
+    # 每把 API Key 每分钟的 tools/call 上限（进程内令牌桶）。0 = 关闭限流。
+    mcp_rate_limit_per_minute: int = 120
+    # MCP 会话（Mcp-Session-Id）空闲过期时间（秒）
+    mcp_session_ttl_seconds: int = 3600
+
+    # ---- outbound：Artoo 作为 MCP client（调用第三方 MCP server）----
+    # 是否禁止连接内网/环回地址的 MCP server。默认 False：MCP server 与 Artoo 同处
+    # 内网/同 docker 网络是主流部署形态。置 True 得到更严的 SSRF 策略（仅公网可达地址）。
+    # 无论此项如何，link-local（云元数据端点）恒被阻断。
+    mcp_block_private_network: bool = False
+    mcp_call_timeout: float = 60.0       # 单次远端工具调用超时（秒）
+    mcp_discovery_timeout: float = 10.0  # 工具发现 / 连通性测试超时（秒）
+
+    # ============================================================
     # 知识图谱（knowledge-graph）：全局 env 开关与 Neo4j 连接/抽取参数
     # ============================================================
     # 全局总开关：不为 true 则整体关闭图谱功能（不连 Neo4j、不抽取、API 返回明确不可用），

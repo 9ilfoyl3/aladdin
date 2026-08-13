@@ -633,6 +633,83 @@ export const ocrConfigApi = {
     request<OCRTestResult>(`/ocr-configs/${id}/test`, { method: 'POST' }),
 }
 
+/** MCP 传输模式：auto=先试标准协议再回落私有 REST */
+export type MCPTransport = 'auto' | 'streamable_http' | 'legacy_rest'
+/** MCP 静态凭据方式：Artoo 向远端证明"我是 Artoo" */
+export type MCPAuthType = 'none' | 'bearer' | 'header'
+
+export interface MCPConfigItem {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  transport: MCPTransport
+  auth_type: MCPAuthType
+  auth_header_name: string | null
+  /** 是否已配置凭据（明文永不回显，仅回掩码） */
+  has_auth_token: boolean
+  auth_token_masked: string | null
+  /** 是否向该 server 透传调用方上下文（会话 / 租户 / 主体） */
+  forward_context: boolean
+  tool_prefix: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 远端 MCP server 暴露的单个工具元信息 */
+export interface MCPToolMeta {
+  name: string
+  description: string
+}
+
+export interface MCPTestResult {
+  reachable: boolean
+  tool_count: number
+  tools: MCPToolMeta[]
+  /** 本次实际走通的协议，用于判断对方是否已升级到标准 MCP */
+  protocol: MCPTransport | null
+  error: string | null
+}
+
+/** 创建/更新 MCP 配置的请求体。auth_token 三态：不传=保持，''=清除，非空=替换 */
+export interface MCPConfigPayload {
+  name: string
+  url: string
+  enabled?: boolean
+  transport?: MCPTransport
+  auth_type?: MCPAuthType
+  auth_token?: string
+  auth_header_name?: string | null
+  forward_context?: boolean
+  tool_prefix?: string | null
+}
+
+// MCP Server 配置接口（平台底座，仅超管）
+export const mcpConfigApi = {
+  list: () => request<MCPConfigItem[]>('/mcp-configs'),
+  create: (data: MCPConfigPayload) =>
+    request<MCPConfigItem>('/mcp-configs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Partial<MCPConfigPayload>) =>
+    request<MCPConfigItem>(`/mcp-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/mcp-configs/${id}`, { method: 'DELETE' }),
+  test: (data: { url: string; transport?: MCPTransport; auth_type?: MCPAuthType; auth_token?: string; auth_header_name?: string | null }) =>
+    request<MCPTestResult>('/mcp-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testSaved: (id: string) =>
+    request<MCPTestResult>(`/mcp-configs/${id}/test`, { method: 'POST' }),
+  tools: (id: string) =>
+    request<MCPToolMeta[]>(`/mcp-configs/${id}/tools`),
+}
+
 export interface ASRConfigItem {
   id: string
   name: string

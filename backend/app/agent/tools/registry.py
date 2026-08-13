@@ -9,7 +9,7 @@
 import logging
 
 from app.agent.memory.context_manager import truncate_tool_output
-from app.agent.tools.base import BaseTool, ToolResult
+from app.agent.tools.base import BaseTool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,9 @@ class ToolRegistry:
         definitions.sort(key=lambda item: item["function"]["name"])
         return definitions
 
-    async def execute(self, name: str, args: dict) -> ToolResult:
+    async def execute(
+        self, name: str, args: dict, ctx: ToolContext | None = None
+    ) -> ToolResult:
         """按名称查找工具并执行
 
         执行后自动截断超长输出，防止上下文窗口溢出。
@@ -76,6 +78,10 @@ class ToolRegistry:
         Args:
             name: 工具名称
             args: 工具参数字典
+            ctx: 本次请求的调用方上下文（会话 / 租户 / 主体）。只传给声明了
+                ``accepts_context = True`` 的工具——目前仅外部 MCP 工具需要，用于把
+                调用方身份透传给第三方 server。走调用期参数而非工具实例属性，是因为
+                MCP 工具实例跨请求缓存复用，写进实例会造成跨用户上下文污染。
 
         Returns:
             ToolResult: 执行结果，工具不存在时返回 success=False
@@ -87,7 +93,10 @@ class ToolRegistry:
                 error=f"Tool '{name}' not found" + _TOOL_ERROR_HINT,
             )
 
-        result = await tool.execute(args)
+        if getattr(tool, "accepts_context", False):
+            result = await tool.execute(args, ctx=ctx)
+        else:
+            result = await tool.execute(args)
 
         # 截断超长工具输出，防止上下文窗口溢出
         if result.output and len(result.output) > self._max_tool_output_chars:

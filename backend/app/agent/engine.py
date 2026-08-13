@@ -21,7 +21,7 @@ from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
-from app.agent.tools.base import ToolResult
+from app.agent.tools.base import ToolContext, ToolResult
 from app.agent.tools.final_answer_parse import extract_inline_answer, parse_final_answer_args
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.text_sanitize import strip_think_blocks
@@ -163,11 +163,16 @@ class AgentEngine:
         llm: LLMProvider,
         tool_registry: ToolRegistry,
         event_bus: EventBus,
+        tool_context: ToolContext | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
         self._tool_registry = tool_registry
         self._event_bus = event_bus
+        # 本次请求的调用方上下文（会话 / 租户 / 主体）。引擎只负责在执行工具时把它带下去，
+        # 不解释其内容；仅声明 accepts_context 的工具（外部 MCP 工具）会收到。
+        # 每次请求新建引擎实例，故这里持有请求态是安全的。
+        self._tool_context = tool_context
         # 用于 stuck loop 检测
         self._previous_responses: list[str] = []
         # 三层递进式上下文管理组件
@@ -908,7 +913,9 @@ class AgentEngine:
         """执行单个工具，返回 (result, duration_ms)"""
         start_time = time.time()
         try:
-            result = await self._tool_registry.execute(tc.function_name, args)
+            result = await self._tool_registry.execute(
+                tc.function_name, args, ctx=self._tool_context
+            )
         except Exception as e:
             logger.error(
                 "[Agent] Tool execution error: %s - %s",

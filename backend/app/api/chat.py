@@ -28,6 +28,7 @@ from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.content_router import ContentStreamRouter
+from app.agent.tools.base import ToolContext
 from app.agent.tools.final_answer import FinalAnswerTool
 from app.agent.tools.final_answer_parse import extract_inline_answer
 from app.agent.tools.grep_chunks import GrepChunksTool
@@ -38,6 +39,7 @@ from app.agent.tools.read_skill import ReadSkillTool
 from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
+from app.agent.tools.mcp_client import get_mcp_tools
 from app.agent.skills import SkillManager, default_skill_dirs
 from app.api.skills import load_user_custom_skills
 from app.agent.prompts.progressive_rag import render_system_prompt
@@ -922,7 +924,28 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     return None
 
 
-def _build_agent_runtime(
+async def _register_mcp_tools(
+    tool_registry: ToolRegistry,
+    preset_allowed: list[str] | None,
+) -> None:
+    """把预设显式白名单中的外部 MCP 工具注册进 Agent 运行时
+
+    MCP 工具由远端 MCP server 声明（DB mcp_configs 表，超管维护），对 Artoo
+    而言是外部工具：**default-off**，必须显式出现在预设 allowed_tools 中才注册，
+    避免注入未启用的预设（如内置 quick-qa / smart-reasoning）。工具定义带模块级
+    缓存，未配置任何 server 时 get_mcp_tools 返回空列表，行为与接线前一致。
+    """
+    if not preset_allowed:
+        return
+    try:
+        for mcp_tool in await get_mcp_tools():
+            if mcp_tool.name in preset_allowed:
+                tool_registry.register(mcp_tool)
+    except Exception as e:
+        logger.warning("[Agent][Runtime] MCP tool discovery failed: %s", e)
+
+
+async def _build_agent_runtime(
     kb_ids: list[str],
     llm: LLMProvider,
     preset_cfg: dict,
@@ -934,6 +957,7 @@ def _build_agent_runtime(
     attachments: list[dict] | None = None,
     custom_skills: list | None = None,
     hybrid_retriever: HybridRetriever | None = None,
+    caller_ctx: ToolContext | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -957,6 +981,9 @@ def _build_agent_runtime(
         attachments: 本条消息绑定的附件快照列表（来自 request.attachments，每项含
             file_id / filename）。非空时注册 read_attachment 工具，让 Agent 能确定性地
             整篇直读本次附件，而非靠 knowledge_search 语义检索去和知识库文档竞争召回。
+        caller_ctx: 本次请求的调用方上下文（会话 / 租户 / 主体），由路由层从 identity
+            构造。仅外部 MCP 工具消费——它需要把"哪个终端用户在调"如实带给第三方
+            server，第三方才能做自己的权限隔离。内置工具不受影响。
 
     Returns:
         (engine, state, event_bus)。其中 ``state`` 是传给工具的 AgentState，
@@ -1056,6 +1083,13 @@ def _build_agent_runtime(
     if skill_metadata:
         tool_registry.register(ReadSkillTool(skill_manager))
 
+    # 外部 MCP 工具：发现 DB 中启用的 MCP server 工具。
+    # 与内置工具 default-on 不同，外部工具 **default-off** —— 必须显式出现在预设
+    # allowed_tools 中才会注册，避免把远端声明的工具注入未启用的预设（如内置
+    # quick-qa / smart-reasoning）。工具定义带模块级缓存，未配置任何 server 时
+    # get_mcp_tools 返回空列表，Agent 行为与接线前完全一致。
+    await _register_mcp_tools(tool_registry, preset_allowed)
+
     # 诊断日志：确认实际注册的工具列表与预设白名单，定位 thinking/read_attachment 是否生效。
     logger.info(
         "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | thinking_in_list=%s | attachments=%d",
@@ -1100,7 +1134,9 @@ def _build_agent_runtime(
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
     )
-    engine = AgentEngine(config, llm, tool_registry, event_bus)
+    # caller_ctx 交给引擎：执行工具时按需下传（仅外部 MCP 工具消费，用于把调用方身份
+    # 透传给第三方 server；是否真的发出去由每个 MCP 配置的 forward_context 决定）。
+    engine = AgentEngine(config, llm, tool_registry, event_bus, tool_context=caller_ctx)
     return engine, state, event_bus
 
 
@@ -1117,6 +1153,7 @@ async def _run_agent_nonstream(
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     owner_user_id: str | None = None,
+    caller_ctx: ToolContext | None = None,
 ) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
@@ -1132,12 +1169,13 @@ async def _run_agent_nonstream(
     Returns:
         (final_answer, knowledge_refs, degraded, agent_steps, failed_source_ids)
     """
-    engine, state, event_bus = _build_agent_runtime(
+    engine, state, event_bus = await _build_agent_runtime(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
         include_session_source=include_session_source,
         attachments=attachments,
         custom_skills=await load_user_custom_skills(owner_user_id),
         hybrid_retriever=await _build_hybrid_retriever(),
+        caller_ctx=caller_ctx,
     )
 
     steps_collected: list[dict] = []
@@ -1200,6 +1238,7 @@ async def _stream_response(
     session_has_files: bool = False,
     multi_kb_requested: bool = False,
     owner_user_id: str | None = None,
+    caller_ctx: ToolContext | None = None,
 ) -> AsyncGenerator[str, None]:
     """生成 SSE 流式响应，包含 Agent 进度事件
 
@@ -1253,12 +1292,13 @@ async def _stream_response(
 
         # 构建 Agent 运行时（与非流式共用 _build_agent_runtime，消除双入口分叉）。
         # 传入全部所选库 + 会话源标志，让会话文件成为 agent 可检索的普通数据源。
-        engine, state, event_bus = _build_agent_runtime(
+        engine, state, event_bus = await _build_agent_runtime(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
             tenant_id, session_id, include_session_source=session_has_files,
             attachments=attachments,
             custom_skills=await load_user_custom_skills(owner_user_id),
             hybrid_retriever=await _build_hybrid_retriever(),
+            caller_ctx=caller_ctx,
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1590,6 +1630,12 @@ async def chat_completions(
 
     tenant_id = identity.tenant_id
 
+    # 调用方上下文：仅在开启透传的外部 MCP server 上生效（默认全部关闭），
+    # 用于让第三方按"哪个终端用户在调"做自己的权限隔离。见 app/mcp/context.py。
+    caller_ctx = ToolContext.from_identity(
+        identity, session_id=request.session_id, request_id=uuid.uuid4().hex
+    )
+
     # 会话归属校验：若指定了 session_id，必须为本人会话，否则 404。
     # 防止凭他人 session_id 读取其历史（泄露进本次回答上下文）或向其会话注入消息。
     if request.session_id:
@@ -1683,7 +1729,7 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id, caller_ctx=caller_ctx),
             media_type="text/event-stream",
         )
 
@@ -1719,6 +1765,7 @@ async def chat_completions(
             include_session_source=session_has_files,
             attachments=nonstream_attachments,
             owner_user_id=identity.acting_subject_id,
+            caller_ctx=caller_ctx,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)
@@ -1887,6 +1934,8 @@ async def retrieval_agent(
         include_session_source=False,
         attachments=None,
         owner_user_id=identity.acting_subject_id,
+        # 无会话链路：session_id 为空，其余主体字段照常透传（第三方仍能做用户级隔离）
+        caller_ctx=ToolContext.from_identity(identity, request_id=uuid.uuid4().hex),
     )
     references = await _build_references(chunks)
     return AgentRetrievalResponse(

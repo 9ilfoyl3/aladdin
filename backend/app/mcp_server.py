@@ -1,259 +1,75 @@
-"""MCP Server - 将 Artoo 知识库能力暴露为 MCP 协议
+"""MCP Server 路由层 —— 把 Artoo 知识库能力按**标准 MCP 协议**暴露。
 
-提供 /mcp/tools/list 和 /mcp/tools/call 端点，
-让外部 AI 工具（Claude、Cursor 等）可以直接调用 Artoo 的知识库能力。
+传输：Streamable HTTP（单端点 ``/mcp``，JSON-RPC 2.0）
+------------------------------------------------------
+- ``POST /mcp``：承载全部客户端 -> 服务端消息（initialize / tools/list / tools/call /
+  ping / notifications/*）。请求是单条 JSON-RPC 消息或消息数组（后者兼容 2025-03-26
+  的 batching）。只含通知时按规范返回 ``202 Accepted`` 空体。
+- ``GET /mcp``：本服务端不主动向客户端推送消息，按规范返回 ``405``。
+- ``DELETE /mcp``：显式终止会话。
 
-暴露的工具：
-- knowledge_search: 语义检索
-- hybrid_search: 混合检索
-- list_documents: 列出文档
-- chat: 完整对话
+这样 Claude Desktop / Cursor / 官方 SDK（Python ``mcp``、TypeScript ``@modelcontextprotocol/sdk``）
+可以直接接入，第三方不再需要为 Artoo 手写私有协议适配。
+
+鉴权
+----
+**所有** ``/mcp*`` 端点都要求 ``Authorization: Bearer sk-<API Key>``，包括工具枚举。
+改造前 ``/mcp/tools/list`` 可匿名访问（能枚举工具与描述），属信息泄露，此处一并收口。
+检索范围由 Key 的授权范围收敛（代理 Key 还需 ``X-External-User-Id``），与其余业务
+接口同一套判定。
+
+兼容层（deprecated）
+--------------------
+``GET /mcp/tools/list`` / ``POST /mcp/tools/call`` / ``GET /mcp/sse`` 是切标准协议前的
+私有 REST 形态，保留以免打断已接入方，响应带 ``Deprecation`` 头。新集成一律走
+``POST /mcp``。
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+
+from app.mcp import server as mcp_dispatch
+from app.mcp import tools as mcp_tools
+from app.mcp.jsonrpc import (
+    INTERNAL_ERROR,
+    INVALID_REQUEST,
+    PARSE_ERROR,
+    RATE_LIMITED,
+    UNAUTHENTICATED,
+    JsonRpcError,
+    error_response,
+    parse_message,
+    success_response,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mcp", tags=["MCP"])
 
-# MCP 工具定义（JSON Schema 格式，符合 MCP 协议规范）
-MCP_TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "knowledge_search",
-        "description": "语义检索知识库内容。使用向量相似度搜索，适合自然语言查询。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "搜索查询列表，支持 1-5 个查询并行检索",
-                },
-                "knowledge_base_id": {
-                    "type": "string",
-                    "description": "知识库 ID（可选，不指定则搜索所有知识库）",
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "返回结果数量",
-                    "default": 5,
-                },
-            },
-            "required": ["queries"],
-        },
-    },
-    {
-        "name": "hybrid_search",
-        "description": "混合检索（向量 + BM25 关键词），适合需要精确匹配和语义理解的查询。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "搜索查询文本",
-                },
-                "knowledge_base_id": {
-                    "type": "string",
-                    "description": "知识库 ID（可选）",
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "返回结果数量",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "list_documents",
-        "description": "列出知识库中的文档列表，包含文档名称、状态和基本信息。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "knowledge_base_id": {
-                    "type": "string",
-                    "description": "知识库 ID（可选，不指定则列出所有文档）",
-                },
-                "page": {
-                    "type": "integer",
-                    "description": "页码",
-                    "default": 1,
-                },
-                "page_size": {
-                    "type": "integer",
-                    "description": "每页数量",
-                    "default": 20,
-                },
-            },
-        },
-    },
-    {
-        "name": "chat",
-        "description": "与知识库进行对话，获取基于知识库内容的 AI 回答。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "用户问题",
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "会话 ID（可选，不指定则创建新会话）",
-                },
-                "knowledge_base_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "知识库 ID 列表（可选）",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-]
+# 兼容端点的废弃提示头（RFC 8594 风格）。
+# 值必须是 latin-1 可编码的纯 ASCII —— HTTP 头不允许非 latin-1 字符，
+# 写中文会在构造响应时抛 UnicodeEncodeError。
+_DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Link": '</mcp>; rel="successor-version"',
+    "Warning": '299 - "Legacy private REST endpoint is deprecated, use standard MCP POST /mcp"',
+}
+
+# 向后兼容：旧代码/测试从本模块导入工具定义
+MCP_TOOLS = mcp_tools.MCP_TOOLS
 
 
-@router.get("/tools/list")
-async def list_tools() -> JSONResponse:
-    """列出所有可用的 MCP 工具定义
-
-    返回符合 MCP 协议的工具列表，包含名称、描述和参数 JSON Schema。
-    """
-    return JSONResponse(content={"tools": MCP_TOOLS})
-
-
-@router.post("/tools/call")
-async def call_tool(request: Request) -> JSONResponse:
-    """执行指定的 MCP 工具
-
-    请求体格式:
-    {
-        "name": "tool_name",
-        "arguments": { ... }
-    }
-
-    返回格式:
-    {
-        "content": [{"type": "text", "text": "..."}],
-        "isError": false
-    }
-    """
-    try:
-        body = await request.json()
-        tool_name = body.get("name", "")
-        arguments = body.get("arguments", {})
-
-        # 验证工具名称
-        valid_names = {t["name"] for t in MCP_TOOLS}
-        if tool_name not in valid_names:
-            return JSONResponse(
-                content={
-                    "content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}],
-                    "isError": True,
-                },
-                status_code=400,
-            )
-
-        # tenant-auth：MCP 工具经 API Key 鉴权解析身份（无有效 Key -> 401）。
-        from app.api.errors import AppError
-        try:
-            identity = await _authenticate_mcp(request)
-        except AppError as ae:
-            return JSONResponse(
-                content={"content": [{"type": "text", "text": ae.detail}], "isError": True},
-                status_code=ae.http_status,
-            )
-
-        # 执行工具（身份透传，范围收敛到该身份可读 KB）
-        result = await _execute_mcp_tool(tool_name, arguments, identity)
-        return JSONResponse(content=result)
-
-    except json.JSONDecodeError:
-        return JSONResponse(
-            content={
-                "content": [{"type": "text", "text": "Invalid JSON in request body"}],
-                "isError": True,
-            },
-            status_code=400,
-        )
-    except Exception as e:
-        logger.exception("MCP tool call failed: %s", e)
-        return JSONResponse(
-            content={
-                "content": [{"type": "text", "text": f"Internal error: {str(e)}"}],
-                "isError": True,
-            },
-            status_code=500,
-        )
-
-
-@router.get("/sse")
-async def sse_endpoint(request: Request):
-    """SSE 端点 - 提供 MCP 协议的 Server-Sent Events 通信
-
-    客户端通过此端点建立 SSE 连接，接收服务端推送的消息。
-    MCP 协议使用 SSE 作为传输层之一，支持工具调用请求和结果响应。
-    """
-
-    async def event_generator():
-        """生成 SSE 事件流"""
-        # 发送初始连接确认
-        yield {
-            "event": "endpoint",
-            "data": json.dumps({
-                "uri": "/mcp/tools/call",
-                "transport": "sse",
-            }),
-        }
-
-        # 保持连接活跃，定期发送心跳
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                yield {"event": "ping", "data": ""}
-                await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            pass
-
-    return EventSourceResponse(event_generator())
-
-
-async def _execute_mcp_tool(name: str, arguments: dict, identity) -> dict:
-    """执行 MCP 工具的内部逻辑（identity 用于租户范围收敛与授权）。"""
-    try:
-        if name == "knowledge_search":
-            result = await _tool_knowledge_search(arguments, identity)
-        elif name == "hybrid_search":
-            result = await _tool_hybrid_search(arguments, identity)
-        elif name == "list_documents":
-            result = await _tool_list_documents(arguments, identity)
-        elif name == "chat":
-            result = await _tool_chat(arguments, identity)
-        else:
-            return {
-                "content": [{"type": "text", "text": f"Tool not implemented: {name}"}],
-                "isError": True,
-            }
-
-        return {
-            "content": [{"type": "text", "text": result}],
-            "isError": False,
-        }
-    except Exception as e:
-        logger.exception("MCP tool execution error [%s]: %s", name, e)
-        return {
-            "content": [{"type": "text", "text": f"Error executing {name}: {str(e)}"}],
-            "isError": True,
-        }
+# ============================================================
+# 鉴权
+# ============================================================
 
 
 async def _authenticate_mcp(request: Request):
@@ -272,201 +88,234 @@ async def _authenticate_mcp(request: Request):
         return await ApiKeyAuthenticator(session).authenticate(token, request.headers)
 
 
-async def _resolve_mcp_kb_ids(identity, requested_kb_id: str | None) -> list[str]:
-    """把 MCP 的 kb 参数收敛为身份可读范围：
-    - 指定 kb_id：经 kb_authorization_decision(READ) 校验（越权抛 -> 上层转错误）。
-    - 不指定：返回身份可读 KB 集合（替换原"搜索所有知识库"的危险默认）。
+# ============================================================
+# 标准 MCP：Streamable HTTP
+# ============================================================
+
+
+@router.post("")
+async def streamable_http(request: Request) -> Response:
+    """MCP Streamable HTTP 端点：处理一条或一批 JSON-RPC 消息。
+
+    响应形态：
+    - 含请求（带 id）-> ``200`` + JSON-RPC 响应（单条对应对象，批量对应数组）。
+    - 只含通知 -> ``202`` 空体。
+    - 鉴权失败 -> ``401`` + JSON-RPC error（HTTP 状态与协议错误同时给出，便于两类
+      客户端各取所需）。
     """
-    from app.auth.kb_authz import KbAccessEnum
-    from app.auth.kb_scope import assemble_allowed_kb_ids, authorize_requested_kbs
-    from app.storage.database import async_session
+    from app.api.errors import AppError
 
-    async with async_session() as session:
-        if requested_kb_id:
-            await authorize_requested_kbs(session, identity, [requested_kb_id], KbAccessEnum.READ)
-            return [requested_kb_id]
-        return list(await assemble_allowed_kb_ids(session, identity))
-
-
-async def _tool_knowledge_search(arguments: dict, identity) -> str:
-    """knowledge_search 工具实现 - 语义检索（范围收敛到身份可读 KB）"""
-    from app.retrieval.hybrid import HybridRetriever
-
-    queries = arguments.get("queries", [])
-    kb_id = arguments.get("knowledge_base_id")
-    top_k = arguments.get("top_k", 5)
-
-    if not queries:
-        return "Error: 'queries' parameter is required and must be non-empty"
-
-    # 范围收敛：指定 kb 经读授权；不指定则取身份可读范围（替换"搜索所有库"危险默认）
-    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
-    if not allowed_kb_ids:
-        return "No results found."
-
-    retriever = HybridRetriever()
-    all_results = []
-    for query in queries[:5]:  # 最多 5 个查询
-        for target_kb in allowed_kb_ids:
-            results = await retriever.search(
-                query=query,
-                knowledge_base_id=target_kb,
-                top_k=top_k,
-            )
-            all_results.extend(results)
-
-    # chunk_id 去重，保留最高分
-    seen = {}
-    for r in all_results:
-        chunk_id = r.get("chunk_id", r.get("id", ""))
-        score = r.get("score", 0)
-        if chunk_id not in seen or score > seen[chunk_id].get("score", 0):
-            seen[chunk_id] = r
-
-    unique_results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-
-    # 格式化输出
-    if not unique_results:
-        return "No results found."
-
-    output_lines = [f"Found {len(unique_results)} results:"]
-    for i, r in enumerate(unique_results, 1):
-        content = r.get("content", r.get("text", ""))[:500]
-        score = r.get("score", 0)
-        doc_name = r.get("document_name", r.get("doc_name", "unknown"))
-        output_lines.append(f"\n[{i}] (score: {score:.3f}) [{doc_name}]\n{content}")
-
-    return "\n".join(output_lines)
-
-
-async def _tool_hybrid_search(arguments: dict, identity) -> str:
-    """hybrid_search 工具实现 - 混合检索（范围收敛到身份可读 KB）"""
-    from app.retrieval.hybrid import HybridRetriever
-
-    query = arguments.get("query", "")
-    kb_id = arguments.get("knowledge_base_id")
-    top_k = arguments.get("top_k", 5)
-
-    if not query:
-        return "Error: 'query' parameter is required"
-
-    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
-    if not allowed_kb_ids:
-        return "No results found."
-
-    retriever = HybridRetriever()
-    results = []
-    for target_kb in allowed_kb_ids:
-        r = await retriever.search(query=query, knowledge_base_id=target_kb, top_k=top_k)
-        results.extend(r)
-
-    if not results:
-        return "No results found."
-
-    results = sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-    output_lines = [f"Found {len(results)} results:"]
-    for i, r in enumerate(results, 1):
-        content = r.get("content", r.get("text", ""))[:500]
-        score = r.get("score", 0)
-        doc_name = r.get("document_name", r.get("doc_name", "unknown"))
-        output_lines.append(f"\n[{i}] (score: {score:.3f}) [{doc_name}]\n{content}")
-
-    return "\n".join(output_lines)
-
-
-async def _tool_list_documents(arguments: dict, identity) -> str:
-    """list_documents 工具实现 - 列出文档（仅身份可读 KB 范围内）"""
-    from sqlalchemy import select
-
-    from app.schema.db import Document
-    from app.storage.database import async_session
-
-    kb_id = arguments.get("knowledge_base_id")
-    page = arguments.get("page", 1)
-    page_size = arguments.get("page_size", 20)
-
-    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, kb_id)
-    if not allowed_kb_ids:
-        return "No documents found."
-
-    async with async_session() as session:
-        # 修正原 knowledge_base_id 笔误为 kb_id；范围限定在可读 KB
-        stmt = (
-            select(Document)
-            .where(Document.kb_id.in_(allowed_kb_ids))
-            .order_by(Document.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        result = await session.execute(stmt)
-        docs = result.scalars().all()
-
-    if not docs:
-        return "No documents found."
-
-    output_lines = [f"Documents (page {page}, {len(docs)} items):"]
-    for doc in docs:
-        status = getattr(doc, "status", "unknown")
-        name = getattr(doc, "filename", getattr(doc, "name", "unknown"))
-        doc_id = getattr(doc, "id", "")
-        output_lines.append(f"  - [{status}] {name} (id: {doc_id})")
-
-    return "\n".join(output_lines)
-
-
-async def _tool_chat(arguments: dict, identity) -> str:
-    """chat 工具实现 - 知识库对话（范围收敛到身份可读 KB）"""
-    query = arguments.get("query", "")
-    if not query:
-        return "Error: 'query' parameter is required"
-
-    from app.retrieval.hybrid import HybridRetriever
-
-    kb_ids = arguments.get("knowledge_base_ids", [])
-    requested = kb_ids[0] if kb_ids else None
-    allowed_kb_ids = await _resolve_mcp_kb_ids(identity, requested)
-    if not allowed_kb_ids:
-        return "未找到相关知识库内容来回答此问题。"
-
-    retriever = HybridRetriever()
-    results = []
-    for target_kb in allowed_kb_ids:
-        r = await retriever.search(query=query, knowledge_base_id=target_kb, top_k=5)
-        results.extend(r)
-
-    if not results:
-        return "未找到相关知识库内容来回答此问题。"
-
-    # 构建上下文
-    context_parts = []
-    for r in results:
-        content = r.get("content", r.get("text", ""))
-        if content:
-            context_parts.append(content)
-
-    context = "\n\n---\n\n".join(context_parts)
-
-    # 调用 LLM 生成答案
+    # 1) 解析 body（先解析再鉴权：解析失败与凭据无关，返回 -32700 更准确）
     try:
-        from app.models.manager import ModelManager
+        raw = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content=error_response(None, PARSE_ERROR, "请求体不是合法 JSON"),
+        )
 
-        manager = ModelManager()
-        llm = await manager.get_active_llm()
+    # 2) 鉴权（含工具枚举在内的所有方法）
+    try:
+        identity = await _authenticate_mcp(request)
+    except AppError as ae:
+        return JSONResponse(
+            status_code=ae.http_status,
+            content=error_response(None, UNAUTHENTICATED, ae.detail),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-        messages = [
-            {
-                "role": "system",
-                "content": "你是一个知识库问答助手。根据提供的参考资料回答用户问题。如果参考资料中没有相关信息，请如实说明。",
-            },
-            {
-                "role": "user",
-                "content": f"参考资料：\n{context}\n\n问题：{query}",
-            },
-        ]
+    # 3) 会话校验：带了未知 / 已过期的会话 id -> 404，客户端据此重新 initialize
+    session_id = request.headers.get(mcp_dispatch.HEADER_SESSION)
+    if session_id and not mcp_dispatch.session_store.touch(session_id):
+        return JSONResponse(
+            status_code=404,
+            content=error_response(None, INVALID_REQUEST, "MCP 会话不存在或已过期，请重新 initialize"),
+        )
 
-        answer = await llm.generate(messages)
-        return answer
-    except Exception as e:
-        # LLM 不可用时，返回检索结果摘要
-        logger.warning("LLM unavailable for MCP chat, returning raw results: %s", e)
-        return f"检索到 {len(results)} 条相关内容（LLM 不可用，返回原始结果）：\n\n{context[:2000]}"
+    batch = raw if isinstance(raw, list) else [raw]
+    if not batch:
+        return JSONResponse(
+            status_code=400, content=error_response(None, INVALID_REQUEST, "消息批次为空")
+        )
+
+    headers_map = dict(request.headers)
+    responses: list[dict[str, Any]] = []
+    new_session_id: str | None = None
+
+    for item in batch:
+        try:
+            message = parse_message(item)
+        except JsonRpcError as e:
+            responses.append(error_response(_peek_id(item), e.code, e.message, e.data))
+            continue
+
+        try:
+            result = await mcp_dispatch.handle_message(message, identity, headers_map)
+        except JsonRpcError as e:
+            if not message.is_notification:
+                responses.append(error_response(message.id, e.code, e.message, e.data))
+            continue
+        except Exception:
+            logger.exception("[MCP] 处理消息失败 method=%s", message.method)
+            if not message.is_notification:
+                responses.append(
+                    error_response(message.id, INTERNAL_ERROR, "服务端内部错误")
+                )
+            continue
+
+        if message.is_notification:
+            continue
+        if message.method == "initialize":
+            new_session_id = mcp_dispatch.session_store.create()
+        responses.append(success_response(message.id, result))
+
+    # 只含通知：规范要求 202 且无响应体
+    if not responses:
+        return Response(status_code=202)
+
+    out_headers: dict[str, str] = {}
+    if new_session_id:
+        out_headers[mcp_dispatch.HEADER_SESSION] = new_session_id
+    payload: Any = responses if isinstance(raw, list) else responses[0]
+    status = _http_status_for(payload)
+    return JSONResponse(status_code=status, content=payload, headers=out_headers)
+
+
+@router.get("")
+async def streamable_http_get() -> Response:
+    """本服务端不提供服务端 -> 客户端的主动消息流，按规范返回 405。"""
+    return JSONResponse(
+        status_code=405,
+        content=error_response(None, INVALID_REQUEST, "本服务端不支持 SSE 下行流，请用 POST /mcp"),
+        headers={"Allow": "POST, DELETE"},
+    )
+
+
+@router.delete("")
+async def terminate_session(request: Request) -> Response:
+    """显式终止 MCP 会话。"""
+    session_id = request.headers.get(mcp_dispatch.HEADER_SESSION)
+    if not session_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response(None, INVALID_REQUEST, f"缺少 {mcp_dispatch.HEADER_SESSION} 头"),
+        )
+    mcp_dispatch.session_store.terminate(session_id)
+    return Response(status_code=204)
+
+
+def _peek_id(item: Any) -> Any:
+    """从未通过校验的原始消息里尽力取出 id，让错误响应可被客户端对上号。"""
+    if isinstance(item, dict):
+        msg_id = item.get("id")
+        if isinstance(msg_id, (str, int)):
+            return msg_id
+    return None
+
+
+def _http_status_for(payload: Any) -> int:
+    """限流错误额外映射到 HTTP 429，方便网关/客户端按状态码退避。"""
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        err = item.get("error") if isinstance(item, dict) else None
+        if isinstance(err, dict) and err.get("code") == RATE_LIMITED:
+            return 429
+    return 200
+
+
+# ============================================================
+# 兼容层（deprecated，切标准协议前的私有 REST 形态）
+# ============================================================
+
+
+@router.get("/tools/list", deprecated=True)
+async def list_tools_legacy(request: Request) -> JSONResponse:
+    """[已废弃] 私有 REST 工具列表。改用 ``POST /mcp`` 的 ``tools/list``。
+
+    与改造前的差异：**现在要求 API Key**。匿名枚举工具属信息泄露，一并收口。
+    """
+    from app.api.errors import AppError
+
+    try:
+        await _authenticate_mcp(request)
+    except AppError as ae:
+        return JSONResponse(
+            status_code=ae.http_status,
+            content={"detail": ae.detail},
+            headers={**_DEPRECATION_HEADERS, "WWW-Authenticate": "Bearer"},
+        )
+    return JSONResponse(content={"tools": mcp_tools.MCP_TOOLS}, headers=_DEPRECATION_HEADERS)
+
+
+@router.post("/tools/call", deprecated=True)
+async def call_tool_legacy(request: Request) -> JSONResponse:
+    """[已废弃] 私有 REST 工具调用。改用 ``POST /mcp`` 的 ``tools/call``。
+
+    请求 ``{"name":..., "arguments":{...}}``，响应 ``{"content":[...], "isError":bool}``。
+    """
+    from app.api.errors import AppError
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"content": [{"type": "text", "text": "Invalid JSON in request body"}],
+                     "isError": True},
+            headers=_DEPRECATION_HEADERS,
+        )
+
+    tool_name = body.get("name", "") if isinstance(body, dict) else ""
+    if mcp_tools.resolve_tool_name(tool_name) is None:
+        return JSONResponse(
+            status_code=400,
+            content={"content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}],
+                     "isError": True},
+            headers=_DEPRECATION_HEADERS,
+        )
+
+    try:
+        identity = await _authenticate_mcp(request)
+    except AppError as ae:
+        return JSONResponse(
+            status_code=ae.http_status,
+            content={"content": [{"type": "text", "text": ae.detail}], "isError": True},
+            headers={**_DEPRECATION_HEADERS, "WWW-Authenticate": "Bearer"},
+        )
+
+    params = {"name": tool_name, "arguments": body.get("arguments") or {}}
+    try:
+        result = await mcp_dispatch._call_tool(params, identity, dict(request.headers))
+    except JsonRpcError as e:
+        status = 429 if e.code == RATE_LIMITED else 400
+        return JSONResponse(
+            status_code=status,
+            content={"content": [{"type": "text", "text": e.message}], "isError": True},
+            headers=_DEPRECATION_HEADERS,
+        )
+    return JSONResponse(content=result, headers=_DEPRECATION_HEADERS)
+
+
+@router.get("/sse", deprecated=True)
+async def sse_endpoint(request: Request):
+    """[已废弃] 早期私有 SSE 端点：只回一个 endpoint 事件 + 心跳，不承载消息。
+
+    标准 MCP 的 HTTP+SSE 传输（2024-11-05）与 Streamable HTTP（2025-03-26 起）都不是
+    这个形状，保留仅为不打断老接入方；新集成请用 ``POST /mcp``。
+    """
+
+    async def event_generator():
+        yield {
+            "event": "endpoint",
+            "data": json.dumps({"uri": "/mcp", "transport": "streamable-http"}),
+        }
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                yield {"event": "ping", "data": ""}
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
+
+    return EventSourceResponse(event_generator(), headers=_DEPRECATION_HEADERS)
