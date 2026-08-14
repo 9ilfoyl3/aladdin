@@ -31,7 +31,7 @@ from app.pipeline.chunker_router import ChunkerFactory, ChunkerRouter
 import app.pipeline.chunkers  # noqa: F401 — 确保所有 Chunker 注册到 Factory
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
-from app.pipeline.cleaner import TextCleaner
+from app.pipeline.cleaner import TextCleaner, strip_data_uris
 from app.pipeline.loader import EmbeddedImage, LoadResult, get_loader
 from app.pipeline.logging import PipelineLogger
 from app.pipeline.context_embedder import ContextualEmbedder
@@ -312,6 +312,20 @@ class DocumentPipeline:
                     },
                     images=[],
                 )
+
+            # ─── 2.6 剥离内嵌 base64 图片 ───
+            # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容校验之前，
+            # 一处覆盖全部来源。与 cleaner 不同，此步**无条件执行**：base64 是数据卫生
+            # 问题而非去噪偏好，enable_cleaner=False 的知识库同样不该把它带进向量库。
+            if final_content:
+                _before_len = len(final_content)
+                final_content = strip_data_uris(final_content)
+                _stripped = _before_len - len(final_content)
+                if _stripped > 0:
+                    logger.info(
+                        "[%s=%s] 剥离内嵌 base64 图片数据 %d 字符（原文 %d 字符）",
+                        source_kind, source_id, _stripped, _before_len,
+                    )
 
             # OCR / 转写 / 清洗全部走完仍无内容 → 明确失败，而不是入库一个 0 chunk 的空文档。
             # 常见成因：OCR 服务不支持该文件类型（如只收图片的服务收到 PDF），
