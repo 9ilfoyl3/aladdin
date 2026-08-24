@@ -9,6 +9,15 @@
 #   docker compose --profile infra up -d milvus
 # ============================================================
 
+mq:
+  dispatcher:
+    # 每个物理通道(pchannel)的最大 dispatcher/消费者数，默认 5。
+    # collection 多时多个 vchannel 哈希到同一 pchannel，重启/恢复期集中 watch
+    # 超过 5 个即注册失败并无限重试，形成 "consumer number limit exceeded"
+    # 日志风暴（2026-08-21 生产事故：442G 日志写满磁盘的根因之一），
+    # 且超限 collection 的数据通道中断。collection 持续增长场景需调大。
+    maxDispatcherNumPerPchannel: 32
+
 queryNode:
   mmap:
     # 向量原始数据走 mmap —— 省常驻内存最有效的一项（原始向量是内存大头）。

@@ -15,6 +15,15 @@
 #     docker compose --profile infra up -d
 # ============================================================
 
+# 日志上限（所有服务共用）：2026-08-21 生产事故——milvus 的 json.log 无上限增长
+# 至 442G 撑满 /data，postgres 崩溃恢复因磁盘满卡死，backend/worker 连环重启。
+# json-file 驱动默认不限大小，必须显式设 max-size/max-file。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "5"
+
 services:
   # ============ 中间件（profile: infra）============
   etcd:
@@ -35,6 +44,7 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    logging: *default-logging
     restart: unless-stopped
 
   minio:
@@ -55,6 +65,7 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    logging: *default-logging
     restart: unless-stopped
 
   milvus:
@@ -80,6 +91,7 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    logging: *default-logging
     restart: unless-stopped
 
   postgres:
@@ -108,6 +120,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
@@ -126,6 +139,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    logging: *default-logging
     restart: unless-stopped
 
   # ============ 知识图谱（profile: graph，默认不启动）============
@@ -154,6 +168,7 @@ services:
       interval: 30s
       timeout: 20s
       retries: 5
+    logging: *default-logging
     restart: unless-stopped
 
   # ============ 应用（profile: app）============
@@ -195,6 +210,7 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    logging: *default-logging
     restart: unless-stopped
 
   worker:
@@ -231,6 +247,7 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    logging: *default-logging
     restart: unless-stopped
 
   frontend:
@@ -249,6 +266,7 @@ services:
       - ./frontend/public/config.js:/usr/share/nginx/html/config.js:ro
     depends_on:
       - backend
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:
