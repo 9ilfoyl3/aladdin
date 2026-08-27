@@ -24,6 +24,15 @@ x-logging: &default-logging
     max-size: "100m"
     max-file: "5"
 
+# 内存上限（混部机器必须设）：本机与 fasiclaw / agent-workflow / funasr / ES8 等
+# 多个业务共享 62G 内存，任一容器无限膨胀都会连带拖垮同机其它业务。
+# 这里用 mem_limit（Compose V2 对 `docker compose up` 稳定生效；deploy.resources
+# 在部分 V2 版本需 --compatibility，不用它以免静默失效）。
+#
+# 语义提醒：mem_limit 是**硬上限**，超限触发容器内 OOM Kill（进程被杀 + restart），
+# 不是软限流。因此每项都留了 2~6 倍于当前实测占用的余量：宁可被限制，不可拖垮整机。
+# 上限之和（约 35.5G）故意大于可用内存（42G）——上限是天花板不是预留，
+# 真实占用约 7G；这样既拦住单点跑飞，又不浪费容量。
 services:
   # ============ 中间件（profile: infra）============
   etcd:
@@ -45,6 +54,9 @@ services:
       timeout: 20s
       retries: 3
     logging: *default-logging
+    # 只存 Milvus 元数据（collection/分区/segment 索引信息），实测 434M；
+    # ETCD_QUOTA_BACKEND_BYTES 已限 4G 磁盘，内存给 2G 足够
+    mem_limit: 2g
     restart: unless-stopped
 
   minio:
@@ -66,6 +78,8 @@ services:
       timeout: 20s
       retries: 3
     logging: *default-logging
+    # 同时承载 Milvus 的 segment 存储与知识库源文件，会缓存热对象，实测 1.99G
+    mem_limit: 3g
     restart: unless-stopped
 
   milvus:
@@ -91,7 +105,17 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+      # standalone 冷启动需 30~60s（加载 collection + 建 mmap 映射）。
+      # 无 start_period 时启动期探测失败会直接计入 retries，容器被误判 unhealthy，
+      # 进而让 depends_on: service_healthy 的 backend/worker 连带启动失败。
+      start_period: 90s
     logging: *default-logging
+    # Artoo 内存占用的大头，随向量总量增长。1024 维下索引常驻约 5KB/向量
+    # （milvus-user.yaml 里 vectorIndex 不走 mmap），12G 约对应 200 万向量。
+    # 逼近上限时把 queryNode.mmap.vectorIndex 改 true（索引转磁盘，略增延迟）。
+    # mem_reservation 是软预留：内存紧张时内核优先从别处回收，保 Milvus 检索延迟。
+    mem_limit: 12g
+    mem_reservation: 2g
     restart: unless-stopped
 
   postgres:
@@ -120,7 +144,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      # 首次初始化 data 目录 / 崩溃恢复重放 WAL 期间不接受连接
+      start_period: 30s
     logging: *default-logging
+    # shared_buffers 512M + work_mem 4M × 最多 200 连接 + 维护内存，3G 有余量
+    mem_limit: 3g
+    mem_reservation: 768m
     restart: unless-stopped
 
   redis:
@@ -129,7 +158,19 @@ services:
     profiles: ["infra"]
     environment:
       - TZ=${TZ:-Asia/Shanghai}
-    command: ["redis-server", "--ignore-warnings", "ARM64-COW-BUG"]
+    # maxmemory-policy 必须是 volatile-lru，不能用 allkeys-lru：
+    #   本 Redis 同时装「检索结果缓存」（rag:cache:*，带 TTL，可淘汰）与
+    #   「入库/图谱/会话上传任务 Stream」（pipeline:tasks 等，**无 TTL，绝不能淘汰**）。
+    #   allkeys-lru 在内存压力下会把任务 Stream 也淘汰掉 → 静默丢文档入库任务。
+    #   volatile-lru 只淘汰设了 TTL 的键，正好只命中缓存。
+    command:
+      - "redis-server"
+      - "--ignore-warnings"
+      - "ARM64-COW-BUG"
+      - "--maxmemory"
+      - "1500mb"
+      - "--maxmemory-policy"
+      - "volatile-lru"
     expose:
       - "6379"
     volumes:
@@ -140,6 +181,8 @@ services:
       timeout: 5s
       retries: 3
     logging: *default-logging
+    # 略高于 maxmemory，给 RDB 落盘时的 fork COW 留空间
+    mem_limit: 2g
     restart: unless-stopped
 
   # ============ 知识图谱（profile: graph，默认不启动）============
@@ -155,19 +198,34 @@ services:
       # 账号口令走 .env（与应用侧 NEO4J_USERNAME/NEO4J_PASSWORD 一致），默认 neo4j/password
       - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-password}
       - NEO4J_PLUGINS=["apoc"]
-      - NEO4J_dbms_memory_heap_max__size=2G
-      - NEO4J_dbms_memory_pagecache_size=2G
+      # ★ Neo4j 5 的配置命名空间已从 dbms.* 迁到 server.*：
+      #   旧名 NEO4J_dbms_memory_heap_max__size / NEO4J_dbms_memory_pagecache_size
+      #   在 Neo4j 5 下**不生效**（仅记一条 Unrecognized setting 警告后忽略），
+      #   Neo4j 会退回按整机内存自动推算堆大小 —— 在 62G 机器上会推得很大。
+      #   下面是 Neo4j 5 的正确名字，务必用这套。
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512M
+      # 单事务内存上限：图谱抽取用 apoc.periodic.iterate 批量写，防单批撑爆堆
+      - NEO4J_db_memory_transaction_total_max=512M
     ports:
-      # 7474 = 浏览器管理台（HTTP），7687 = Bolt 驱动端口（应用经容器网络以 bolt://neo4j:7687 连接）
-      - "7474:7474"
-      - "7687:7687"
+      # 7474 = 浏览器管理台（HTTP），7687 = Bolt 驱动端口。
+      # ★ 只绑 127.0.0.1：应用经容器网络以 bolt://neo4j:7687 连接，不需要对外暴露；
+      #   若绑 0.0.0.0，公网 IP 主机上等于把图库管理台directly 暴露出去。
+      #   需要远程用浏览器管理台时走 SSH 隧道：ssh -L 7474:127.0.0.1:7474 <host>
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     volumes:
       - neo4j_data:/data
+    # 堆 1G + pagecache 512M + JVM 元空间/线程栈/直接内存，3G 上限有充足余量
+    mem_limit: 3g
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
       interval: 30s
       timeout: 20s
       retries: 5
+      # APOC 插件解包 + 加载较慢
+      start_period: 60s
     logging: *default-logging
     restart: unless-stopped
 
@@ -211,6 +269,10 @@ services:
       minio:
         condition: service_healthy
     logging: *default-logging
+    # BACKEND_WORKERS=2 个 uvicorn 进程，各持 DB 连接池 + 检索/Agent 上下文缓冲；
+    # 同步上传与 Redis 不可用时的降级入库也在这里跑。实测 1.07G，给 4G 余量。
+    # 调大 BACKEND_WORKERS 需按比例调大这里。
+    mem_limit: 4g
     restart: unless-stopped
 
   worker:
@@ -248,6 +310,12 @@ services:
       minio:
         condition: service_healthy
     logging: *default-logging
+    # Artoo 里最吃内存的应用进程：文档解析（pymupdf 加载大 PDF 到内存）、
+    # 分块、embedding 批次缓冲、OCR 图片缓冲同时在途。
+    # 上限须与 .env 的 PIPELINE_MAX_CONCURRENT（在途文档数）匹配：
+    #   6 个并发文档 × 单文档峰值约 500MB~1G，故给 6G。
+    #   调大 PIPELINE_MAX_CONCURRENT 必须同步调大这里，否则解析大文件时会被 OOM Kill。
+    mem_limit: 6g
     restart: unless-stopped
 
   frontend:
@@ -267,6 +335,8 @@ services:
     depends_on:
       - backend
     logging: *default-logging
+    # 纯静态资源 nginx，实测 8MB
+    mem_limit: 512m
     restart: unless-stopped
 
 volumes:
