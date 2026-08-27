@@ -78,7 +78,10 @@ RETRIEVAL_FIELD_SPECS: dict[str, FieldSpec] = {
     "mmr_threshold": FieldSpec(default=0.7, lo=0.0, hi=1.0, kind=KIND_FLOAT),
     # 索引档 Index_Tier
     "hnsw_ef": FieldSpec(default=128, lo=1, hi=2048, kind=KIND_INT),
-    "hnsw_ef_construction": FieldSpec(default=128, lo=8, hi=512, kind=KIND_INT),
+    # efConstruction 默认 200（对齐 app/storage/milvus.py 的 _DEFAULT_EF_CONSTRUCTION）：
+    # 128→200 召回提升明显而建索引耗时仅增约五成；200→400 召回几乎不再提升但耗时翻倍，
+    # 200 是生产环境的性价比拐点。M=16 为通用最优（内存与召回平衡）。
+    "hnsw_ef_construction": FieldSpec(default=200, lo=8, hi=512, kind=KIND_INT),
     "hnsw_m": FieldSpec(default=16, lo=4, hi=64, kind=KIND_INT),
     # 上传限制档 Upload_Tier（租户级）
     # 单文件大小上限（MB），会话上传与知识库上传共用

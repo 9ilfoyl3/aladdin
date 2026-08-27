@@ -26,7 +26,7 @@ from app.retrieval.config import (
 from app.session_upload.memory import recommend_kb_chunk_cap
 from app.storage.graph_store import get_graph_store
 from app.storage.invalidation import get_invalidation_bus
-from app.storage.milvus import MilvusClient
+from app.storage.milvus import get_milvus_client
 
 logger = logging.getLogger(__name__)
 
@@ -180,9 +180,12 @@ class SystemConfigUpdate(BaseModel):
 
 
 async def _check_milvus(settings) -> str:
-    """检测 Milvus 连接状态"""
+    """检测 Milvus 连接状态。
+
+    复用进程内单例（而非另建客户端），使探测走的是业务实际使用的连接与 collection 拓扑配置。
+    """
     try:
-        client = MilvusClient(host=settings.milvus_host, port=settings.milvus_port)
+        client = get_milvus_client()
         # 尝试连接并列出 collections
         await asyncio.to_thread(client._connect)
         return "ok"

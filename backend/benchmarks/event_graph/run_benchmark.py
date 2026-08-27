@@ -363,8 +363,10 @@ async def teardown_kb(kb_id: str) -> None:
         from app.storage.milvus import get_milvus_client
 
         milvus = get_milvus_client()
+        # 单 collection + Partition Key 拓扑：按 kb_id 删该库向量，不 drop 物理 collection
+        # （物理表由全部知识库共用，drop 会清掉其它库的数据）。
         if await milvus.has_collection(kb_id):
-            await milvus.drop_collection(kb_id)
+            await milvus.delete_by_kb(kb_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("清理 Milvus chunk 集合失败（可忽略）: %s", e)
 

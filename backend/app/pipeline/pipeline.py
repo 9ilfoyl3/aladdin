@@ -695,21 +695,24 @@ class DocumentPipeline:
                         "chunk_index": child_idx,
                         "file_type": meta.file_type,
                         "element_type": meta.element_type,
+                        # 租户维度（不参与鉴权，鉴权在 PG 侧 kb_authz 完成）：仅供运维排障
+                        # 与将来按租户批量统计/清理。kb_id / session_id 两个 Partition Key
+                        # 字段由 MilvusClient._stamp_records 统一兜底，此处不重复。
+                        "tenant_id": kb_tenant_id or "",
                     })
 
-                # 确保 collection 存在
-                if not await self.milvus.has_collection(kb_id):
-                    # 新建 collection 时按**该知识库所属租户**的检索配置 HNSW 建索引参数生效
-                    # （存量 collection 不受影响，不触发重建）。kb_tenant_id 已在本阶段开头
-                    # 反查得到；取不到租户 → get_effective(None) 全默认（128/16）。
-                    from app.retrieval.config import get_retrieval_config_store
+                # 幂等确保承载该知识库的物理 collection 存在（单 collection + Partition Key
+                # 拓扑下这是全局共享表，首次写入时懒建，之后恒命中"已存在"分支）。
+                # 建表时按**该知识库所属租户**的检索配置决定 HNSW 建索引参数；
+                # 取不到租户 → get_effective(None) 全默认。
+                from app.retrieval.config import get_retrieval_config_store
 
-                    cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
-                    await self.milvus.create_collection(
-                        kb_id,
-                        ef_construction=cfg.hnsw_ef_construction,
-                        m=cfg.hnsw_m,
-                    )
+                cfg = await get_retrieval_config_store().get_effective(kb_tenant_id)
+                await self.milvus.ensure_collection(
+                    kb_id,
+                    ef_construction=cfg.hnsw_ef_construction,
+                    m=cfg.hnsw_m,
+                )
 
                 # 写入前先清理本文档可能残留的旧向量（幂等，治本去孤儿）。
                 # 覆盖三类重处理场景：手动 retry、批量 retry、机制 A 崩溃重投。
@@ -717,14 +720,6 @@ class DocumentPipeline:
                 # 已写入的批次会成为孤儿向量（DB 未 commit 故无对应 chunk 记录），
                 # 且本次 chunk_id 全新，不覆盖旧向量。先按 doc_id 删一次确保干净。
                 await self._cleanup_milvus_orphans(kb_id, doc_id)
-
-                # 检查 collection schema 版本，兼容旧 schema
-                schema_info = await self.milvus.check_schema_version(kb_id)
-                if schema_info["exists"] and not schema_info["has_new_fields"]:
-                    for record in milvus_data:
-                        record.pop("file_type", None)
-                        record.pop("element_type", None)
-                    logger.info("文档 %s: 旧 schema collection，跳过 file_type/element_type 字段", doc_id)
 
                 # 批量写入 Milvus
                 if milvus_data:
@@ -1222,6 +1217,9 @@ class DocumentPipeline:
     async def _cleanup_milvus_orphans(self, kb_id: str, doc_id: str) -> None:
         """按 doc_id 清理 Milvus 向量。拒绝空 kb_id/doc_id（防误删整库）。失败记 WARNING。
 
+        删除范围由 ``MilvusClient`` 注入的 ``kb_id == "..."`` Partition Key 条件与本处
+        ``doc_id`` 条件共同约束，单 collection 拓扑下不会波及其它知识库。
+
         统一用于：
         - Index 阶段写入前先删旧（幂等，治本去孤儿）
         - CancelledError 分支回滚后清理已写入的孤儿向量
@@ -1231,6 +1229,8 @@ class DocumentPipeline:
             logger.warning("跳过孤儿清理：kb_id/doc_id 为空")
             return
         try:
+            # has_collection 在单 collection 拓扑下表示"承载表是否已建"，
+            # 未建表则必然无向量可删，直接返回。
             if not await self.milvus.has_collection(kb_id):
                 return
             await self.milvus.delete_by_doc_id(kb_id, doc_id)
