@@ -49,6 +49,10 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
+# 运维脚本（Milvus 拓扑初始化 / 数据清除 / 重建索引）。
+# 必须进镜像：deploy/reset-knowledge-data.sh 是在 backend 容器内执行
+# `python -m scripts.purge_data` 的，容器里没有它就无法完成拓扑切换。
+COPY scripts/ ./scripts/
 
 EXPOSE 8000
 
