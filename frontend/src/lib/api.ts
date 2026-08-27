@@ -412,7 +412,8 @@ export const apiKeyApi = {
 const tenantHeader = (tenantId?: string): RequestInit =>
   tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
 
-// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 单库/单会话 chunk 硬上限。
+// 平台级配置（超管）：当前承载向量集合加载缓存 TTL + 单库/单会话 chunk 硬上限。
+// 注：全部知识库共用一个 Milvus collection（kb_id 作为 Partition Key），故加载缓存是全局粒度。
 export interface PlatformConfig {
   load_cache_ttl: number
   kb_chunk_cap: number
@@ -449,7 +450,7 @@ export const systemApi = {
       method: 'POST',
       ...tenantHeader(tenantId),
     }),
-  // 平台配置（超管专属）：collection 加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
+  // 平台配置（超管专属）：向量集合加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
   getPlatformConfig: () => request<PlatformConfigResponse>('/system/platform-config'),
   // 仅提交本次改动的字段（后端 model_dump(exclude_unset=True, exclude_none=True)）
   updatePlatformConfig: (data: Partial<PlatformConfig>) =>
