@@ -622,8 +622,11 @@ class SessionUploadService:
                 "chunk_index": child_idx,
                 "file_type": meta.file_type,
                 "element_type": meta.element_type,
-                # 共享 collection 隔离的核心字段：检索时 expr 按 session_id 过滤（Req 1.11）
+                # 会话向量集合的 Partition Key：既是隔离条件也是分区裁剪条件（Req 1.11）。
+                # 缺失会被 MilvusClient._stamp_records 判为非法写入并抛错。
                 "session_id": session_id,
+                # 租户维度（不参与鉴权）：仅供运维排障与按租户统计/清理。
+                "tenant_id": tenant_id or "",
             })
 
         # 写 Milvus（批量；任一阶段失败清理 + 传播）

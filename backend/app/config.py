@@ -27,6 +27,50 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
+    # ============================================================
+    # Milvus Collection 拓扑（共享 collection + Partition Key + 按维度分表）
+    # ============================================================
+    # 物理 collection 名 = `<base>_<dim>`，例如 artoo_chunks_1024。
+    #
+    # 三条设计约束：
+    # 1) 知识库数量**无上限**：全部正式知识库共用同一个物理 collection，`kb_id` 作为
+    #    Partition Key 由 Milvus 自动 hash 分桶。collection 数量只随「向量维度种类」增长，
+    #    与知识库数量完全解耦，因此新建知识库是零物理开销的（只是一个标量值）。
+    # 2) 检索可裁剪：每次检索/删除都带 `kb_id == "..."`（或 `kb_id in [...]`）标量条件，
+    #    Milvus 据 Partition Key 只扫相关分区，而不是全表扫描后过滤。
+    # 3) 换 embedding 模型不停机：不同维度落不同 collection，新模型写新表、旧数据仍可查，
+    #    重建索引可灰度进行，不需要「先清空再重灌」的停机窗口。
+    milvus_collection: str = "artoo_chunks"
+    # 会话附件独立一套 collection，以 `session_id` 作为 Partition Key：
+    # 会话是短生命周期、高基数的隔离维度，若与正式库合表会全部落进同一个 kb_id 分桶
+    # 形成热点分区，独立成表后每个会话都能按分区裁剪。
+    milvus_session_collection: str = "artoo_session_chunks"
+    # 当前 embedding 维度，决定读写落到哪个 `<base>_<dim>` collection。
+    # BGE-M3 = 1024；OpenAI text-embedding-3-* = 1536/3072；Qwen3-Embedding = 1024/2560/4096。
+    # 换模型时改这里 + 重建索引；旧维度 collection 会被保留（删除操作仍会跨全部维度清理，
+    # 不留孤儿向量），确认无用后可用 `python -m scripts.init_milvus --prune-dims` 清掉。
+    embed_dim: int = 1024
+    # Partition Key 的物理分区数（**建表时固定，之后不可修改**；改动需重建 collection）。
+    #
+    # 关键认知：分区数**不是**知识库数量上限——无上限个 kb_id 会 hash 进这 N 个分桶。
+    # 它只决定「一次检索最少要扫多少比例的数据」（≈ 1/N）与写入侧的 segment/内存开销。
+    #
+    # 容量参考（按单个 collection 的向量总量选，不是按知识库个数）：
+    #   < 5M 向量   -> 64（默认，单机 + mmap 部署的稳妥值）
+    #   5M ~ 50M    -> 256
+    #   > 50M       -> 512 ~ 1024（上限 1024）
+    # 分区数偏大在数据量小时会放大 growing segment 与内存开销，故默认取 64 而非更大值。
+    milvus_num_partitions: int = 64
+    milvus_session_num_partitions: int = 16
+    # 写入分片数（num_shards，建表时固定）。决定写入并行度上限：单分片是单点写入瓶颈。
+    # 0 = 用 Milvus 默认（standalone 通常为 1）。多副本集群 / 高并发灌库场景建议 2~4。
+    # 注意：分片数 = vchannel 数，过大会加重 message queue 与 dispatcher 压力。
+    milvus_shards_num: int = 0
+    # 读副本数（replica_number，LoadCollection 时生效，可随时改无需重建表）。
+    # >1 让多个 QueryNode 各持一份数据，提升读吞吐与可用性；单机 standalone 保持 0/1。
+    # 每增加一个副本，常驻内存需求翻一倍。
+    milvus_replica_number: int = 0
+
     # MinIO / 对象存储（知识库源文件权威存储）
     # endpoint 形如 "localhost:9000"（不带 scheme）；secure=True 时走 https。
     # 复用为 Milvus 部署的同一 MinIO，但用独立 bucket 隔离业务文件与 Milvus 内部数据。
@@ -44,6 +88,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "qwen2.5:7b"
     llm_api_key: str = ""  # 远端 API 的密钥（vllm provider 使用）
+    # 未在模型配置 / 请求里显式指定时的单次输出上限；None 表示沿用模型服务默认。
+    llm_max_output_tokens: int | None = None
 
     # Embedding（远程服务）
     embed_model: str = "BAAI/bge-m3"
@@ -165,6 +211,26 @@ class Settings(BaseSettings):
 
     # 超管业务内容可见边界：False（默认）= Super_Admin 不可查看业务内容正文。
     content_view_boundary_open: bool = False
+
+    # ============================================================
+    # MCP（Model Context Protocol）
+    # ============================================================
+    # ---- inbound：Artoo 作为 MCP server（标准 JSON-RPC over Streamable HTTP）----
+    # 单次工具调用最多并发检索的知识库数。身份可读库很多时，逐库检索会把一次调用放大
+    # 成几十次检索并拖到客户端超时；取分数最高的前 N 个库并发检索后统一归并。
+    mcp_max_kb_fanout: int = 8
+    # 每把 API Key 每分钟的 tools/call 上限（进程内令牌桶）。0 = 关闭限流。
+    mcp_rate_limit_per_minute: int = 120
+    # MCP 会话（Mcp-Session-Id）空闲过期时间（秒）
+    mcp_session_ttl_seconds: int = 3600
+
+    # ---- outbound：Artoo 作为 MCP client（调用第三方 MCP server）----
+    # 是否禁止连接内网/环回地址的 MCP server。默认 False：MCP server 与 Artoo 同处
+    # 内网/同 docker 网络是主流部署形态。置 True 得到更严的 SSRF 策略（仅公网可达地址）。
+    # 无论此项如何，link-local（云元数据端点）恒被阻断。
+    mcp_block_private_network: bool = False
+    mcp_call_timeout: float = 60.0       # 单次远端工具调用超时（秒）
+    mcp_discovery_timeout: float = 10.0  # 工具发现 / 连通性测试超时（秒）
 
     # ============================================================
     # 知识图谱（knowledge-graph）：全局 env 开关与 Neo4j 连接/抽取参数

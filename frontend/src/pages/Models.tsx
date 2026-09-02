@@ -33,6 +33,7 @@ interface LLMConfigItem {
   stream_enabled: boolean
   thinking_control: string | null
   max_context_tokens: number | null
+  max_output_tokens: number | null
   chat_visible: boolean
   created_at: string
 }
@@ -47,6 +48,7 @@ interface FormData {
   stream_enabled: boolean
   thinking_control: ThinkingControlValue
   max_context_tokens: string
+  max_output_tokens: string
   chat_visible: boolean
 }
 
@@ -60,6 +62,7 @@ const emptyForm: FormData = {
   stream_enabled: true,
   thinking_control: 'none',
   max_context_tokens: '',
+  max_output_tokens: '',
   chat_visible: true,
 }
 
@@ -128,6 +131,7 @@ function Models() {
         stream_enabled: data.stream_enabled,
         thinking_control: infra === 'vllm' ? data.thinking_control : undefined,
         max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : undefined,
+        max_output_tokens: data.max_output_tokens ? parseInt(data.max_output_tokens) : undefined,
         chat_visible: data.chat_visible,
       })
     },
@@ -151,6 +155,7 @@ function Models() {
         // Ollama 无需思考参数格式：清空，避免残留旧值
         thinking_control: infra === 'vllm' ? data.thinking_control : null,
         max_context_tokens: data.max_context_tokens ? parseInt(data.max_context_tokens) : null,
+        max_output_tokens: data.max_output_tokens ? parseInt(data.max_output_tokens) : null,
         chat_visible: data.chat_visible,
       }
       if (data.api_key) payload.api_key = data.api_key
@@ -242,6 +247,7 @@ function Models() {
       stream_enabled: item.stream_enabled,
       thinking_control: (item.thinking_control as ThinkingControlValue) || 'none',
       max_context_tokens: item.max_context_tokens ? String(item.max_context_tokens) : '',
+      max_output_tokens: item.max_output_tokens ? String(item.max_output_tokens) : '',
       chat_visible: item.chat_visible,
     })
     setThinkingManual(true)  // 编辑既有配置：尊重已存格式，不随服务商/模型自动覆盖
@@ -530,6 +536,17 @@ function Models() {
                   className="mt-1.5"
                 />
               </div>
+              <div>
+                <Label>最大输出长度（token）</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.max_output_tokens}
+                  onChange={(e) => setForm({ ...form, max_output_tokens: e.target.value })}
+                  placeholder="留空使用环境变量/服务默认"
+                  className="mt-1.5"
+                />
+              </div>
             </div>
             {infraForVendor(form.vendor) !== 'ollama' && (
               <div>
@@ -617,5 +634,3 @@ function Models() {
 }
 
 export default Models
-
-

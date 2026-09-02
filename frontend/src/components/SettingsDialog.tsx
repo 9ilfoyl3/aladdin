@@ -142,8 +142,11 @@ interface RetrievalGroup {
   fields: RetrievalField[]
 }
 
-// 索引档共用提示文案
-const INDEX_BUILD_HINT = '修改仅对新建或重建的知识库生效，且增大将提高内存占用'
+// 索引档共用提示文案。
+// 全部知识库共用一个 Milvus collection（以 kb_id 作为 Partition Key 分区），
+// 建索引参数在该 collection 建表时一次性固化，之后新建知识库不会重建索引，
+// 因此这两项只在重建向量集合（make milvus-reset）后生效。
+const INDEX_BUILD_HINT = '建索引参数在向量集合建表时固化，修改需重建向量集合后生效，且增大将提高内存占用'
 
 // 分块档（切片配置分项）
 const CHUNK_GROUP: RetrievalGroup = {
@@ -203,7 +206,7 @@ const RETRIEVAL_GROUPS: RetrievalGroup[] = [
     icon: Database,
     description: 'HNSW 向量索引参数',
     fields: [
-      { key: 'hnsw_ef', label: 'HNSW 查询 ef', type: 'number', min: 1, max: 2048, hint: '查询时的探索宽度，范围 [1, 2048]' },
+      { key: 'hnsw_ef', label: 'HNSW 查询 ef', type: 'number', min: 1, max: 2048, hint: '查询时的探索宽度，范围 [1, 2048]。每次检索传参，改完即时生效' },
       { key: 'hnsw_ef_construction', label: 'HNSW 建索引 efConstruction', type: 'number', min: 8, max: 512, hint: `范围 [8, 512]。${INDEX_BUILD_HINT}` },
       { key: 'hnsw_m', label: 'HNSW 建索引 M', type: 'number', min: 4, max: 64, hint: `范围 [4, 64]。${INDEX_BUILD_HINT}` },
     ],
@@ -777,7 +780,7 @@ function PlatformSection() {
           <Server className="h-4 w-4 text-primary shrink-0" />
           <div>
             <h3 className="text-sm font-semibold">加载缓存</h3>
-            <p className="text-[11px] text-muted-foreground">影响检索延迟与新数据可见性</p>
+            <p className="text-[11px] text-muted-foreground">影响检索延迟与新数据可见性（全局向量集合级）</p>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-4">
@@ -793,7 +796,8 @@ function PlatformSection() {
               disabled={isLoading || !form}
             />
             <p className="text-[11px] text-muted-foreground">
-              控制 collection 加载缓存有效期（秒），范围 [{LOAD_CACHE_TTL_MIN}, {LOAD_CACHE_TTL_MAX}]。
+              控制向量集合加载缓存有效期（秒），范围 [{LOAD_CACHE_TTL_MIN}, {LOAD_CACHE_TTL_MAX}]。
+              全部知识库共用一个向量集合，任一知识库写入都会失效该缓存。
             </p>
           </div>
         </div>

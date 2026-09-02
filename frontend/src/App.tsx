@@ -11,6 +11,7 @@ import Models from './pages/Models'
 import EmbedConfig from './pages/EmbedConfig'
 import OcrServices from './pages/OcrServices'
 import AsrServices from './pages/AsrServices'
+import McpServers from './pages/McpServers'
 import AgentConfig from './pages/AgentConfig'
 import Skills from './pages/Skills'
 import Landing from './pages/Landing'
@@ -84,6 +85,7 @@ function App() {
         <Route path="embed-config" element={<EmbedConfig />} />
         <Route path="ocr-services" element={<OcrServices />} />
         <Route path="asr-services" element={<AsrServices />} />
+        <Route path="mcp-servers" element={<McpServers />} />
         <Route path="api-keys" element={<ApiKeys />} />
         <Route path="tenants" element={<Tenants />} />
         <Route path="users" element={<Users />} />

@@ -31,6 +31,7 @@ from app.api.kb_share_link import router as kb_share_link_router
 from app.api.llm_config import router as llm_config_router
 from app.api.ocr_config import router as ocr_config_router
 from app.api.asr_config import router as asr_config_router
+from app.api.mcp_config import router as mcp_config_router
 from app.api.retrieval import router as retrieval_router
 from app.api.session import router as session_router
 from app.api.session_upload import router as session_upload_router
@@ -64,6 +65,10 @@ async def lifespan(app: FastAPI):
     # 初始化对象存储 bucket（知识库源文件权威存储）
     await _init_object_store()
 
+    # 幂等建好 Milvus 的两个物理 collection（单 collection + Partition Key 拓扑）
+    from app.startup import init_milvus_collections
+    await init_milvus_collections()
+
     # 从数据库加载 active 的 Embed/Rerank 配置覆盖环境变量默认值
     await load_embed_configs()
 
@@ -82,15 +87,14 @@ async def lifespan(app: FastAPI):
 
     # 启动跨进程失效广播（InvalidationBus）
     from app.startup import start_invalidation_bus
-    from app.storage.milvus import get_milvus_client, MilvusClient
+    from app.storage.milvus import get_milvus_client
     from app.retrieval.cache import get_retrieval_cache
 
     async def _handle_kb_data(kb_id: str):
         """收到 kb_data 失效信号：清除对应知识库的 Milvus 加载缓存 + 检索结果缓存"""
-        # 失效 Milvus 加载缓存（使下次搜索强制重新 load）
-        milvus = get_milvus_client()
-        collection_name = MilvusClient._collection_name(kb_id)
-        milvus._loaded_at.pop(collection_name, None)
+        # 失效 Milvus 加载缓存（使下次搜索强制重新 load）。单 collection + Partition Key
+        # 拓扑下这会清掉承载该知识库的物理 collection 的全局标记——宁可多 load 不可漏 load。
+        get_milvus_client().invalidate_load_cache(kb_id)
         # 失效检索结果缓存
         cache = await get_retrieval_cache()
         if cache:
@@ -532,6 +536,7 @@ app.include_router(llm_config_router)
 app.include_router(embed_config_router)
 app.include_router(ocr_config_router)
 app.include_router(asr_config_router)
+app.include_router(mcp_config_router)
 app.include_router(agent_config_router)
 app.include_router(session_router)
 app.include_router(session_upload_router)

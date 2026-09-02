@@ -21,7 +21,7 @@ from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
-from app.agent.tools.base import ToolResult
+from app.agent.tools.base import ToolContext, ToolResult
 from app.agent.tools.final_answer_parse import extract_inline_answer, parse_final_answer_args
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.text_sanitize import strip_think_blocks
@@ -163,11 +163,16 @@ class AgentEngine:
         llm: LLMProvider,
         tool_registry: ToolRegistry,
         event_bus: EventBus,
+        tool_context: ToolContext | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
         self._tool_registry = tool_registry
         self._event_bus = event_bus
+        # 本次请求的调用方上下文（会话 / 租户 / 主体）。引擎只负责在执行工具时把它带下去，
+        # 不解释其内容；仅声明 accepts_context 的工具（外部 MCP 工具）会收到。
+        # 每次请求新建引擎实例，故这里持有请求态是安全的。
+        self._tool_context = tool_context
         # 用于 stuck loop 检测
         self._previous_responses: list[str] = []
         # 三层递进式上下文管理组件
@@ -454,7 +459,7 @@ class AgentEngine:
                 #     前端在收到 done 时把最后一段 thought 转为 answer，
                 #     此处不补发，避免思考面板与正文面板重复显示同一段内容
                 need_emit_answer = (
-                    verdict.reason == "final_answer"
+                    verdict.reason in {"final_answer", "length"}
                     and not verdict.answer_streamed
                     and bool(answer)
                 )
@@ -470,7 +475,7 @@ class AgentEngine:
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,
                     session_id=session_id,
-                    data={"content": ""},
+                    data={"content": "", "finish_reason": response.finish_reason},
                     done=True,
                 ))
 
@@ -621,10 +626,16 @@ class AgentEngine:
         router = ContentStreamRouter()
         inline_answer = ""  # 路由器识别出的内联 final_answer 答案文本
 
+        call_kwargs: dict = {
+            "temperature": self._config.temperature,
+            "enable_thinking": self._config.thinking_enabled,
+        }
+        if self._config.max_output_tokens is not None:
+            call_kwargs["max_tokens"] = self._config.max_output_tokens
+
         async for chunk in self._llm.stream_with_tools(
             messages, tools,
-            temperature=self._config.temperature,
-            enable_thinking=self._config.thinking_enabled,
+            **call_kwargs,
         ):
             # 普通 content → 经路由器判别后发射为思考或内联答案
             if chunk.content and chunk.response_type == "content":
@@ -750,7 +761,11 @@ class AgentEngine:
                     answer = strip_think_blocks(answer)
                     return ResponseVerdict(
                         should_stop=True,
-                        reason="final_answer",
+                        reason=(
+                            "length"
+                            if response.finish_reason == "length"
+                            else "final_answer"
+                        ),
                         content=answer,
                         answer_streamed=response.answer_streamed,
                     )
@@ -764,7 +779,11 @@ class AgentEngine:
             answer = strip_think_blocks(response.inline_answer)
             return ResponseVerdict(
                 should_stop=True,
-                reason="final_answer",
+                reason=(
+                    "length"
+                    if response.finish_reason == "length"
+                    else "final_answer"
+                ),
                 content=answer,
                 answer_streamed=True,
             )
@@ -803,6 +822,16 @@ class AgentEngine:
             return ResponseVerdict(
                 should_stop=True,
                 reason="natural_stop",
+                content=content,
+                answer_streamed=False,
+            )
+
+        # 普通正文输出也可能撞输出上限。有内容时保留 partial answer，
+        # 但不能把它伪装成 finish_reason=stop 的自然结束。
+        if response.finish_reason == "length" and content:
+            return ResponseVerdict(
+                should_stop=True,
+                reason="length",
                 content=content,
                 answer_streamed=False,
             )
@@ -908,7 +937,9 @@ class AgentEngine:
         """执行单个工具，返回 (result, duration_ms)"""
         start_time = time.time()
         try:
-            result = await self._tool_registry.execute(tc.function_name, args)
+            result = await self._tool_registry.execute(
+                tc.function_name, args, ctx=self._tool_context
+            )
         except Exception as e:
             logger.error(
                 "[Agent] Tool execution error: %s - %s",
@@ -1098,7 +1129,13 @@ class AgentEngine:
 
             # 流式生成，逐 token 发射 FINAL_ANSWER 事件
             full_answer = ""
-            async for token in self._llm.stream(synthesis_messages):
+            synthesis_kwargs: dict = {}
+            if self._config.max_output_tokens is not None:
+                synthesis_kwargs["max_tokens"] = self._config.max_output_tokens
+
+            async for token in self._llm.stream(
+                synthesis_messages, **synthesis_kwargs
+            ):
                 full_answer += token
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,

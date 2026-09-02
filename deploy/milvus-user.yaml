@@ -9,6 +9,15 @@
 #   docker compose --profile infra up -d milvus
 # ============================================================
 
+mq:
+  dispatcher:
+    # 每个物理通道(pchannel)的最大 dispatcher/消费者数，默认 5。
+    # collection 多时多个 vchannel 哈希到同一 pchannel，重启/恢复期集中 watch
+    # 超过 5 个即注册失败并无限重试，形成 "consumer number limit exceeded"
+    # 日志风暴（2026-08-21 生产事故：442G 日志写满磁盘的根因之一），
+    # 且超限 collection 的数据通道中断。collection 持续增长场景需调大。
+    maxDispatcherNumPerPchannel: 32
+
 queryNode:
   mmap:
     # 向量原始数据走 mmap —— 省常驻内存最有效的一项（原始向量是内存大头）。
@@ -23,7 +32,23 @@ queryNode:
     # 新增/增长段也启用 mmap，降低新写入数据的内存开销（略增受影响段的查询延迟）。
     growingMmapEnabled: true
 
-  # chunk cache（原始向量取回用）内存上限。默认 2GB，按服务器内存调整。
-  # 内存吃紧可调小；磁盘较快（NVMe）时调小影响不大。如需修改取消下行注释：
-  # cache:
-  #   memoryLimit: 2147483648  # 2GB = 2 * 1024 * 1024 * 1024
+  # chunk cache（mmap 命中后取回原始向量用）内存上限。
+  # 混部机器上显式给 Milvus 划一块预算，而不是让它按整机 62G 自行推算。
+  # 实测磁盘：顺序读写 206MB/s、4K QD1 延迟约 153µs（云 SSD，非机械盘），
+  # 因此 mmap 命中后回读代价可接受，4G cache 足以覆盖热数据。
+  cache:
+    memoryLimit: 4294967296  # 4GB
+
+# ============================================================
+# 容量演进：何时把 vectorIndex 也改成 mmap
+# ============================================================
+# 1024 维（BGE-M3）下，索引常驻内存约 5KB/向量（vectorIndex: false 时）。
+# compose 给 arag-milvus 的 mem_limit 是 12G，对应约 200 万向量的索引。
+#
+# 盯这条命令，RSS 逼近 10G 时把上面的 queryNode.mmap.vectorIndex 改为 true：
+#     docker stats --no-stream arag-milvus
+#
+# 改 true 后索引也走磁盘 + page cache，内存占用大幅下降，代价是检索延迟上升
+# （本机磁盘 206MB/s 有吞吐上限，高并发检索时可能成为瓶颈）。
+# 若那时延迟不可接受，优先级应为：① 加内存 → ② 上 Milvus 集群分离 QueryNode。
+# ============================================================

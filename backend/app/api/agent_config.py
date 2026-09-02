@@ -67,6 +67,34 @@ class PromptRewriteRequest(BaseModel):
     current_prompt: str | None = Field(default=None, max_length=20000, description="当前已有的自定义指令（可选，作为改写基础）")
 
 
+class ToolOption(BaseModel):
+    """可配进 allowed_tools 的单个工具选项。
+
+    ``name`` 是写入预设 ``allowed_tools`` 的稳定契约值；``label`` 仅供展示。
+    MCP 工具的 ``name`` 已是带 ``tool_prefix`` 的展示名（与
+    ``chat._register_mcp_tools`` 的比对口径一致，见 MCPServerSpec.display_tool_name）。
+    """
+    name: str
+    label: str
+    description: str = ""
+    source: str  # builtin | mcp
+    # 基础设施工具：不受白名单管控，恒注册（见 chat._build_agent_runtime 的 _INFRA_TOOLS）。
+    # 前端据此把开关显示为"始终启用"，避免用户误以为取消勾选就能关掉。
+    always_on: bool = False
+    # MCP 工具来源 server 名（仅展示与分组用）。**绝不回 url / 凭据**——那是平台底座配置。
+    server_name: str | None = None
+
+
+class AvailableToolsResponse(BaseModel):
+    """可用工具清单（内置 + 外部 MCP 发现）。
+
+    ``mcp_error`` 非空表示外部工具发现失败（远端不可达 / DB 异常）。此时内置工具
+    照常返回，不让第三方故障阻塞预设编辑。
+    """
+    tools: list[ToolOption]
+    mcp_error: str | None = None
+
+
 # ============ 内置预设 ============
 # 内置预设：平台级、跨租户全员可见可用、任何人不可改删。
 # owner_user_id=None + tenant_id=None + is_shared=True 标识其内置身份。
@@ -114,6 +142,51 @@ _BUILTIN_PRESETS = [
 ]
 
 
+# ============ 内置工具清单 ============
+# 可配进 allowed_tools 的内置工具。取值与 chat._build_agent_runtime 的注册分支一一对应，
+# 是前端工具勾选面板的单一真值来源（此前硬编码在 AgentConfig.tsx，新增工具易漏）。
+#
+# always_on 的两个是 _INFRA_TOOLS 成员，恒注册、不受白名单管控；仍列出以便前端明示
+# "始终启用"，而不是让用户以为取消勾选就能关掉。read_attachment / read_skill 同为
+# 基础设施工具，但由"本条消息是否带附件""是否存在技能"动态决定，不属于预设可配项，
+# 故不出现在此清单。
+
+_BUILTIN_TOOL_CATALOG: list[dict] = [
+    {
+        "name": "knowledge_search",
+        "label": "语义检索",
+        "description": "在所选知识库与会话文件中做向量 + 稀疏混合检索",
+    },
+    {
+        "name": "grep_chunks",
+        "label": "关键词检索",
+        "description": "在主知识库内按关键词精确匹配分块",
+    },
+    {
+        "name": "list_knowledge_chunks",
+        "label": "分页浏览",
+        "description": "按原文顺序分页浏览文档分块",
+    },
+    {
+        "name": "web_search",
+        "label": "网页搜索",
+        "description": "检索公开网页（需平台已配置 SearXNG，未配置时勾选无效）",
+    },
+    {
+        "name": "thinking",
+        "label": "内部思考",
+        "description": "模型推理的专用去处，推理内容与回答正文隔离",
+        "always_on": True,
+    },
+    {
+        "name": "final_answer",
+        "label": "最终答案",
+        "description": "Agent 收尾信号，缺失则无法输出答案",
+        "always_on": True,
+    },
+]
+
+
 async def get_effective_preset_config(
     preset_id: str | None, identity: IdentityContext | None = None
 ) -> dict:
@@ -142,7 +215,26 @@ async def get_effective_preset_config(
             preset = result.scalar_one_or_none()
             # 指定了 preset 但不可见 → 视为未指定，回退默认（不泄露/不越权使用他人私有预设）
             if preset is not None and identity is not None and not _is_visible(preset, identity):
+                # 显式记录这次静默回退：预设决定 allowed_tools（含外部 MCP 工具白名单），
+                # 回退后工具集与调用方预期完全不同（表现为"Agent 不调工具"），
+                # 而不记日志时现场只能看到"行为不对"却查不到原因。外部租户尤其易踩：
+                # 其 tenant_id 硬锁 External_User_Tenant，看不到业务租户下创建的预设。
+                logger.warning(
+                    "[AgentPreset] 预设 %s 对当前身份不可见，已回退默认预设："
+                    "preset_tenant=%s owner=%s is_shared=%s | caller_tenant=%s subject=%s。"
+                    "工具白名单将取自默认预设。",
+                    preset_id,
+                    preset.tenant_id,
+                    preset.owner_user_id,
+                    preset.is_shared,
+                    identity.tenant_id,
+                    identity.acting_subject_id,
+                )
                 preset = None
+            elif preset is None:
+                logger.warning(
+                    "[AgentPreset] 指定的预设 %s 不存在，已回退默认预设。", preset_id
+                )
         if preset is None:
             result = await session.execute(
                 select(AgentPreset).where(AgentPreset.is_default == True)  # noqa: E712
@@ -308,6 +400,55 @@ async def rewrite_prompt(
         rewritten = "\n".join(lines).strip()
 
     return {"prompt": rewritten}
+
+
+@router.get("/available-tools", response_model=AvailableToolsResponse)
+async def list_available_tools(
+    _identity: IdentityContext = Depends(require_member()),
+):
+    """列出可写入预设 allowed_tools 的工具（内置 + 已启用 MCP server 发现的外部工具）。
+
+    存在的必要性：外部 MCP 工具是 **default-off**，必须显式出现在预设 allowed_tools
+    中才会注册（见 chat._register_mcp_tools）。而 MCP server 配置属平台底座、仅超管
+    可见（mcp_config.py 挂 require_platform），租户侧此前无从得知远端声明了哪些工具名，
+    只能靠直接 PUT config_json 手写——本端点把这份"工具名清单"以最小暴露面开放给成员。
+
+    暴露边界：只回工具名 / 描述 / 来源 server 名，**不回 url、不回凭据、不回 transport
+    等任何平台侧连接配置**，故不构成对 require_platform 的绕过。
+
+    发现失败（远端不可达等）不报错：内置工具照常返回，mcp_error 回带原因，避免第三方
+    故障把预设编辑页整个卡死。工具发现有 300s 模块级缓存，不会每次打开面板都打远端。
+    """
+    tools = [
+        ToolOption(
+            name=item["name"],
+            label=item["label"],
+            description=item.get("description", ""),
+            source="builtin",
+            always_on=bool(item.get("always_on", False)),
+        )
+        for item in _BUILTIN_TOOL_CATALOG
+    ]
+
+    mcp_error: str | None = None
+    try:
+        from app.agent.tools.mcp_client import get_mcp_tools
+
+        for mcp_tool in await get_mcp_tools():
+            tools.append(
+                ToolOption(
+                    name=mcp_tool.name,
+                    label=mcp_tool.name,  # 外部工具名即契约，不另造中文名以免与远端失同步
+                    description=mcp_tool.description or "",
+                    source="mcp",
+                    server_name=mcp_tool.server_name or None,
+                )
+            )
+    except Exception as e:
+        logger.warning("外部 MCP 工具发现失败，仅返回内置工具: %s", e)
+        mcp_error = str(e)
+
+    return AvailableToolsResponse(tools=tools, mcp_error=mcp_error)
 
 
 @router.get("", response_model=list[AgentPresetResponse])

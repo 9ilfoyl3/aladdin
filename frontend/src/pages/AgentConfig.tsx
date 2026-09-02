@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Wand2, Loader2, Share2, Lock, Globe } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Wand2, Loader2, Share2, Lock, Globe, Plug, AlertCircle } from 'lucide-react'
 import { agentPresetApi } from '@/lib/api'
+import type { AgentToolOption } from '@/lib/api'
+import { useAuth } from '@/lib/auth-context'
 import { useConfirm } from '@/lib/confirm-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -62,18 +64,12 @@ const emptyForm: FormData = {
 
 const CUSTOM_INSTRUCTIONS_MAX = 2000
 
-const ALL_TOOLS = [
-  { value: 'knowledge_search', label: '语义检索' },
-  { value: 'grep_chunks', label: '关键词检索' },
-  { value: 'list_knowledge_chunks', label: '分页浏览' },
-  { value: 'web_search', label: '网页搜索' },
-  { value: 'thinking', label: '内部思考' },
-  { value: 'final_answer', label: '最终答案' },
-]
-
 function AgentConfig() {
   const queryClient = useQueryClient()
   const confirm = useConfirm()
+  // 超管无租户（tenant_id 为空），其创建的预设 tenant_id 也为空 → 按 _is_visible
+  // 落入「内置/平台级」分支，全租户可见。这与租户成员建预设的语义完全不同，必须明示。
+  const { isSuperAdmin } = useAuth()
   const [showDialog, setShowDialog] = useState(false)
   const [editingItem, setEditingItem] = useState<AgentPresetItem | null>(null)
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -83,6 +79,15 @@ function AgentConfig() {
   const { data: presets = [], isLoading } = useQuery({
     queryKey: ['agent-presets'],
     queryFn: () => agentPresetApi.list() as Promise<AgentPresetItem[]>,
+  })
+
+  // 可用工具清单（内置 + 平台已启用 MCP server 发现的外部工具）。
+  // 外部工具 default-off，必须显式勾选写入 allowed_tools 才会注入 Agent，
+  // 故这里必须动态拉取——工具名由远端 MCP server 声明，前端无从硬编码。
+  const { data: toolCatalog, isLoading: toolsLoading } = useQuery({
+    queryKey: ['agent-available-tools'],
+    queryFn: () => agentPresetApi.availableTools(),
+    staleTime: 60_000,
   })
 
   const createMutation = useMutation({
@@ -212,6 +217,47 @@ function AgentConfig() {
     }))
   }
 
+  const builtinTools = toolCatalog?.tools.filter((t) => t.source === 'builtin') ?? []
+  const mcpTools = toolCatalog?.tools.filter((t) => t.source === 'mcp') ?? []
+  // 已配在预设里、但当前清单发现不到的工具名（MCP server 被停用 / 不可达 / 改了前缀）。
+  // 仍然列出来：否则它们既不显示又会被原样保存回去，用户完全看不见自己配了什么。
+  const orphanTools = toolCatalog
+    ? form.allowed_tools.filter((n) => !toolCatalog.tools.some((t) => t.name === n))
+    : []
+
+  // 工具勾选按钮。always_on 的基础设施工具恒注册，不可勾选（点了也改不了行为）。
+  function renderToolChip(tool: AgentToolOption) {
+    const selected = form.allowed_tools.includes(tool.name)
+    if (tool.always_on) {
+      return (
+        <span
+          key={tool.name}
+          title={`${tool.description}（基础设施工具，始终启用）`}
+          className="px-3 py-1.5 rounded-md text-xs border border-border bg-muted/50 text-muted-foreground inline-flex items-center gap-1"
+        >
+          <Lock className="h-3 w-3" />
+          {tool.label}
+          <span className="text-[10px] opacity-70">始终启用</span>
+        </span>
+      )
+    }
+    return (
+      <button
+        key={tool.name}
+        type="button"
+        title={tool.description || undefined}
+        onClick={() => toggleTool(tool.name)}
+        className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer transition-colors ${
+          selected
+            ? 'bg-primary/10 border-primary/30 text-primary'
+            : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
+        }`}
+      >
+        {tool.label}
+      </button>
+    )
+  }
+
   return (
     <div>
       {/* 页面头部 */}
@@ -225,6 +271,18 @@ function AgentConfig() {
           新建预设
         </Button>
       </div>
+
+      {/* 超管提示：其身份无租户，建出的预设是平台级、全租户可见 */}
+      {isSuperAdmin && (
+        <div className="mb-5 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>
+            你以平台超级管理员身份进入。此处创建的预设为<strong>平台级</strong>，
+            <strong>所有租户都能看到并使用</strong>，且仅你本人可修改删除。
+            用于把已接入的 MCP 外部工具装配成可复用预设，请勿在此存放某个租户的私有配置。
+          </span>
+        </div>
+      )}
 
       {/* 预设卡片列表 */}
       {isLoading ? (
@@ -448,24 +506,72 @@ function AgentConfig() {
                 onCheckedChange={(checked) => setForm({ ...form, is_shared: checked })}
               />
             </div>
-            <div>
-              <Label className="mb-2 block">允许的工具</Label>
-              <div className="flex flex-wrap gap-2">
-                {ALL_TOOLS.map((tool) => (
-                  <button
-                    key={tool.value}
-                    type="button"
-                    onClick={() => toggleTool(tool.value)}
-                    className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer transition-colors ${
-                      form.allowed_tools.includes(tool.value)
-                        ? 'bg-primary/10 border-primary/30 text-primary'
-                        : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/20'
-                    }`}
-                  >
-                    {tool.label}
-                  </button>
-                ))}
+            <div className="space-y-3">
+              <div>
+                <Label className="mb-2 block">允许的工具</Label>
+                {toolsLoading ? (
+                  <p className="text-xs text-muted-foreground">加载工具清单...</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {builtinTools.map(renderToolChip)}
+                  </div>
+                )}
               </div>
+
+              {/* 外部工具（MCP）：由平台配置的远端 MCP server 声明，default-off，
+                  必须在此显式勾选才会注入本预设的 Agent 运行时。 */}
+              {mcpTools.length > 0 && (
+                <div>
+                  <Label className="mb-1.5 flex items-center gap-1.5">
+                    <Plug className="h-3.5 w-3.5 text-muted-foreground" />
+                    外部工具
+                    <span className="text-xs font-normal text-muted-foreground">
+                      来自平台接入的 MCP 服务，默认关闭，勾选后本预设才可调用
+                    </span>
+                  </Label>
+                  <div className="flex flex-wrap gap-2">
+                    {mcpTools.map(renderToolChip)}
+                  </div>
+                  {/* 来源说明：同名工具会被 tool_prefix 区分，标出归属便于排查 */}
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    来源：{Array.from(new Set(mcpTools.map((t) => t.server_name).filter(Boolean))).join('、') || '未命名服务'}
+                  </p>
+                </div>
+              )}
+
+              {toolCatalog?.mcp_error && (
+                <div className="flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-700">
+                  <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>外部工具清单获取失败，暂时只能配置内置工具。请联系平台管理员检查 MCP 服务连通性。</span>
+                </div>
+              )}
+
+              {/* 失效残留：预设里存着、但当前发现不到的工具名。保留原值不动，仅提供移除入口。 */}
+              {orphanTools.length > 0 && (
+                <div>
+                  <Label className="mb-1.5 flex items-center gap-1.5 text-muted-foreground">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    当前不可用
+                    <span className="text-xs font-normal">
+                      已配置但平台侧未发现（服务已停用或工具名变更），点击可移除
+                    </span>
+                  </Label>
+                  <div className="flex flex-wrap gap-2">
+                    {orphanTools.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => toggleTool(name)}
+                        title="点击从本预设移除"
+                        className="px-3 py-1.5 rounded-md text-xs border border-dashed border-amber-300 bg-amber-50 text-amber-700 cursor-pointer hover:bg-amber-100 transition-colors inline-flex items-center gap-1"
+                      >
+                        {name}
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             {/* 自定义指令：仅「智能推理」模式生效，快速问答模式下隐藏。
                 不覆盖核心系统提示词，只追加角色 / 语气 / 工作流 / 边界等设定。 */}

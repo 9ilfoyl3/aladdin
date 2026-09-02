@@ -51,6 +51,9 @@ jieba>=0.42.1
 # 认证与授权（tenant-auth）
 bcrypt>=4.1          # 口令哈希（自带 salt + 工作因子，纯 C 跨平台 wheel）
 PyJWT>=2.9           # JWT 签发/校验（HS256）
+# 第三方凭据加密存储（AES-256-GCM）。用于 outbound MCP server 的静态凭据：
+# 这类 token 必须能取回原文发给对方，无法像 AK/SK 那样"派生而不落库"，故加密落库。
+cryptography>=43.0
 
 # 系统资源检测（session-file-upload：单库 chunk 上限内存推荐，cgroup 不可用时回退物理内存）
 psutil>=5.9

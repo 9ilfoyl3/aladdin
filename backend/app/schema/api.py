@@ -62,6 +62,7 @@ class ChatCompletionRequest(BaseModel):
     model_config_id: Optional[str] = Field(
         default=None, description="LLM 模型配置 ID，为空时使用系统默认模型"
     )
+    max_tokens: Optional[int] = Field(default=None, description="单次生成最大 token 数")
     agent_preset_id: Optional[str] = Field(
         default=None, description="Agent 预设 ID，为空时使用默认预设"
     )
