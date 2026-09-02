@@ -37,6 +37,11 @@ class AgentConfig:
     # 最大上下文 token 数，超过阈值触发压缩
     max_context_tokens: int = 200000
 
+    # 单次 LLM 输出上限；None 表示沿用模型服务的默认值。
+    # OpenAI 兼容请求里的 max_tokens 透传到这里，避免长答案被默认上限截断后
+    # 仍以 final_answer done=true 伪装成完整回答。
+    max_output_tokens: int | None = None
+
     # LLM 单次调用超时时间（秒）
     llm_call_timeout: int = 120
 

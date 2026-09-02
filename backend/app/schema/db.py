@@ -156,6 +156,7 @@ class LLMConfig(Base):
     # 注：是否开启思考由智能体预设独占控制，本字段仅决定「开启时怎么写入 API」。
     thinking_control: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

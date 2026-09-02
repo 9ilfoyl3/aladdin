@@ -31,6 +31,7 @@ class VllmLLM(LLMProvider):
         api_key: str = "",
         provider: str | None = None,
         thinking_control: str | None = None,
+        max_output_tokens: int | None = None,
     ):
         """初始化 vLLM 客户端
 
@@ -47,11 +48,13 @@ class VllmLLM(LLMProvider):
                       （none / chat_template_kwargs / enable_thinking / thinking_type）。
                       给定时优先级最高，直接决定 thinking 开关写入哪种字段，
                       跳过厂商/模型名自动猜测（取代脆弱的自动匹配）。
+            max_output_tokens: 模型级默认单次输出上限；请求显式 max_tokens 优先。
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.thinking_control = thinking_control or None
+        self.max_output_tokens = max_output_tokens
         # 模型厂商：决定 thinking 开关注入到请求体的哪个字段（见 thinking_dialect）。
         # 显式指定优先；否则按 base_url 自动检测。
         if provider:
@@ -84,6 +87,8 @@ class VllmLLM(LLMProvider):
             "stream": stream,
             **kwargs,
         }
+        if self.max_output_tokens is not None and payload.get("max_tokens") is None:
+            payload["max_tokens"] = self.max_output_tokens
         payload = apply_thinking(
             payload,
             enable_thinking,
@@ -275,6 +280,7 @@ class VllmLLM(LLMProvider):
 
         # 累积 tool_calls 的状态（按 index 存储）
         tool_call_map: dict[int, dict] = {}
+        actual_finish_reason = ""
 
         try:
             url = f"{self.base_url}/chat/completions"
@@ -306,7 +312,7 @@ class VllmLLM(LLMProvider):
                             yield StreamChunk(
                                 content="",
                                 tool_calls=final_tool_calls,
-                                finish_reason="tool_calls",
+                                finish_reason=actual_finish_reason or "tool_calls",
                                 response_type="tool_call",
                             )
                         break
@@ -318,6 +324,9 @@ class VllmLLM(LLMProvider):
 
                     delta = choices[0].get("delta", {})
                     finish_reason = choices[0].get("finish_reason") or ""
+                    if finish_reason:
+                        # [DONE] 只是流边界；真实停止原因必须保留到最后。
+                        actual_finish_reason = finish_reason
 
                     # 防御性检查：某些模型在特定 chunk 中 delta 可能是字符串而非字典
                     if not isinstance(delta, dict):

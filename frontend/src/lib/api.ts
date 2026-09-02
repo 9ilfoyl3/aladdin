@@ -466,7 +466,7 @@ export const systemApi = {
 export const llmConfigApi = {
   list: (chatVisible?: boolean) =>
     request<unknown[]>(chatVisible !== undefined ? `/llm-configs?chat_visible=${chatVisible}` : '/llm-configs'),
-  create: (data: { name: string; provider: string; vendor?: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_control?: string; max_context_tokens?: number; chat_visible?: boolean }) =>
+  create: (data: { name: string; provider: string; vendor?: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_control?: string; max_context_tokens?: number; max_output_tokens?: number; chat_visible?: boolean }) =>
     request<unknown>('/llm-configs', {
       method: 'POST',
       body: JSON.stringify(data),

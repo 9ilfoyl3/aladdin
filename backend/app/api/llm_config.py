@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ class LLMConfigCreate(BaseModel):
     stream_enabled: bool = True
     thinking_control: Optional[str] = None  # none/chat_template_kwargs/enable_thinking/thinking_type
     max_context_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = Field(default=None, ge=1, description="单次输出上限；空表示使用全局配置或服务默认")
 
     @field_validator("max_context_tokens", mode="before")
     @classmethod
@@ -58,6 +59,7 @@ class LLMConfigUpdate(BaseModel):
     stream_enabled: Optional[bool] = None
     thinking_control: Optional[str] = None
     max_context_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("max_context_tokens", mode="before")
     @classmethod
@@ -81,6 +83,7 @@ class LLMConfigResponse(BaseModel):
     stream_enabled: bool
     thinking_control: Optional[str] = None
     max_context_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     created_at: str
 
 
@@ -99,6 +102,7 @@ def _to_response(c: LLMConfig) -> "LLMConfigResponse":
         stream_enabled=c.stream_enabled,
         thinking_control=c.thinking_control,
         max_context_tokens=c.max_context_tokens,
+        max_output_tokens=c.max_output_tokens,
         created_at=c.created_at.isoformat() if c.created_at else "",
     )
 
@@ -146,6 +150,7 @@ async def create_llm_config(
         stream_enabled=body.stream_enabled,
         thinking_control=body.thinking_control,
         max_context_tokens=body.max_context_tokens,
+        max_output_tokens=body.max_output_tokens,
     )
     db.add(config)
     await db.flush()

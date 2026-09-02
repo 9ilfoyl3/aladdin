@@ -459,7 +459,7 @@ class AgentEngine:
                 #     前端在收到 done 时把最后一段 thought 转为 answer，
                 #     此处不补发，避免思考面板与正文面板重复显示同一段内容
                 need_emit_answer = (
-                    verdict.reason == "final_answer"
+                    verdict.reason in {"final_answer", "length"}
                     and not verdict.answer_streamed
                     and bool(answer)
                 )
@@ -475,7 +475,7 @@ class AgentEngine:
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,
                     session_id=session_id,
-                    data={"content": ""},
+                    data={"content": "", "finish_reason": response.finish_reason},
                     done=True,
                 ))
 
@@ -626,10 +626,16 @@ class AgentEngine:
         router = ContentStreamRouter()
         inline_answer = ""  # 路由器识别出的内联 final_answer 答案文本
 
+        call_kwargs: dict = {
+            "temperature": self._config.temperature,
+            "enable_thinking": self._config.thinking_enabled,
+        }
+        if self._config.max_output_tokens is not None:
+            call_kwargs["max_tokens"] = self._config.max_output_tokens
+
         async for chunk in self._llm.stream_with_tools(
             messages, tools,
-            temperature=self._config.temperature,
-            enable_thinking=self._config.thinking_enabled,
+            **call_kwargs,
         ):
             # 普通 content → 经路由器判别后发射为思考或内联答案
             if chunk.content and chunk.response_type == "content":
@@ -755,7 +761,11 @@ class AgentEngine:
                     answer = strip_think_blocks(answer)
                     return ResponseVerdict(
                         should_stop=True,
-                        reason="final_answer",
+                        reason=(
+                            "length"
+                            if response.finish_reason == "length"
+                            else "final_answer"
+                        ),
                         content=answer,
                         answer_streamed=response.answer_streamed,
                     )
@@ -769,7 +779,11 @@ class AgentEngine:
             answer = strip_think_blocks(response.inline_answer)
             return ResponseVerdict(
                 should_stop=True,
-                reason="final_answer",
+                reason=(
+                    "length"
+                    if response.finish_reason == "length"
+                    else "final_answer"
+                ),
                 content=answer,
                 answer_streamed=True,
             )
@@ -808,6 +822,16 @@ class AgentEngine:
             return ResponseVerdict(
                 should_stop=True,
                 reason="natural_stop",
+                content=content,
+                answer_streamed=False,
+            )
+
+        # 普通正文输出也可能撞输出上限。有内容时保留 partial answer，
+        # 但不能把它伪装成 finish_reason=stop 的自然结束。
+        if response.finish_reason == "length" and content:
+            return ResponseVerdict(
+                should_stop=True,
+                reason="length",
                 content=content,
                 answer_streamed=False,
             )
@@ -1105,7 +1129,13 @@ class AgentEngine:
 
             # 流式生成，逐 token 发射 FINAL_ANSWER 事件
             full_answer = ""
-            async for token in self._llm.stream(synthesis_messages):
+            synthesis_kwargs: dict = {}
+            if self._config.max_output_tokens is not None:
+                synthesis_kwargs["max_tokens"] = self._config.max_output_tokens
+
+            async for token in self._llm.stream(
+                synthesis_messages, **synthesis_kwargs
+            ):
                 full_answer += token
                 await self._event_bus.emit(AgentEvent(
                     type=EventType.FINAL_ANSWER,

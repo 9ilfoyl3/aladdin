@@ -514,6 +514,7 @@ def _get_cached_llm(
     api_key: str,
     vendor: str | None = None,
     thinking_control: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> LLMProvider:
     """按 (provider, base_url, model, api_key, vendor, thinking_control) 复用 LLM 实例。
 
@@ -531,7 +532,7 @@ def _get_cached_llm(
         _llm_cache = {}
         _llm_cache_loop = loop
 
-    key = (provider, base_url, model, api_key, vendor, thinking_control)
+    key = (provider, base_url, model, api_key, vendor, thinking_control, max_output_tokens)
     inst = _llm_cache.get(key)
     if inst is None:
         if provider == "ollama":
@@ -543,6 +544,7 @@ def _get_cached_llm(
                 api_key=api_key,
                 provider=vendor,
                 thinking_control=thinking_control,
+                max_output_tokens=max_output_tokens,
             )
         _llm_cache[key] = inst
     return inst
@@ -550,8 +552,13 @@ def _get_cached_llm(
 
 def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
     """根据数据库配置创建（或复用）LLM 实例"""
+    # 模型配置优先；未配置时回落到全局 LLM_MAX_OUTPUT_TOKENS。
+    max_output_tokens = config.max_output_tokens or get_settings().llm_max_output_tokens
     if config.provider == "ollama":
-        return _get_cached_llm("ollama", config.base_url, config.model, "")
+        return _get_cached_llm(
+            "ollama", config.base_url, config.model, "",
+            max_output_tokens=max_output_tokens,
+        )
     else:
         # provider 字段承载基础设施类型（ollama/vllm）；vendor 承载实际模型厂商，
         # thinking_control 承载思考开关的写入格式。两者显式传入 VllmLLM，使 thinking
@@ -563,6 +570,7 @@ def _create_llm_from_config(config: LLMConfig) -> LLMProvider:
             config.api_key or "",
             vendor=config.vendor,
             thinking_control=config.thinking_control,
+            max_output_tokens=max_output_tokens,
         )
 
 
@@ -918,6 +926,7 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "type": "final_answer",
             "content": event.data.get("content", ""),
             "done": event.done,
+            "finish_reason": event.data.get("finish_reason", ""),
         }
     elif event.type == EventType.TOKEN_USAGE:
         return {
@@ -986,6 +995,7 @@ async def _build_agent_runtime(
     custom_skills: list | None = None,
     hybrid_retriever: HybridRetriever | None = None,
     caller_ctx: ToolContext | None = None,
+    max_output_tokens: int | None = None,
 ) -> tuple[AgentEngine, AgentState, EventBus]:
     """构建 Agent 运行时（工具注册 + 配置 + 引擎），流式与非流式共用。
 
@@ -1150,6 +1160,7 @@ async def _build_agent_runtime(
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
         max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
+        max_output_tokens=max_output_tokens,
         temperature=preset_cfg.get("temperature", AgentConfig.temperature),
         web_search_enabled=web_search_on,
         # 深度思考（模型原生思维链）在 Agent 链路只由智能体预设独占控制，不再 fallback 到
@@ -1182,6 +1193,7 @@ async def _run_agent_nonstream(
     attachments: list[dict] | None = None,
     owner_user_id: str | None = None,
     caller_ctx: ToolContext | None = None,
+    max_output_tokens: int | None = None,
 ) -> tuple[str, list[RetrievalResult], bool, list[dict], list[str]]:
     """非流式运行 Agent ReAct 引擎，直接返回其最终答案（不二次走普通 RAG 生成）。
 
@@ -1204,6 +1216,7 @@ async def _run_agent_nonstream(
         custom_skills=await load_user_custom_skills(owner_user_id),
         hybrid_retriever=await _build_hybrid_retriever(),
         caller_ctx=caller_ctx,
+        max_output_tokens=max_output_tokens,
     )
 
     steps_collected: list[dict] = []
@@ -1331,6 +1344,7 @@ async def _stream_response(
             custom_skills=await load_user_custom_skills(owner_user_id),
             hybrid_retriever=await _build_hybrid_retriever(),
             caller_ctx=caller_ctx,
+            max_output_tokens=request.max_tokens,
         )
 
         async def _event_to_queue(event: AgentEvent):
@@ -1800,6 +1814,7 @@ async def chat_completions(
             attachments=nonstream_attachments,
             owner_user_id=identity.acting_subject_id,
             caller_ctx=caller_ctx,
+            max_output_tokens=request.max_tokens,
         )
         references = await _build_references(chunks)
         prompt_tokens = _estimate_tokens(user_query)
@@ -1970,6 +1985,7 @@ async def retrieval_agent(
         owner_user_id=identity.acting_subject_id,
         # 无会话链路：session_id 为空，其余主体字段照常透传（第三方仍能做用户级隔离）
         caller_ctx=ToolContext.from_identity(identity, request_id=uuid.uuid4().hex),
+        max_output_tokens=request.max_tokens,
     )
     references = await _build_references(chunks)
     return AgentRetrievalResponse(

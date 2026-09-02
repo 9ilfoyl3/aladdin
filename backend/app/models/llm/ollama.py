@@ -22,7 +22,7 @@ from app.models.provider import (
 class OllamaLLM(LLMProvider):
     """Ollama LLM Provider，基于 httpx 异步调用"""
 
-    def __init__(self, base_url: str, model: str):
+    def __init__(self, base_url: str, model: str, max_output_tokens: int | None = None):
         """初始化 Ollama 客户端
 
         Args:
@@ -31,6 +31,7 @@ class OllamaLLM(LLMProvider):
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.max_output_tokens = max_output_tokens
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=120.0)
 
     def _build_payload(self, messages: list[dict], stream: bool, **kwargs) -> dict:
@@ -43,12 +44,15 @@ class OllamaLLM(LLMProvider):
         """
         enable_thinking = kwargs.pop("enable_thinking", None)
         temperature = kwargs.pop("temperature", None)
+        max_tokens = kwargs.pop("max_tokens", self.max_output_tokens)
 
         options = kwargs.pop("options", None)
         if not isinstance(options, dict):
             options = {}
         if temperature is not None:
             options["temperature"] = temperature
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
 
         payload: dict = {
             "model": self.model,

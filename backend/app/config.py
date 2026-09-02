@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "qwen2.5:7b"
     llm_api_key: str = ""  # 远端 API 的密钥（vllm provider 使用）
+    # 未在模型配置 / 请求里显式指定时的单次输出上限；None 表示沿用模型服务默认。
+    llm_max_output_tokens: int | None = None
 
     # Embedding（远程服务）
     embed_model: str = "BAAI/bge-m3"

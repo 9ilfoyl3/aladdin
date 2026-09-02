@@ -615,7 +615,7 @@ curl -X POST $BASE/api/retrieval/search \
 
 区别于 6.1 的单轮召回：跑 ReAct Agent 引擎，围绕问题**多步检索、反思、改写子查询**后汇聚证据，返回其召回的引用来源与最终作答。召回口径（含图谱第四路）与 `/v1/chat/completions` 的 `agent` 模式一致。无会话概念（不落库、不加载历史、不接入会话临时文件），一次请求一个独立推理链。
 
-字段：`query`（必填）、`knowledge_base_id` 或 `kb_ids`（二选一，至少其一）、`agent_preset_id`（可选）、`model_config_id`（可选）。
+字段：`query`（必填）、`knowledge_base_id` 或 `kb_ids`（二选一，至少其一）、`agent_preset_id`（可选）、`model_config_id`（可选）、`max_tokens`（可选，单次生成上限）。
 
 ```bash
 curl -X POST $BASE/api/retrieval/agent \
@@ -726,7 +726,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 | `thought` | `content`(str)、`iteration`(int) | 模型思考文本，**逐 token 增量**（一次思考会拆成很多帧），`iteration` 为第几轮 ReAct 决策（从 0 起） |
 | `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | 发起一次工具调用。同一 `iteration` 可并行发多条。`arguments` 为工具入参（如 `{"query":"保修期"}`） |
 | `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4） |
-| `final_answer` | `content`(str)、`done`(bool) | 答案正文，**逐 token 增量**。`content` 非空即为正文分片；`content` 为空串且 `done=true` 是**结束标记**（含特殊语义，见 6.3.2） |
+| `final_answer` | `content`(str)、`done`(bool)、`finish_reason`(str) | 答案正文，**逐 token 增量**。`content` 非空即为正文分片；`content` 为空串且 `done=true` 是**结束标记**。结束标记携带上游停止原因：`stop` / `tool_calls` 表示模型正常收束，`length` 表示撞到单次输出上限、正文可能被截断，空串表示兜底合成路径未获得上游停止原因 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
 | `complete` | `total_steps`(int)、`total_duration_ms`(int) | 执行步骤（思考+工具）结束。耗时**截止于首个 `final_answer`**，不含答案正文流式输出时间 |
 | `error` | `content`(str) | 执行出错的可读原因（链路已尽力降级，通常仍会有兜底正文） |

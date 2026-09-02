@@ -49,6 +49,7 @@ async def _migrate_db() -> None:
     migrations = [
         "ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT TRUE",
         "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
+        "ALTER TABLE llm_configs ADD COLUMN max_output_tokens INTEGER",
         "ALTER TABLE llm_configs ADD COLUMN chat_visible BOOLEAN NOT NULL DEFAULT TRUE",
         # 模型厂商（vendor）+ 思考模式参数格式：显式化，取代脆弱的 base_url/模型名自动匹配
         # （思考是否开启由智能体预设独占控制，thinking_control 仅决定写入 API 的字段格式）
