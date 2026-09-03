@@ -127,6 +127,8 @@ class OllamaLLM(LLMProvider):
             ChatResponse 包含 content、tool_calls、finish_reason、usage
         """
         payload = self._build_payload(messages, stream=False, tools=tools, **kwargs)
+        if not tools:
+            payload.pop("tools", None)
         try:
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
@@ -134,6 +136,7 @@ class OllamaLLM(LLMProvider):
 
             message = data.get("message", {})
             content = message.get("content", "") or ""
+            reasoning_content = message.get("thinking") or message.get("reasoning") or ""
             raw_tool_calls = message.get("tool_calls", []) or []
 
             # 解析 tool_calls：Ollama 返回 arguments 为 dict，需要 json.dumps
@@ -147,6 +150,7 @@ class OllamaLLM(LLMProvider):
 
             return ChatResponse(
                 content=content,
+                reasoning_content=reasoning_content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 usage=usage,
@@ -176,6 +180,8 @@ class OllamaLLM(LLMProvider):
             StreamChunk 包含 content 或 tool_calls
         """
         payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
+        if not tools:
+            payload.pop("tools", None)
         try:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:
                 resp.raise_for_status()
@@ -194,6 +200,14 @@ class OllamaLLM(LLMProvider):
                             response_type="content",
                         )
 
+                    # Qwen/DeepSeek 推理模型可能把 thinking 放在独立通道。
+                    thinking = message.get("thinking") or message.get("reasoning") or ""
+                    if thinking:
+                        yield StreamChunk(
+                            reasoning=thinking,
+                            response_type="thinking",
+                        )
+
                     # 处理 tool_calls（Ollama 在最终 chunk 中一次性返回）
                     raw_tool_calls = message.get("tool_calls", []) or []
                     if raw_tool_calls:
@@ -206,6 +220,9 @@ class OllamaLLM(LLMProvider):
 
                     # 流结束标记
                     if is_done:
+                        raw_usage = self._parse_usage(chunk)
+                        if raw_usage:
+                            yield StreamChunk(usage=raw_usage, response_type="usage")
                         # 如果没有 tool_calls，发送 stop finish_reason
                         if not raw_tool_calls:
                             yield StreamChunk(

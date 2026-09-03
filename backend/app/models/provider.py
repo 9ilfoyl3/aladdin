@@ -34,35 +34,29 @@ class TokenUsage:
 
 @dataclass
 class ChatResponse:
-    """Function Calling 完整响应"""
+    """一次模型响应的完整、类型化内容"""
 
     content: str = ""
+    reasoning_content: str = ""
+    # 展示用推理：native reasoning 之外，还包含无 native thinking 模型在
+    # tool-call 轮写出的普通 content（由引擎按 finish/tool calls 归类）。
+    display_reasoning: str = ""
     tool_calls: list[LLMToolCall] = field(default_factory=list)
-    finish_reason: str = "stop"  # "stop" | "tool_calls"
+    finish_reason: str = "stop"
     usage: TokenUsage | None = None
-    # 答案正文是否已在流式阶段逐 token 作为 answer 发射（如 vLLM 增量解析 final_answer）。
-    # 引擎据此决定终止时是否需要补发完整答案：
-    #   True  → 仅发 done 标记（避免重复）
-    #   False → 若答案来自 final_answer 工具但未流式（如 Ollama 工具调用非增量返回），补发正文
-    answer_streamed: bool = False
-    # 模型把 final_answer 调用「写成纯文本 JSON」时（千问等弱 function-calling 模型），
-    # 流式阶段路由器从普通 content 中提取出的答案文本。非空表示这是内联 final_answer，
-    # 引擎应将其作为最终答案（而非把原始 JSON 当答案或思考）。
-    inline_answer: str = ""
-    # thinking 工具的 thought 是否已在流式阶段逐 token 作为 THOUGHT 发射（vLLM 增量解析）。
-    # 引擎据此决定是否在执行 thinking 工具时补发完整 thought：
-    #   True  → 已逐 token 发过，不重发（避免思考面板重复）
-    #   False → 非增量 provider（Ollama / vLLM 降级非流式），由引擎补发完整 thought
-    thought_streamed: bool = False
+    # content 通道最终语义：text=用户正文；reasoning=本轮随后的 tool call 前规划。
+    content_channel: str = "text"
 
 
 @dataclass
 class StreamChunk:
-    """Function Calling 流式响应片段"""
+    """Provider 流式响应片段"""
 
     content: str = ""
+    reasoning: str = ""
     tool_calls: list[LLMToolCall] | None = None
     finish_reason: str = ""
+    usage: TokenUsage | None = None
     response_type: str = "content"  # "content" | "thinking" | "tool_call"
 
 
