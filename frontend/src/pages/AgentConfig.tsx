@@ -57,7 +57,7 @@ const emptyForm: FormData = {
   max_iterations: '20',
   temperature: '0.7',
   thinking_enabled: true,
-  allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'final_answer'],
+  allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks'],
   custom_instructions: '',
   is_shared: false,
 }

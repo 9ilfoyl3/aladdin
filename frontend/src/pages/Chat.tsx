@@ -424,13 +424,13 @@ function Chat() {
               // 新格式：构建 segments 数组（按存储顺序还原交错段落）
               const segments: ContentSegment[] = []
               for (const step of m.agent_steps) {
-                if (step.type === 'thought' && step.content) {
-                  // 合并连续的 thought 段落
+                if ((step.type === 'reasoning_delta' || step.type === 'thought') && step.content) {
+                  // 合并连续的 reasoning 段落
                   const lastSeg = segments[segments.length - 1]
-                  if (lastSeg && lastSeg.type === 'thought') {
+                  if (lastSeg && lastSeg.type === 'reasoning') {
                     lastSeg.content += String(step.content)
                   } else {
-                    segments.push({ type: 'thought', content: String(step.content) })
+                    segments.push({ type: 'reasoning', content: String(step.content) })
                   }
                 } else if (step.type === 'tool_call') {
                   segments.push({
@@ -451,24 +451,20 @@ function Chat() {
                     existing.durationMs = step.duration_ms as number | undefined
                     existing.files = ((step as Record<string, unknown>).files as ContentSegment['files']) || undefined
                   }
-                } else if (step.type === 'final_answer') {
+                } else if (step.type === 'text_delta' || step.type === 'final_answer') {
                   if (step.content) {
                     // 合并连续的 answer 段落
                     const lastSeg = segments[segments.length - 1]
-                    if (lastSeg && lastSeg.type === 'answer') {
+                    if (lastSeg && lastSeg.type === 'text') {
                       lastSeg.content += String(step.content)
                     } else {
-                      segments.push({ type: 'answer', content: String(step.content) })
+                      segments.push({ type: 'text', content: String(step.content) })
                     }
                   } else if ((step as Record<string, unknown>).done) {
-                    // done=true 且无 content：natural_stop / stuck_loop 场景。
-                    // 答案已作为最后一个 thought 段落流式发出（弱 function-calling 模型
-                    // 闲聊时把答案当普通 content 输出），需与流式渲染逻辑一致，把它转为
-                    // answer。否则末尾兜底会用 base.content 再补一个 answer 段落，导致
-                    // 历史恢复时「思考面板 + 正文」双份显示同一内容。
+                    // 旧版 final_answer done 帧仅用于历史兼容。
                     const lastSeg = segments[segments.length - 1]
-                    if (lastSeg && lastSeg.type === 'thought') {
-                      lastSeg.type = 'answer'
+                    if (lastSeg && lastSeg.type === 'reasoning') {
+                      lastSeg.type = 'text'
                     }
                   }
                 } else if (step.type === 'complete' && typeof (step as Record<string, unknown>).total_duration_ms === 'number') {
@@ -477,8 +473,8 @@ function Chat() {
                 }
               }
               // 如果没有从 steps 中还原出 answer 段落，但有 content，补一个
-              if (base.content && !segments.some((s) => s.type === 'answer')) {
-                segments.push({ type: 'answer', content: base.content })
+              if (base.content && !segments.some((s) => s.type === 'text')) {
+                segments.push({ type: 'text', content: base.content })
               }
               if (segments.length > 0) base.segments = segments
             } else {
@@ -738,14 +734,15 @@ function Chat() {
                 isAgentMode = true
 
                 switch (parsed.type) {
-                  // 思考过程：追加到最后一个 thought 段落或新建
+                  // 推理过程：追加到最后一个 reasoning 段落或新建
+                  case 'reasoning_delta':
                   case 'thought': {
                     if (parsed.content) {
                       const lastSeg = segments[segments.length - 1]
-                      if (lastSeg && lastSeg.type === 'thought') {
+                      if (lastSeg && lastSeg.type === 'reasoning') {
                         segments = [...segments.slice(0, -1), { ...lastSeg, content: lastSeg.content + parsed.content }]
                       } else {
-                        segments = [...segments, { type: 'thought', content: parsed.content }]
+                        segments = [...segments, { type: 'reasoning', content: parsed.content }]
                       }
                     }
                     updateStream((prev) => {
@@ -808,22 +805,22 @@ function Chat() {
                     break
                   }
 
-                  // 最终答案流式渲染：追加到最后一个 answer 段落或新建
+                  // 正文流式渲染：追加到最后一个 text 段落或新建
+                  case 'text_delta':
                   case 'final_answer': {
                     if (parsed.content) {
                       fullContent += parsed.content
                       const lastSeg = segments[segments.length - 1]
-                      if (lastSeg && lastSeg.type === 'answer') {
+                      if (lastSeg && lastSeg.type === 'text') {
                         segments = [...segments.slice(0, -1), { ...lastSeg, content: lastSeg.content + parsed.content }]
                       } else {
-                        segments = [...segments, { type: 'answer', content: parsed.content }]
+                        segments = [...segments, { type: 'text', content: parsed.content }]
                       }
                     } else if (parsed.done) {
-                      // done=true 且无 content：natural_stop 场景
-                      // 把最后一个 thought 段落转为 answer（内容已流式发射为 thought）
+                      // 旧版 final_answer done 帧仅用于历史兼容。
                       const lastSeg = segments[segments.length - 1]
-                      if (lastSeg && lastSeg.type === 'thought') {
-                        segments = [...segments.slice(0, -1), { ...lastSeg, type: 'answer' }]
+                      if (lastSeg && lastSeg.type === 'reasoning') {
+                        segments = [...segments.slice(0, -1), { ...lastSeg, type: 'text' }]
                         fullContent = lastSeg.content
                       }
                     }
@@ -890,7 +887,7 @@ function Chat() {
                   case 'error': {
                     isError = true
                     fullContent = `⚠️ ${parsed.content || '执行出错'}`
-                    segments = [...segments, { type: 'answer', content: fullContent }]
+                    segments = [...segments, { type: 'text', content: fullContent }]
                     updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {
