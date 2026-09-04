@@ -39,6 +39,7 @@ from app.agent.tools.mcp_client import get_mcp_tools
 from app.agent.skills import SkillManager, default_skill_dirs
 from app.api.skills import load_user_custom_skills
 from app.agent.prompts.progressive_rag import render_system_prompt
+from app.agent.prompts.runtime_context import render_runtime_context
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.models.provider import LLMProvider
@@ -862,6 +863,7 @@ async def _retrieve_chunks(
 def _build_messages(
     request: ChatCompletionRequest, context: str, has_context: bool,
     history: list[dict] | None = None,
+    timezone_name: str | None = None,
 ) -> list[dict]:
     """构建发送给 LLM 的消息列表（有检索结果时注入上下文，支持历史对话）
 
@@ -871,13 +873,15 @@ def _build_messages(
         has_context: 是否有检索结果
         history: 历史对话消息列表 [{"role": "user", "content": "..."}, ...]
     """
+    base_system = render_runtime_context(timezone_name or request.timezone_name)
+    if has_context:
+        base_system = f"{base_system}\n\n{_SYSTEM_PROMPT.format(context=context)}"
+
     user_messages = [
         {"role": msg.role, "content": msg.content} for msg in request.messages
     ]
     messages = []
-    if has_context:
-        system_msg = {"role": "system", "content": _SYSTEM_PROMPT.format(context=context)}
-        messages.append(system_msg)
+    messages.append({"role": "system", "content": base_system})
     # 插入历史对话（在 system 之后、当前用户消息之前）
     if history:
         messages.extend(history)
@@ -995,6 +999,7 @@ async def _build_agent_runtime(
     thinking_enabled: bool,  # noqa: ARG001 - Agent 链路已不使用；思考由预设独占控制（见下方 AgentConfig）。保留形参仅为与调用方签名兼容。
     tenant_id: str | None,
     session_id: str | None,
+    timezone_name: str | None = None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     custom_skills: list | None = None,
@@ -1146,6 +1151,7 @@ async def _build_agent_runtime(
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
         skills=[(m.name, m.description) for m in skill_metadata],
+        timezone_name=timezone_name,
     )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
@@ -1175,6 +1181,7 @@ async def _run_agent_nonstream(
     tenant_id: str | None,
     session_id: str | None,
     history: list[dict] | None,
+    timezone_name: str | None = None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     owner_user_id: str | None = None,
@@ -1197,6 +1204,7 @@ async def _run_agent_nonstream(
     """
     engine, state, event_bus = await _build_agent_runtime(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+        timezone_name=timezone_name,
         include_session_source=include_session_source,
         attachments=attachments,
         custom_skills=await load_user_custom_skills(owner_user_id),
@@ -1260,6 +1268,7 @@ async def _stream_response(
     tenant_id: str | None = None,
     retrieval_query: str | None = None,
     skip_retrieval: bool = False,
+    timezone_name: str | None = None,
     attachments: list | None = None,
     requested_kb_ids: list[str] | None = None,
     session_has_files: bool = False,
@@ -1325,7 +1334,8 @@ async def _stream_response(
         # 传入全部所选库 + 会话源标志，让会话文件成为 agent 可检索的普通数据源。
         engine, state, event_bus = await _build_agent_runtime(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
-            tenant_id, session_id, include_session_source=session_has_files,
+            tenant_id, session_id, timezone_name=timezone_name,
+            include_session_source=session_has_files,
             attachments=attachments,
             custom_skills=await load_user_custom_skills(owner_user_id),
             hybrid_retriever=await _build_hybrid_retriever(),
@@ -1528,7 +1538,10 @@ async def _stream_response(
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context, history=history)
+    messages = _build_messages(
+        request, context, has_context, history=history,
+        timezone_name=request.timezone_name,
+    )
     llm_degraded = False
 
     # 发送第一个 chunk（包含 role）
@@ -1748,7 +1761,7 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id, caller_ctx=caller_ctx),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, timezone_name=request.timezone_name, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id, caller_ctx=caller_ctx),
             media_type="text/event-stream",
         )
 
@@ -1783,6 +1796,7 @@ async def chat_completions(
         answer, chunks, degraded, agent_steps, failed_source_ids = await _run_agent_nonstream(
             user_query, list(requested_kb_ids), llm, preset_cfg,
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
+            timezone_name=request.timezone_name,
             include_session_source=session_has_files,
             attachments=nonstream_attachments,
             owner_user_id=identity.acting_subject_id,
@@ -1845,7 +1859,10 @@ async def chat_completions(
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context, history=history)
+    messages = _build_messages(
+        request, context, has_context, history=history,
+        timezone_name=request.timezone_name,
+    )
 
     # 尝试 LLM 生成，失败时降级为纯检索结果
     llm_degraded = False

@@ -671,6 +671,7 @@ curl -X POST $BASE/api/retrieval/agent \
 | `filter_doc_ids` | string[] | 限定文档范围 |
 | `session_id` | string | 传入则自动加载历史并落库（见 6.4） |
 | `attachments` | object[] | 本条 user 消息绑定的会话临时文件附件，每项 `{file_id, filename, file_size?, file_type?}`（`file_id` 为第 8 节上传返回的 `id`）。非空时 Agent 获得「整篇直读本次附件」能力（不必与知识库文档竞争语义召回），并随 user 消息落库供历史回放渲染附件标记 |
+| `timezone_name` | string | 可选 IANA 时区（如 `Asia/Shanghai`）。传入后用于可靠回答“今天/现在”类问题；缺省使用服务端时区 |
 | `temperature` / `max_tokens` | number | 生成参数 |
 
 **非流式示例：**

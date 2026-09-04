@@ -20,6 +20,14 @@ import { authHeaders, handleUnauthorized } from '@/lib/auth'
 import { useArtifactStore } from '@/stores/artifactStore'
 import { cn } from '@/lib/utils'
 
+function browserTimezone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+  } catch {
+    return undefined
+  }
+}
+
 interface KnowledgeBaseItem {
   id: string
   name: string
@@ -660,6 +668,7 @@ function Chat() {
           agent_preset_id: selectedPreset || undefined,
           kb_ids: multiKbIds,
           session_id: sessionId || undefined,
+          timezone_name: browserTimezone(),
           attachments: boundAttachments.length > 0 ? boundAttachments : undefined,
         }),
       })

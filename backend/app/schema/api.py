@@ -79,8 +79,11 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description="本次用户消息绑定的会话文件附件（发送时从已上传文件中选取），随用户消息存入历史",
     )
+    timezone_name: Optional[str] = Field(
+        default=None,
+        description="调用方 IANA 时区名称（如 Asia/Shanghai），用于回答当前日期/时间",
+    )
     temperature: Optional[float] = Field(default=None, description="生成温度")
-    max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
 
 
 # ============================================================

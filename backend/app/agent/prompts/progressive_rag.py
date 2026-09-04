@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
+
+from app.agent.prompts.runtime_context import (
+    _CAPABILITY_RULE,
+    _IDENTITY_RULE,
+    _MODEL_DISCLOSURE_RULE,
+    format_local_time,
+    resolve_timezone,
+)
 
 if TYPE_CHECKING:
     from app.agent.config import AgentConfig
@@ -20,6 +29,14 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
 
 _PROMPT = """\
 You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
+
+## Identity and runtime context
+- {_IDENTITY_RULE}
+- {_CAPABILITY_RULE}
+- {_MODEL_DISCLOSURE_RULE}
+- The current date/time below is authoritative runtime context. Use it for
+  questions about now, today, weekdays, and relative dates instead of saying
+  that current time is unavailable.
 
 ## Response contract
 1. While collecting evidence, call tools. Any ordinary text you emit in a tool-call
@@ -74,10 +91,9 @@ def render_system_prompt(
     available_tools: list[str] | None = None,
     web_search_enabled: bool | None = None,
     skills: list[tuple[str, str]] | None = None,
+    timezone_name: str | None = None,
 ) -> str:
     """Render the compact ReAct system prompt."""
-    from datetime import datetime
-
     kb_section = "\n".join(f"- {name}" for name in kb_names) if kb_names else "- None"
     tools = available_tools or config.allowed_tools
     tools_section = "\n".join(f"- `{name}`" for name in tools) or "- None"
@@ -87,16 +103,21 @@ def render_system_prompt(
         else "- None"
     )
     web_on = config.web_search_enabled if web_search_enabled is None else web_search_enabled
-    now = datetime.now()
+    tzinfo = resolve_timezone(timezone_name)
+    display_timezone = timezone_name if getattr(tzinfo, "key", None) == timezone_name else None
+    now = datetime.now(tzinfo)
     custom = (config.custom_instructions or "").strip()
     custom_section = f"\n## User customization\n{custom}\n" if custom else ""
 
     return _safe_substitute(_PROMPT, {
+        "_IDENTITY_RULE": _IDENTITY_RULE,
+        "_CAPABILITY_RULE": _CAPABILITY_RULE,
+        "_MODEL_DISCLOSURE_RULE": _MODEL_DISCLOSURE_RULE,
         "knowledge_base_names": kb_section,
         "available_tools": tools_section,
         "available_skills": skills_section,
         "web_search_status": "Enabled." if web_on else "Disabled.",
-        "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "current_time": format_local_time(now, display_timezone),
         "current_date": now.strftime("%Y-%m-%d"),
         "user_customization": custom_section,
     })
