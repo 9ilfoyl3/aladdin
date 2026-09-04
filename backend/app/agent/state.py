@@ -27,7 +27,8 @@ class AgentStep:
     """Agent 单轮执行步骤"""
 
     iteration: int
-    thought: str = ""
+    reasoning: str = ""
+    content: str = ""
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
 

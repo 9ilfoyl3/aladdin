@@ -16,7 +16,7 @@ class AgentConfig:
 
     # 允许使用的工具列表（白名单）
     allowed_tools: list[str] = field(default_factory=lambda: [
-        "knowledge_search", "grep_chunks", "list_knowledge_chunks", "final_answer"
+        "knowledge_search", "grep_chunks", "list_knowledge_chunks"
     ])
 
     # LLM 生成温度
@@ -28,7 +28,7 @@ class AgentConfig:
     # 是否启用网页搜索工具
     web_search_enabled: bool = False
 
-    # 是否启用 thinking 工具（内部思考/反思）
+    # 是否开启模型原生 thinking / reasoning 通道；不是 ThinkingTool。
     thinking_enabled: bool = True
 
     # 是否允许并行执行多个工具调用
@@ -39,7 +39,7 @@ class AgentConfig:
 
     # 单次 LLM 输出上限；None 表示沿用模型服务的默认值。
     # OpenAI 兼容请求里的 max_tokens 透传到这里，避免长答案被默认上限截断后
-    # 仍以 final_answer done=true 伪装成完整回答。
+    # 被误标为自然完成。
     max_output_tokens: int | None = None
 
     # LLM 单次调用超时时间（秒）

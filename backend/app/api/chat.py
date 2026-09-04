@@ -27,22 +27,19 @@ from app.auth.session_ownership import verify_session_owner
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
-from app.agent.content_router import ContentStreamRouter
 from app.agent.tools.base import ToolContext
-from app.agent.tools.final_answer import FinalAnswerTool
-from app.agent.tools.final_answer_parse import extract_inline_answer
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.read_skill import ReadSkillTool
-from app.agent.tools.thinking import ThinkingTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.mcp_client import get_mcp_tools
 from app.agent.skills import SkillManager, default_skill_dirs
 from app.api.skills import load_user_custom_skills
 from app.agent.prompts.progressive_rag import render_system_prompt
+from app.agent.prompts.runtime_context import render_runtime_context
 from app.config import get_settings
 from app.models.manager import get_model_manager
 from app.models.provider import LLMProvider
@@ -188,12 +185,10 @@ _HISTORY_TOOL_OUTPUT_PLACEHOLDER = (
     "[Previous retrieval omitted — please perform a fresh search.]"
 )
 
-# final_answer 是终止信号，不作为中间工具调用重放（其答案正文以末尾 assistant 消息承载）。
-_TERMINAL_TOOL_NAME = "final_answer"
-
 # 历史 assistant 正文中可能残留的旧版工具注解（如 "[Agent used: grep_chunks(27ms)]"），
 # 重放前剥除，避免内部工具名泄露进模型上下文乃至被模型抄进答案。
 _LEGACY_TOOL_ANNOTATION_RE = re.compile(r"\n*\[Agent used:[^\]]*\]\s*$")
+_LEGACY_INFRA_TOOLS = {"final_answer", "thinking"}
 
 
 async def _load_session_history(session_id: str) -> list[dict]:
@@ -264,8 +259,7 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
 
     要点：
     - 工具名、调用参数只出现在 ``tool_calls`` 协议字段中，绝不进入可见正文。
-    - final_answer 作为终止信号被跳过，其文本由末尾 assistant 消息承载，避免重复
-      或让模型误以为上一轮仍在进行中。
+    - 自然停止的最终正文由末尾 assistant 消息承载，避免上一轮看起来仍在进行中。
     - 历史工具输出未落库，统一以占位符替代，强制后续轮次重新检索。
     - 无 agent_steps（普通 RAG / 旧数据）时退化为单条 assistant 最终答案消息。
     """
@@ -275,23 +269,28 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
         return [{"role": "assistant", "content": final_answer}] if final_answer else []
 
     # 按 iteration 聚合：还原"一次 LLM 决策可发起多个并行工具调用"的结构。
-    # agent_steps 按时间顺序存储：thought → tool_call(s) → tool_result(s) → … → final_answer。
-    iter_thought: dict[int, str] = {}
+    # agent_steps 按时间顺序存储：reasoning_delta → tool_call(s) → tool_result(s) → … → text_delta。
+    iter_reasoning: dict[int, str] = {}
     iter_calls: dict[int, list[dict]] = {}
     iter_order: list[int] = []
+    streamed_answer_parts: list[str] = []
 
     for step in agent_steps:
         if not isinstance(step, dict):
             continue
         stype = step.get("type")
         iteration = step.get("iteration", 0)
-        if stype == "thought":
+        if stype in {"reasoning_delta", "thought"}:
             text = step.get("content", "")
             if text:
-                iter_thought[iteration] = iter_thought.get(iteration, "") + text
+                iter_reasoning[iteration] = iter_reasoning.get(iteration, "") + text
+        elif stype == "text_delta":
+            text = step.get("content", "")
+            if text:
+                streamed_answer_parts.append(text)
         elif stype == "tool_call":
             name = step.get("tool_name", "")
-            if not name or name == _TERMINAL_TOOL_NAME:
+            if not name or name in _LEGACY_INFRA_TOOLS:
                 continue
             if iteration not in iter_calls:
                 iter_calls[iteration] = []
@@ -309,7 +308,7 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
             continue
         assistant_msg: dict = {
             "role": "assistant",
-            "content": iter_thought.get(iteration, "") or None,
+            "content": iter_reasoning.get(iteration, "") or None,
             "tool_calls": [
                 {
                     "id": c["id"],
@@ -332,6 +331,8 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
                 "content": _HISTORY_TOOL_OUTPUT_PLACEHOLDER,
             })
 
+    if not final_answer and streamed_answer_parts:
+        final_answer = "".join(streamed_answer_parts).strip()
     if final_answer:
         msgs.append({"role": "assistant", "content": final_answer})
 
@@ -862,6 +863,7 @@ async def _retrieve_chunks(
 def _build_messages(
     request: ChatCompletionRequest, context: str, has_context: bool,
     history: list[dict] | None = None,
+    timezone_name: str | None = None,
 ) -> list[dict]:
     """构建发送给 LLM 的消息列表（有检索结果时注入上下文，支持历史对话）
 
@@ -871,13 +873,15 @@ def _build_messages(
         has_context: 是否有检索结果
         history: 历史对话消息列表 [{"role": "user", "content": "..."}, ...]
     """
+    base_system = render_runtime_context(timezone_name or request.timezone_name)
+    if has_context:
+        base_system = f"{base_system}\n\n{_SYSTEM_PROMPT.format(context=context)}"
+
     user_messages = [
         {"role": msg.role, "content": msg.content} for msg in request.messages
     ]
     messages = []
-    if has_context:
-        system_msg = {"role": "system", "content": _SYSTEM_PROMPT.format(context=context)}
-        messages.append(system_msg)
+    messages.append({"role": "system", "content": base_system})
     # 插入历史对话（在 system 之后、当前用户消息之前）
     if history:
         messages.extend(history)
@@ -889,14 +893,21 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     """将 AgentEvent 转换为 SSE JSON 格式
 
     返回格式：
-    {"type": "thought", "content": "...", "iteration": 0}
+    {"type": "reasoning_delta", "content": "...", "iteration": 0}
+    {"type": "text_delta", "content": "...", "iteration": 0}
     {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
     {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
-    {"type": "final_answer", "content": "...", "done": true}
+    {"type": "turn_end", "finish_reason": "stop"}
     """
-    if event.type == EventType.THOUGHT:
+    if event.type == EventType.REASONING_DELTA:
         return {
-            "type": "thought",
+            "type": "reasoning_delta",
+            "content": event.data.get("content", ""),
+            "iteration": event.data.get("iteration", 0),
+        }
+    elif event.type == EventType.TEXT_DELTA:
+        return {
+            "type": "text_delta",
             "content": event.data.get("content", ""),
             "iteration": event.data.get("iteration", 0),
         }
@@ -921,11 +932,9 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             # 展示可点击预览的文件。落库进 agent_steps，历史回放可还原。
             "files": event.data.get("files", []),
         }
-    elif event.type == EventType.FINAL_ANSWER:
+    elif event.type == EventType.TURN_END:
         return {
-            "type": "final_answer",
-            "content": event.data.get("content", ""),
-            "done": event.done,
+            "type": "turn_end",
             "finish_reason": event.data.get("finish_reason", ""),
         }
     elif event.type == EventType.TOKEN_USAGE:
@@ -990,6 +999,7 @@ async def _build_agent_runtime(
     thinking_enabled: bool,  # noqa: ARG001 - Agent 链路已不使用；思考由预设独占控制（见下方 AgentConfig）。保留形参仅为与调用方签名兼容。
     tenant_id: str | None,
     session_id: str | None,
+    timezone_name: str | None = None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     custom_skills: list | None = None,
@@ -1057,16 +1067,9 @@ async def _build_agent_runtime(
             SearchTarget(kb_id=SESSION_FILES_KB_ID, expr=build_session_id_expr(session_id))
         )
 
-    # 按预设 allowed_tools 过滤；基础设施工具始终豁免白名单：
-    # - final_answer：Agent 终止信号，缺失则无法收尾。
-    # - thinking：模型推理的"正确去处"。提示词多处引导"use the thinking tool"，若不注册，
-    #   模型想推理时无处可去 → 把 verbalized CoT 写进普通 content → natural_stop 时整段
-    #   （CoT+答案）被当正文展示（参考 WeKnora：推理走 thinking 工具，与正文物理隔离）。
-    # - read_attachment：本条消息附件的确定性直读能力，由"是否带附件"决定是否注册
-    #   （见下方注册处），与业务预设的检索工具白名单无关。若受白名单管控，老预设
-    #   不含此新工具名 → 工具不注册，但 prompt 仍提示"用 read_attachment 读取附件"，
-    #   会让模型陷入"系统说有、工具列表没有"的矛盾而空转。
-    _INFRA_TOOLS = {"final_answer", "thinking", "read_attachment", "read_skill"}
+    # 按预设 allowed_tools 过滤；由请求能力动态决定的基础设施工具豁免白名单。
+    # 回答不再承载在工具里；native reasoning 由模型通道直接提供。
+    _INFRA_TOOLS = {"read_attachment", "read_skill"}
     preset_allowed = preset_cfg.get("allowed_tools")
 
     def _tool_enabled(tool_name: str) -> bool:
@@ -1085,11 +1088,6 @@ async def _build_agent_runtime(
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool())
-    # thinking：注册为基础设施工具，给模型推理一个"正确去处"。推理内容经 execute
-    # 记录到 step.thought 并发 THOUGHT 事件 → 进思考面板，与 final_answer 正文隔离，
-    # 从源头减少 verbalized CoT 漏进正文（E）。
-    if _tool_enabled("thinking"):
-        tool_registry.register(ThinkingTool(state, event_bus, session_id or ""))
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
@@ -1099,8 +1097,6 @@ async def _build_agent_runtime(
     )
     if read_attachment_on:
         tool_registry.register(ReadAttachmentTool(session_id, anchored_attachments))
-    tool_registry.register(FinalAnswerTool(state, event_bus, session_id or ""))
-
     # 可选工具：web_search（需配置 searxng_url 且预设允许）
     settings = get_settings()
     web_search_on = bool(settings.searxng_url) and _tool_enabled("web_search")
@@ -1128,12 +1124,11 @@ async def _build_agent_runtime(
     # get_mcp_tools 返回空列表，Agent 行为与接线前完全一致。
     await _register_mcp_tools(tool_registry, preset_allowed)
 
-    # 诊断日志：确认实际注册的工具列表与预设白名单，定位 thinking/read_attachment 是否生效。
+    # 诊断日志：确认实际注册的工具列表与预设白名单，定位 read_attachment 是否生效。
     logger.info(
-        "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | thinking_in_list=%s | attachments=%d",
+        "[Agent][Runtime] registered_tools=%s | preset_allowed=%s | attachments=%d",
         tool_registry.list_tools(),
         preset_allowed,
-        "thinking" in tool_registry.list_tools(),
         len(anchored_attachments),
     )
 
@@ -1156,6 +1151,7 @@ async def _build_agent_runtime(
         available_tools=tool_registry.list_tools(),
         web_search_enabled=web_search_on,
         skills=[(m.name, m.description) for m in skill_metadata],
+        timezone_name=timezone_name,
     )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
@@ -1163,13 +1159,9 @@ async def _build_agent_runtime(
         max_output_tokens=max_output_tokens,
         temperature=preset_cfg.get("temperature", AgentConfig.temperature),
         web_search_enabled=web_search_on,
-        # 深度思考（模型原生思维链）在 Agent 链路只由智能体预设独占控制，不再 fallback 到
-        # 模型配置的 thinking_enabled。原因：① 预设是开放给普通用户的、模型配置仅超管可改，
-        # 二者叠加会让"超管的模型开关"暗中覆盖用户的预设选择，语义混乱；② 模型原生思维链会
-        # 抑制工具调用（DeepSeek 等在 thinking 模式下倾向跳过 final_answer / 检索，甚至禁止
-        # tool_choice），与 ReAct + 强制工具调用的 Agent 架构冲突。预设未显式开启时默认关闭，
-        # 模型推理改走 thinking 工具（显式工具调用通道），既保留推理又不抢占输出段。
-        thinking_enabled=preset_cfg.get("thinking_enabled", False),
+        # thinking_enabled 现在只表示“是否开启模型原生 thinking/reasoning 通道”，
+        # 不再注册 ThinkingTool。小模型没有独立通道时，loop 会在服务端做能力兼容。
+        thinking_enabled=preset_cfg.get("thinking_enabled", True),
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
     )
@@ -1189,6 +1181,7 @@ async def _run_agent_nonstream(
     tenant_id: str | None,
     session_id: str | None,
     history: list[dict] | None,
+    timezone_name: str | None = None,
     include_session_source: bool = False,
     attachments: list[dict] | None = None,
     owner_user_id: str | None = None,
@@ -1211,6 +1204,7 @@ async def _run_agent_nonstream(
     """
     engine, state, event_bus = await _build_agent_runtime(
         kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled, tenant_id, session_id,
+        timezone_name=timezone_name,
         include_session_source=include_session_source,
         attachments=attachments,
         custom_skills=await load_user_custom_skills(owner_user_id),
@@ -1220,15 +1214,15 @@ async def _run_agent_nonstream(
     )
 
     steps_collected: list[dict] = []
-    # 步骤面板耗时截止于首个 final_answer 事件（答案开始产出），与流式路径语义一致。
-    final_answer_at: float | None = None
+    # 步骤面板耗时截止于首个 text_delta 事件（答案开始产出），与流式路径语义一致。
+    text_delta_at: float | None = None
 
     async def _collect(event: AgentEvent):
-        nonlocal final_answer_at
+        nonlocal text_delta_at
         sse = _agent_event_to_sse(event)
         if sse:
-            if final_answer_at is None and sse.get("type") == "final_answer":
-                final_answer_at = time.time()
+            if text_delta_at is None and sse.get("type") == "text_delta":
+                text_delta_at = time.time()
             steps_collected.append(sse)
 
     event_bus.on(None, _collect)
@@ -1248,7 +1242,7 @@ async def _run_agent_nonstream(
         degraded = True
 
     total_steps = len(result_state.steps) if result_state else 0
-    duration_end = final_answer_at if final_answer_at is not None else time.time()
+    duration_end = text_delta_at if text_delta_at is not None else time.time()
     steps_collected.append({
         "type": "complete",
         "total_steps": total_steps,
@@ -1274,6 +1268,7 @@ async def _stream_response(
     tenant_id: str | None = None,
     retrieval_query: str | None = None,
     skip_retrieval: bool = False,
+    timezone_name: str | None = None,
     attachments: list | None = None,
     requested_kb_ids: list[str] | None = None,
     session_has_files: bool = False,
@@ -1339,7 +1334,8 @@ async def _stream_response(
         # 传入全部所选库 + 会话源标志，让会话文件成为 agent 可检索的普通数据源。
         engine, state, event_bus = await _build_agent_runtime(
             requested_kb_ids, llm, preset_cfg, max_context_tokens, thinking_enabled,
-            tenant_id, session_id, include_session_source=session_has_files,
+            tenant_id, session_id, timezone_name=timezone_name,
+            include_session_source=session_has_files,
             attachments=attachments,
             custom_skills=await load_user_custom_skills(owner_user_id),
             hybrid_retriever=await _build_hybrid_retriever(),
@@ -1367,10 +1363,10 @@ async def _stream_response(
         # 事件与会话历史丢失」。
         result_state: AgentState | None = None
         agent_error: Exception | None = None
-        # 步骤面板耗时的截止时刻：首个 final_answer 事件触发时（答案开始产出）。
+        # 步骤面板耗时的截止时刻：首个 text_delta 事件触发时（答案开始产出）。
         # 步骤面板统计的是「执行步骤（思考 + 工具调用）」的耗时，不含答案正文的流式输出，
         # 故在此截止，而非等整个引擎跑完（含答案 token 全部流完）。
-        final_answer_at: float | None = None
+        text_delta_at: float | None = None
         cancelled = False
         try:
             while not agent_task.done():
@@ -1378,8 +1374,8 @@ async def _stream_response(
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                     sse_data = _agent_event_to_sse(event)
                     if sse_data:
-                        if final_answer_at is None and sse_data.get("type") == "final_answer":
-                            final_answer_at = time.time()
+                        if text_delta_at is None and sse_data.get("type") == "text_delta":
+                            text_delta_at = time.time()
                         agent_steps_collected.append(sse_data)
                         yield json.dumps(sse_data, ensure_ascii=False)
                 except asyncio.TimeoutError:
@@ -1406,7 +1402,7 @@ async def _stream_response(
             partial_answer = "".join(
                 s.get("content", "")
                 for s in agent_steps_collected
-                if s.get("type") == "final_answer" and s.get("content")
+                if s.get("type") == "text_delta" and s.get("content")
             )
             if session_id and partial_answer:
                 try:
@@ -1430,12 +1426,12 @@ async def _stream_response(
                     event = event_queue.get_nowait()
                     sse_data = _agent_event_to_sse(event)
                     if sse_data:
-                        if final_answer_at is None and sse_data.get("type") == "final_answer":
-                            final_answer_at = time.time()
+                        if text_delta_at is None and sse_data.get("type") == "text_delta":
+                            text_delta_at = time.time()
                         agent_steps_collected.append(sse_data)
                         yield json.dumps(sse_data, ensure_ascii=False)
 
-        # Agent 模式下 final_answer 就是最终响应，knowledge_refs 是引用。
+        # 自然停止的 assistant text 就是最终响应；knowledge_refs 是引用。
         # 注意：工具持有的 state 对象和引擎内部的 state 是不同的，
         # knowledge_refs 被 KnowledgeSearchTool 写入到传给工具的 state 中。
         chunks = state.knowledge_refs
@@ -1453,16 +1449,18 @@ async def _stream_response(
             degraded = True
             if not full_response:
                 full_response = "抱歉，处理您的请求时发生了错误，请稍后重试。"
-                answer_event = {"type": "final_answer", "content": full_response, "done": False}
+                answer_event = {"type": "text_delta", "content": full_response, "iteration": 0}
                 agent_steps_collected.append(answer_event)
                 yield json.dumps(answer_event, ensure_ascii=False)
-            yield json.dumps({"type": "final_answer", "content": "", "done": True}, ensure_ascii=False)
+            turn_end_event = {"type": "turn_end", "finish_reason": "error"}
+            agent_steps_collected.append(turn_end_event)
+            yield json.dumps(turn_end_event, ensure_ascii=False)
         full_response = full_response or ""
 
         # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
-        # 耗时截止于首个 final_answer 事件（答案开始产出）；若全程无 final_answer
+        # 耗时截止于首个 text_delta 事件（答案开始产出）；若全程无 text_delta
         # （异常兜底等），退回到当前时刻，保证始终有合理值。
-        duration_end = final_answer_at if final_answer_at is not None else time.time()
+        duration_end = text_delta_at if text_delta_at is not None else time.time()
         total_duration_ms = int((duration_end - agent_start_time) * 1000)
         complete_event = {
             "type": "complete",
@@ -1540,7 +1538,10 @@ async def _stream_response(
     # 构建上下文和消息
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context, history=history)
+    messages = _build_messages(
+        request, context, has_context, history=history,
+        timezone_name=request.timezone_name,
+    )
     llm_degraded = False
 
     # 发送第一个 chunk（包含 role）
@@ -1559,12 +1560,6 @@ async def _stream_response(
     full_response = ""
     try:
         if stream_enabled:
-            # 非 agent 简单 RAG 链路：部分模型会把整段回答写成 `{"answer": "..."}`
-            # （甚至带 `final_answer` 前缀）的纯文本 JSON 输出。复用 Agent 链路的
-            # ContentStreamRouter 逐 token 解包：普通文本原样透传，内联 answer JSON
-            # 则提取其 answer 字段值作为正文，避免原始 JSON 直接泄露给用户。
-            router = ContentStreamRouter()
-
             def _emit_content(text: str) -> str:
                 nonlocal full_response
                 full_response += text
@@ -1575,19 +1570,10 @@ async def _stream_response(
                 return json.dumps(chunk_data.model_dump(), ensure_ascii=False)
 
             async for token in llm.stream(messages, **llm_kwargs):
-                # router 区分 thought / answer，本链路两者都属于用户可见正文，统一发射。
-                _kind, text = router.feed(token)
-                if text:
-                    yield _emit_content(text)
-            # 冲刷 router 缓冲（流末仍在探测的残留按正文输出）
-            _, tail = router.flush()
-            if tail:
-                yield _emit_content(tail)
+                yield _emit_content(token)
         else:
-            # 非流式生成：一次性获取完整回复，解包可能的内联 answer JSON 后分段推送
             result = await llm.generate(messages, **llm_kwargs)
-            unwrapped = extract_inline_answer(result)
-            full_response = unwrapped if unwrapped is not None else result
+            full_response = result
             chunk_size = 4
             for i in range(0, len(full_response), chunk_size):
                 chunk_data = ChatCompletionChunk(
@@ -1775,7 +1761,7 @@ async def chat_completions(
             [a.model_dump() for a in request.attachments] if request.attachments else None
         )
         return EventSourceResponse(
-            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id, caller_ctx=caller_ctx),
+            _stream_response(request, user_query, request.knowledge_base_id, mode, llm, stream_enabled, max_context_tokens, thinking_enabled, expr=expr, kb_ids=stream_kb_ids, history=history, session_id=request.session_id, preset_cfg=preset_cfg, tenant_id=tenant_id, retrieval_query=retrieval_query, skip_retrieval=skip_retrieval, timezone_name=request.timezone_name, attachments=attachments_data, requested_kb_ids=requested_kb_ids, session_has_files=session_has_files, multi_kb_requested=bool(request.kb_ids), owner_user_id=identity.acting_subject_id, caller_ctx=caller_ctx),
             media_type="text/event-stream",
         )
 
@@ -1804,12 +1790,13 @@ async def chat_completions(
             logger.warning("入库用户消息失败: %s", e)
 
     # Agent 模式：跑 ReAct 引擎并直接采用其最终答案（与流式共用 _build_agent_runtime），
-    # 不再丢弃 final_answer 后二次走普通 RAG 生成（既省一次 LLM 调用，也保留 Agent 推理结果）。
+    # 不再二次走普通 RAG 生成（既省一次 LLM 调用，也保留 Agent 推理结果）。
     # 始终走 AGENT（含会话源由 session_has_files 决定），不再因会话文件降级（Property 2）。
     if route == Route.AGENT:
         answer, chunks, degraded, agent_steps, failed_source_ids = await _run_agent_nonstream(
             user_query, list(requested_kb_ids), llm, preset_cfg,
             max_context_tokens, thinking_enabled, tenant_id, request.session_id, history,
+            timezone_name=request.timezone_name,
             include_session_source=session_has_files,
             attachments=nonstream_attachments,
             owner_user_id=identity.acting_subject_id,
@@ -1872,7 +1859,10 @@ async def chat_completions(
             raise HTTPException(status_code=500, detail=f"检索失败: {e}")
     context = _build_context(chunks, max_tokens=max_context_tokens)
     has_context = len(chunks) > 0
-    messages = _build_messages(request, context, has_context, history=history)
+    messages = _build_messages(
+        request, context, has_context, history=history,
+        timezone_name=request.timezone_name,
+    )
 
     # 尝试 LLM 生成，失败时降级为纯检索结果
     llm_degraded = False
@@ -1883,10 +1873,6 @@ async def chat_completions(
         llm_kwargs["enable_thinking"] = False
     try:
         answer = await llm.generate(messages, **llm_kwargs)
-        # 部分模型把整段回答写成 `{"answer": "..."}` 纯文本 JSON，解包为正文
-        unwrapped = extract_inline_answer(answer)
-        if unwrapped is not None:
-            answer = unwrapped
     except Exception as e:
         logger.warning("LLM 生成失败，降级为纯检索结果: %s", e)
         answer = _build_context(chunks)

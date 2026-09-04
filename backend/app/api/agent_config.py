@@ -146,10 +146,9 @@ _BUILTIN_PRESETS = [
 # 可配进 allowed_tools 的内置工具。取值与 chat._build_agent_runtime 的注册分支一一对应，
 # 是前端工具勾选面板的单一真值来源（此前硬编码在 AgentConfig.tsx，新增工具易漏）。
 #
-# always_on 的两个是 _INFRA_TOOLS 成员，恒注册、不受白名单管控；仍列出以便前端明示
-# "始终启用"，而不是让用户以为取消勾选就能关掉。read_attachment / read_skill 同为
-# 基础设施工具，但由"本条消息是否带附件""是否存在技能"动态决定，不属于预设可配项，
-# 故不出现在此清单。
+# 回答由自然停止的 assistant text 承载；native reasoning 是模型通道，不是可配置工具。
+# read_attachment / read_skill 由"本条消息是否带附件""是否存在技能"动态决定，
+# 不属于预设可配项，故不出现在此清单。
 
 _BUILTIN_TOOL_CATALOG: list[dict] = [
     {
@@ -171,18 +170,6 @@ _BUILTIN_TOOL_CATALOG: list[dict] = [
         "name": "web_search",
         "label": "网页搜索",
         "description": "检索公开网页（需平台已配置 SearXNG，未配置时勾选无效）",
-    },
-    {
-        "name": "thinking",
-        "label": "内部思考",
-        "description": "模型推理的专用去处，推理内容与回答正文隔离",
-        "always_on": True,
-    },
-    {
-        "name": "final_answer",
-        "label": "最终答案",
-        "description": "Agent 收尾信号，缺失则无法输出答案",
-        "always_on": True,
     },
 ]
 
@@ -351,7 +338,7 @@ async def rewrite_prompt(
         "角色设定、语气风格、工作方法论和边界约束。\n\n"
         "硬性要求：\n"
         "1. 只输出这段自定义指令本身，不要复述检索流程、工具调用、引用格式、"
-        "final_answer 等底层规则——这些已由核心提示词负责，你无需也不要涉及。\n"
+        "终止条件等底层规则——这些已由核心提示词负责，你无需也不要涉及。\n"
         "2. 聚焦于：角色定位、语气与表达风格、回答时的侧重与方法、可做与不可做的边界。\n"
         "3. 用与用户描述一致的语言书写（用户用中文则用中文），简洁清晰，可用要点列举。\n"
         "4. 不要使用占位符变量，不要包含花括号模板。\n"

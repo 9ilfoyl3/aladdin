@@ -635,14 +635,14 @@ curl -X POST $BASE/api/retrieval/agent \
       "content":"父块…", "child_content":"子块…", "score":0.83 }
   ],
   "agent_steps": [
-    { "type":"thought", "content":"先检索保修期，再检索超期收费", "iteration":0 },
+    { "type":"reasoning_delta", "content":"先检索保修期，再检索超期收费", "iteration":0 },
     { "type":"tool_call", "tool_name":"knowledge_search", "tool_call_id":"call_1",
       "arguments":{"query":"保修期"}, "iteration":0 },
     { "type":"tool_result", "tool_call_id":"call_1", "tool_name":"knowledge_search",
       "success":true, "duration_ms":412,
       "files":[{"id":"doc-71bc...","filename":"manual.pdf","source":"document"}] },
-    { "type":"final_answer", "content":"根据检索到的资料……", "done":false },
-    { "type":"final_answer", "content":"", "done":true },
+    { "type":"text_delta", "content":"根据检索到的资料……", "iteration":1 },
+    { "type":"turn_end", "finish_reason":"stop" },
     { "type":"complete", "total_steps":2, "total_duration_ms":2110 }
   ],
   "degraded": false,
@@ -671,6 +671,7 @@ curl -X POST $BASE/api/retrieval/agent \
 | `filter_doc_ids` | string[] | 限定文档范围 |
 | `session_id` | string | 传入则自动加载历史并落库（见 6.4） |
 | `attachments` | object[] | 本条 user 消息绑定的会话临时文件附件，每项 `{file_id, filename, file_size?, file_type?}`（`file_id` 为第 8 节上传返回的 `id`）。非空时 Agent 获得「整篇直读本次附件」能力（不必与知识库文档竞争语义召回），并随 user 消息落库供历史回放渲染附件标记 |
+| `timezone_name` | string | 可选 IANA 时区（如 `Asia/Shanghai`）。传入后用于可靠回答“今天/现在”类问题；缺省使用服务端时区 |
 | `temperature` / `max_tokens` | number | 生成参数 |
 
 **非流式示例：**
@@ -721,27 +722,30 @@ curl -N -X POST $BASE/v1/chat/completions \
 
 `retrieval_mode=agent` 时，正文不再走 OpenAI 兼容的 `delta` 增量，而是全部经下列事件推送。**平台内部前端的步骤面板就是只消费这些事件渲染的**，第三方按同一套协议即可得到完全一致的效果。
 
+> **Breaking change**：Agent SSE 不再提供 `thought` / `final_answer`，也没有 `final_answer` 工具。思考与正文由服务端按 provider 通道分类，分别使用 `reasoning_delta` / `text_delta`；结束原因由 `turn_end.finish_reason` 表达。
+
 | `type` | 字段 | 语义 |
 | --- | --- | --- |
-| `thought` | `content`(str)、`iteration`(int) | 模型思考文本，**逐 token 增量**（一次思考会拆成很多帧），`iteration` 为第几轮 ReAct 决策（从 0 起） |
+| `reasoning_delta` | `content`(str)、`iteration`(int) | 推理/思考增量。native thinking 模型来自 `reasoning_content` / `reasoning`；无独立思考通道的模型，tool-call 轮的普通 content 会由服务端归类为此事件 |
 | `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | 发起一次工具调用。同一 `iteration` 可并行发多条。`arguments` 为工具入参（如 `{"query":"保修期"}`） |
 | `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4） |
-| `final_answer` | `content`(str)、`done`(bool)、`finish_reason`(str) | 答案正文，**逐 token 增量**。`content` 非空即为正文分片；`content` 为空串且 `done=true` 是**结束标记**。结束标记携带上游停止原因：`stop` / `tool_calls` 表示模型正常收束，`length` 表示撞到单次输出上限、正文可能被截断，空串表示兜底合成路径未获得上游停止原因 |
+| `text_delta` | `content`(str)、`iteration`(int) | 用户可见正文增量。正常情况来自自然停止的 assistant text；服务端兜底/合成答案也使用同一事件。不要把 answer 承载在 tool call 参数里 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
-| `complete` | `total_steps`(int)、`total_duration_ms`(int) | 执行步骤（思考+工具）结束。耗时**截止于首个 `final_answer`**，不含答案正文流式输出时间 |
-| `error` | `content`(str) | 执行出错的可读原因（链路已尽力降级，通常仍会有兜底正文） |
+| `turn_end` | `finish_reason`(str) | Agent 本轮结束原因：`stop`、`max_iterations`、`length`、`error`、`empty` 等。`length` 表示正文可能被单次输出上限截断；`empty` 表示模型重试后仍没有返回内容 |
+| `complete` | `total_steps`(int)、`total_duration_ms`(int) | 执行步骤（思考+工具）结束。耗时**截止于首个 `text_delta`**，不含答案正文流式输出时间 |
+| `error` | `content`(str) | 执行出错的可读原因（链路已尽力降级，通常仍会有兜底 `text_delta`） |
 | `message_saved` | `message_id`(str) | assistant 消息已落库的 DB 主键，用于后续消息反馈（7.7）与重试（7.8）定位。仅传了 `session_id` 且有正文时推送 |
 
 典型事件序列：
 
 ```
-{"type":"thought","content":"需要先查","iteration":0}
-{"type":"thought","content":"保修期条款","iteration":0}
+{"type":"reasoning_delta","content":"需要先查","iteration":0}
+{"type":"reasoning_delta","content":"保修期条款","iteration":0}
 {"type":"tool_call","tool_name":"knowledge_search","tool_call_id":"call_1","arguments":{"query":"保修期"},"iteration":0}
 {"type":"tool_result","tool_call_id":"call_1","tool_name":"knowledge_search","success":true,"duration_ms":412,"files":[{"id":"doc-71bc...","filename":"manual.pdf","source":"document"}]}
-{"type":"final_answer","content":"根据资料，","done":false}
-{"type":"final_answer","content":"保修期为 12 个月。","done":false}
-{"type":"final_answer","content":"","done":true}
+{"type":"text_delta","content":"根据资料，","iteration":1}
+{"type":"text_delta","content":"保修期为 12 个月。","iteration":1}
+{"type":"turn_end","finish_reason":"stop"}
 {"type":"complete","total_steps":2,"total_duration_ms":2110}
 {"references":[...],"metadata":{"retrieval_mode":"agent","degraded":false}}
 {"type":"message_saved","message_id":"msg-..."}
@@ -750,23 +754,25 @@ curl -N -X POST $BASE/v1/chat/completions \
 已知边界：
 
 - **工具原始输出不外发**：`tool_result` 只带 `success` / `duration_ms` / `files`，工具返回的正文既不进 SSE 也不落库（平台内部前端同样看不到，两侧对等）。最终证据请取 `references`。
+- **模型能力差异在服务端收敛**：native thinking 模型的 reasoning 增量即时推送；`<think>` 标记会跨 chunk 解析并按 reasoning 推送；没有标记的普通 content 会缓冲到本轮结束，再根据 tool calls / finish reason 归类为 reasoning 或 text，避免把早期规划误判成正文。
 - **外部 MCP 工具同通道**：第三方经 MCP 注册的外部工具（见 6.5）与内置工具走**同一套** `tool_call` / `tool_result` 事件，`tool_name` 即 MCP 工具名，`arguments` 为工具入参。第三方前端消费逻辑与内置工具完全一致。
 - **客户端中断**：主动断开连接（如浏览器 `AbortController`）时，服务端会取消 Agent 执行，并把**已产出的部分答案 + 已产生的步骤**落库，历史里可见并可继续追问 / 重试。
 
 #### 6.3.2 把事件还原为步骤面板（流式与历史共用）
 
-事件序列建议聚合成一个有序的「段落数组」，每段为 `thought` / `tool_call` / `answer` 之一。因为落库的 `agent_steps` 与 SSE 事件是**同一套结构**（见 7.3），所以这段归约逻辑写一次即可同时用于实时渲染与历史回放。规则：
+事件序列建议聚合成一个有序的「段落数组」，每段为 `reasoning` / `tool_call` / `answer` 之一。因为落库的 `agent_steps` 与 SSE 事件是**同一套结构**（见 7.3），所以这段归约逻辑写一次即可同时用于实时渲染与历史回放。事件类型已经表达语义；UI 不再根据是否调用工具做改判。规则：
 
-1. `thought`：与前一段合并——若上一段已是 `thought` 则把 `content` 追加进去，否则新建一段。不合并会渲染成大量碎片。
+1. `reasoning_delta`：与前一段合并——若上一段已是 `reasoning` 则把 `content` 追加进去，否则新建一段。
 2. `tool_call`：新建一段，记下 `tool_call_id`、`tool_name`、`arguments`。
 3. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files`。
-4. `final_answer` 且 `content` 非空：与前一段合并（同规则 1，段类型为 `answer`）。
-5. `final_answer` 且 `content` 为空、`done=true`：这是「答案作为思考流式发出」的场景（部分弱 function-calling 模型闲聊时把答案当普通 content 输出）。此时须**把最后一段 `thought` 改判为 `answer`**。不处理会出现「思考面板与正文重复显示同一段」或正文为空。
-6. `complete`：取 `total_duration_ms` 挂到整条消息上做「共耗时 x 秒」展示。
-7. `token_usage`：更新上下文用量指示。
-8. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）或已累计的正文非空，补一段 `answer`。
+4. `text_delta`：与前一段合并（同规则 1，段类型为 `answer`）。
+5. `turn_end`：标记本轮结束；`finish_reason=length` 时提示正文可能被截断。
+6. `error`：不新建过程段；展示错误提示。若其后仍有 `text_delta`，继续按规则 4 归并。
+7. `complete`：取 `total_duration_ms` 挂到整条消息上做「共耗时 x 秒」展示。
+8. `token_usage`：更新上下文用量指示。
+9. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`。
 
-> 只想要「纯答案 + 引用」的第三方可以忽略 `thought` / `tool_call` / `tool_result`，只拼接 `final_answer` 的 `content` 并读末尾的 `references`，行为等价于普通流式问答。
+> 只想要「纯答案 + 引用」的第三方可以忽略 `reasoning_delta` / `tool_call` / `tool_result`，只拼接 `text_delta.content` 并读末尾的 `references`，行为等价于普通流式问答。
 
 ### 6.4 多轮对话（平台托管历史）
 
@@ -1257,7 +1263,7 @@ curl $BASE/api/sessions/<session_id>/messages \
 | `feedback` | string/null | `like` / `dislike` / `null`，见 7.7 |
 | `created_at` | datetime | 创建时间 |
 
-**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`thought` / `tool_call` / `tool_result` / `final_answer` / `token_usage` / `complete`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考/工具/正文分段展示，无需任何额外接口。
+**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`reasoning_delta` / `tool_call` / `tool_result` / `text_delta` / `token_usage` / `turn_end` / `complete` / `error`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考/工具/正文分段展示，无需任何额外接口。
 
 ```json
 [
@@ -1267,12 +1273,12 @@ curl $BASE/api/sessions/<session_id>/messages \
   { "id":"msg-2","role":"assistant","content":"保修期为 12 个月。",
     "references":[{ "doc_id":"doc-71bc...","chunk_id":"ck-1","filename":"manual.pdf","content":"父块…","child_content":"子块…","score":0.83 }],
     "agent_steps":[
-      { "type":"thought","content":"需要先查保修期条款","iteration":0 },
+      { "type":"reasoning_delta","content":"需要先查保修期条款","iteration":0 },
       { "type":"tool_call","tool_name":"knowledge_search","tool_call_id":"call_1","arguments":{"query":"保修期"},"iteration":0 },
       { "type":"tool_result","tool_call_id":"call_1","tool_name":"knowledge_search","success":true,"duration_ms":412,
         "files":[{"id":"doc-71bc...","filename":"manual.pdf","source":"document"}] },
-      { "type":"final_answer","content":"保修期为 12 个月。","done":false },
-      { "type":"final_answer","content":"","done":true },
+      { "type":"text_delta","content":"保修期为 12 个月。","iteration":1 },
+      { "type":"turn_end","finish_reason":"stop" },
       { "type":"complete","total_steps":2,"total_duration_ms":2110 }
     ],
     "attachments":null,"kb_id":"kb-3f2a...","kb_ids":null,"feedback":null,"created_at":"2026-07-01T04:10:03Z" }
@@ -1663,7 +1669,7 @@ curl $BASE/api/system/health
 4. 用 `sk-...` + `X-External-User-Id: alice-001` `POST /api/knowledge-bases` 建库 → `201`
 5. `POST .../documents/upload` 传一个文件 → `201`，轮询 `GET /api/documents/{id}` 至 `completed`
 6. `POST /v1/chat/completions` 指定该库 → 拿到带 `references` 的回答
-7. Agent 步骤复现校验：`POST /api/sessions` 建会话 → 带 `session_id` + `retrieval_mode=agent` + `stream=true` 提问，确认收到 `thought`/`tool_call`/`tool_result`/`final_answer`/`complete` 事件 → 再调 `GET /api/sessions/{id}/messages`，确认最后一条 assistant 的 `agent_steps` 与流式收到的事件序列一致（见 6.3.1 / 6.3.2 / 7.3）
+7. Agent 步骤复现校验：`POST /api/sessions` 建会话 → 带 `session_id` + `retrieval_mode=agent` + `stream=true` 提问，确认收到 `reasoning_delta`/`tool_call`/`tool_result`/`text_delta`/`turn_end`/`complete` 事件 → 再调 `GET /api/sessions/{id}/messages`，确认最后一条 assistant 的 `agent_steps` 与流式收到的事件序列一致（见 6.3.1 / 6.3.2 / 7.3）
 8. 隔离校验：换 `X-External-User-Id: bob-002` 访问 alice 的库/会话 → `404`
 9. 外部 MCP 工具链路校验：超管在「MCP 服务」添加第三方 server（选标准 MCP + 配凭据 + 按需开启上下文透传）→ 「测试连接」显示协议为「标准 MCP」→ 目标预设 `allowed_tools` 加入工具名 → `stream=true` 提问，确认 SSE 出现对应 `tool_call`（`tool_name`=MCP 工具名、`arguments` 携带入参，见 6.5）；开启透传时在第三方侧确认签名校验通过、`session_id` / `subject_id` 符合预期
 10. Artoo 作为 MCP server 校验：`POST $BASE/mcp` 依次发 `initialize` → `tools/list` → `tools/call`，确认返回标准 JSON-RPC 结果；去掉 `Authorization` 头重发，确认 `401`（见 6.6）

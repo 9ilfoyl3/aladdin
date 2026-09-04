@@ -9,7 +9,6 @@ from typing import AsyncIterator
 
 import httpx
 
-from app.models.llm.json_field_extractor import JSONFieldExtractor
 from app.models.llm.provider_detect import LLMProviderName, detect_provider
 from app.models.llm.thinking_dialect import apply_thinking
 from app.models.provider import (
@@ -221,6 +220,11 @@ class VllmLLM(LLMProvider):
 
             # 解析 content
             content = message.get("content") or ""
+            reasoning_content = (
+                message.get("reasoning_content")
+                or message.get("reasoning")
+                or ""
+            )
 
             # 解析 tool_calls
             tool_calls: list[LLMToolCall] = []
@@ -247,6 +251,7 @@ class VllmLLM(LLMProvider):
 
             return ChatResponse(
                 content=content,
+                reasoning_content=reasoning_content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 usage=usage,
@@ -263,24 +268,20 @@ class VllmLLM(LLMProvider):
     async def stream_with_tools(
         self, messages: list[dict], tools: list[dict], **kwargs
     ) -> AsyncIterator[StreamChunk]:
-        """Streaming Function Calling: 流式返回包含工具调用的响应片段
+        """OpenAI 兼容响应转换为类型化 StreamChunk。
 
-        通过 OpenAI 兼容 API 的 stream=true + tools 参数，
-        解析 SSE 中的 tool_call deltas 并累积组装完整的 tool_calls。
-
-        Args:
-            messages: 对话消息列表
-            tools: OpenAI 格式的工具定义列表
-            **kwargs: 额外参数
-
-        Yields:
-            StreamChunk 包含 content/tool_calls/finish_reason/response_type
+        provider 只负责通道分类：content 是 content，reasoning_content/reasoning
+        是 reasoning。tool-call arguments 由 provider 组装成完整调用；是否属于
+        thinking 还是用户正文由 Agent loop 根据 finish reason 和 tool calls 判定。
         """
         payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
+        if "stream_options" not in payload:
+            payload["stream_options"] = {"include_usage": True}
 
         # 累积 tool_calls 的状态（按 index 存储）
         tool_call_map: dict[int, dict] = {}
         actual_finish_reason = ""
+        finish_emitted = False
 
         try:
             url = f"{self.base_url}/chat/completions"
@@ -290,10 +291,16 @@ class VllmLLM(LLMProvider):
                     await resp.aclose()
                     result = await self.chat_with_tools(messages, tools, **kwargs)
                     # 将非流式结果转为单个 StreamChunk 输出
+                    if result.reasoning_content:
+                        yield StreamChunk(
+                            reasoning=result.reasoning_content,
+                            response_type="thinking",
+                        )
                     yield StreamChunk(
                         content=result.content,
                         tool_calls=result.tool_calls if result.tool_calls else None,
                         finish_reason=result.finish_reason,
+                        usage=result.usage,
                         response_type="tool_call" if result.tool_calls else "content",
                     )
                     return
@@ -306,15 +313,16 @@ class VllmLLM(LLMProvider):
                         continue
                     data_str = line[len("data:"):].strip()
                     if data_str == "[DONE]":
-                        # 流结束，发送最终 chunk 携带累积的 tool_calls
-                        final_tool_calls = self._build_tool_calls(tool_call_map)
-                        if final_tool_calls:
+                        # 某些兼容网关不发 finish_reason；缺省按自然停止处理。
+                        if not finish_emitted:
+                            final_tool_calls = self._build_tool_calls(tool_call_map)
+                            default_finish = "tool_calls" if final_tool_calls else "stop"
                             yield StreamChunk(
-                                content="",
-                                tool_calls=final_tool_calls,
-                                finish_reason=actual_finish_reason or "tool_calls",
-                                response_type="tool_call",
+                                tool_calls=final_tool_calls if final_tool_calls else None,
+                                finish_reason=actual_finish_reason or default_finish,
+                                response_type="tool_call" if final_tool_calls else "content",
                             )
+                            finish_emitted = True
                         break
 
                     chunk = json.loads(data_str)
@@ -346,6 +354,7 @@ class VllmLLM(LLMProvider):
                                 finish_reason=finish_reason,
                                 response_type="tool_call" if final_tool_calls else "content",
                             )
+                            finish_emitted = True
                         continue
 
                     # 处理 tool_calls delta（累积模式）
@@ -376,61 +385,6 @@ class VllmLLM(LLMProvider):
                             if func_data.get("arguments"):
                                 entry["arguments"] += func_data["arguments"]
 
-                                # 当 tool_name 是 final_answer 时，用 JSONFieldExtractor
-                                # 从增量 arguments 中安全提取 answer 字段，逐 token 作为
-                                # answer 类型流式发射。状态机正确处理跨 chunk 的转义序列，
-                                # 不会吐出残留的反斜杠/半个 \uXXXX（旧手写 replace 链的乱码根因）。
-                                if entry["function_name"] == "final_answer":
-                                    extractor = entry.get("_answer_extractor")
-                                    if extractor is None:
-                                        extractor = JSONFieldExtractor("answer")
-                                        entry["_answer_extractor"] = extractor
-                                    answer_delta = extractor.feed(func_data["arguments"])
-                                    if answer_delta:
-                                        yield StreamChunk(
-                                            content=answer_delta,
-                                            tool_calls=None,
-                                            finish_reason="",
-                                            response_type="answer",
-                                        )
-                                    continue
-
-                                # thinking 工具：与 final_answer 对称，从增量 arguments 中
-                                # 安全提取 thought 字段，逐 token 作为 thinking_tool 类型流式
-                                # 发射，让"内部思考"内容实时进思考面板，而非工具执行后整段蹦出。
-                                # 用独立 response_type（区别于模型原生 reasoning_content 的
-                                # "thinking"），便于引擎隔离处理：发 THOUGHT 但不计入 content。
-                                if entry["function_name"] == "thinking":
-                                    extractor = entry.get("_thought_extractor")
-                                    if extractor is None:
-                                        extractor = JSONFieldExtractor("thought")
-                                        entry["_thought_extractor"] = extractor
-                                    thought_delta = extractor.feed(func_data["arguments"])
-                                    if thought_delta:
-                                        yield StreamChunk(
-                                            content=thought_delta,
-                                            tool_calls=None,
-                                            finish_reason="",
-                                            response_type="thinking_tool",
-                                        )
-                                    continue
-
-                        # 发送 tool_call 类型的 StreamChunk（通知有工具调用进行中）
-                        # 仅对非 final_answer、非 thinking 的工具发送（这两者的内容已分别
-                        # 作为 answer / thinking_tool 流式发出，无需再发 tool_call 通知）
-                        _SILENT_STREAM_TOOLS = {"final_answer", "thinking"}
-                        has_visible_tool = any(
-                            tool_call_map.get(tc_delta.get("index", 0), {}).get("function_name", "") not in _SILENT_STREAM_TOOLS
-                            for tc_delta in delta_tool_calls
-                        )
-                        if has_visible_tool:
-                            yield StreamChunk(
-                                content="",
-                                tool_calls=None,
-                                finish_reason="",
-                                response_type="tool_call",
-                            )
-
                     # 处理普通 content delta
                     content = delta.get("content") or ""
                     if content:
@@ -448,10 +402,21 @@ class VllmLLM(LLMProvider):
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                     if reasoning:
                         yield StreamChunk(
-                            content=reasoning,
+                            reasoning=reasoning,
                             tool_calls=None,
                             finish_reason="",
                             response_type="thinking",
+                        )
+
+                    raw_usage = chunk.get("usage")
+                    if raw_usage:
+                        yield StreamChunk(
+                            usage=TokenUsage(
+                                prompt_tokens=raw_usage.get("prompt_tokens", 0),
+                                completion_tokens=raw_usage.get("completion_tokens", 0),
+                                total_tokens=raw_usage.get("total_tokens", 0),
+                            ),
+                            response_type="usage",
                         )
 
                     # 处理 finish_reason（流结束信号）
@@ -463,6 +428,7 @@ class VllmLLM(LLMProvider):
                             finish_reason=finish_reason,
                             response_type="tool_call" if final_tool_calls else "content",
                         )
+                        finish_emitted = True
 
         except httpx.HTTPStatusError as e:
             raise RuntimeError(

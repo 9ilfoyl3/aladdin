@@ -11,11 +11,12 @@ from typing import Any
 class EventType(str, Enum):
     """Agent 事件类型枚举"""
 
-    THOUGHT = "thought"
+    REASONING_DELTA = "reasoning_delta"
+    TEXT_DELTA = "text_delta"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    FINAL_ANSWER = "final_answer"
     TOKEN_USAGE = "token_usage"  # 每轮 LLM 调用后的 token 用量事件，供前端上下文进度条消费
+    TURN_END = "turn_end"
     COMPLETE = "complete"
     ERROR = "error"
 

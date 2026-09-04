@@ -14,8 +14,8 @@ description: 文档深度分析技能。擅长对长文档进行结构化分析�
 ## 使用方法
 1. 先用 knowledge_search 找到目标文档
 2. 用 list_knowledge_chunks 逐页阅读完整内容
-3. 在 thinking 中进行结构化分析
-4. 用 final_answer 输出分析结果
+3. 对完整内容进行结构化分析
+4. 输出分析结果
 
 ## 输出格式
 - 使用 Markdown 结构化输出
