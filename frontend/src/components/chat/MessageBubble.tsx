@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, Sparkles, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -39,8 +39,8 @@ export interface ToolFile {
 
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
-  type: 'thought' | 'answer' | 'tool_call' | 'tool_result'
-  content: string  // thought/answer: 文本内容; tool_call/tool_result: 工具名
+  type: 'reasoning' | 'text' | 'tool_call'
+  content: string  // reasoning/text: 文本内容; tool_call: 工具名
   toolCallId?: string
   toolName?: string
   // 工具调用参数（如 read_skill 的 skill_name、检索的 query），用于在步骤行展示更具体的信息
@@ -163,7 +163,6 @@ function MessageBubble({
             segments={msg.segments}
             isStreaming={isStreaming}
             isLast={isLast}
-            totalDurationMs={msg.totalDurationMs}
             sessionId={sessionId}
             sessionFiles={sessionFiles}
           />
@@ -373,66 +372,80 @@ function ActionButton({
   )
 }
 
-// 新格式：交错流式段落渲染（思考 + 回答 + 工具调用按 SSE 顺序排列）
+// Agent 活动流：reasoning / tool_call / text 按真实到达顺序在同一个对话块内渲染。
 function AgentStreamContent({
   segments,
   isStreaming,
   isLast,
-  totalDurationMs,
   sessionId,
   sessionFiles,
 }: {
   segments: ContentSegment[]
   isStreaming: boolean
   isLast: boolean
-  totalDurationMs?: number
   sessionId?: string | null
   sessionFiles?: SessionFileResponse[]
 }) {
-  // 过程步骤（思考 + 工具调用）与回答分离：过程步骤汇总到顶部统计面板，回答正常渲染。
-  // 思考段需过滤纯空白内容（如模型只吐了 "\n" 的空思考）——按需思考型模型在直接调工具的
-  // 轮次常产出空 thought，渲染出来会是一个空步骤，无意义。tool_call 段的 content 是工具名，不过滤。
-  const processSegments = segments.filter(
-    (s) => (s.type === 'thought' && s.content.trim() !== '') || s.type === 'tool_call'
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set())
+  const visibleSegments = segments.filter(
+    (seg) => seg.type !== 'reasoning' || seg.content.trim() !== ''
   )
-  const answerSegments = segments.filter((s) => s.type === 'answer')
+  const activeIndex = isStreaming && isLast && visibleSegments[visibleSegments.length - 1]?.type !== 'text'
+    ? visibleSegments.length - 1
+    : -1
+
+  function toggleRow(index: number) {
+    setExpandedRows((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
 
   return (
-    <div className="px-4 py-3 space-y-3">
-      {/* 步骤统计面板 */}
-      {processSegments.length > 0 && (
-        <StepSummaryPanel
-          steps={processSegments}
-          isStreaming={isStreaming}
-          isLast={isLast}
-          totalDurationMs={totalDurationMs}
-          answerStarted={answerSegments.length > 0}
-          sessionId={sessionId}
-          sessionFiles={sessionFiles}
-        />
-      )}
-
-      {/* 回答内容 */}
-      {answerSegments.map((seg, i) => {
-        const isLastSegment =
-          i === answerSegments.length - 1 && isStreaming && isLast
-        return (
-          <div key={`ans-${i}`} className="text-sm leading-relaxed">
-            <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
-              <Streamdown mode={isLastSegment ? 'streaming' : 'static'} plugins={{ cjk: cjk }} isAnimating={isLastSegment} animated={STREAM_ANIMATION}>
-                {seg.content}
-              </Streamdown>
-            </div>
-          </div>
-        )
-      })}
-
-      {/* 流式中但还没有任何段落内容时显示加载动画 */}
-      {segments.length === 0 && isStreaming && isLast && (
+    <div className="px-4 py-3">
+      {visibleSegments.length === 0 && isStreaming && isLast ? (
         <div className="flex items-center gap-2 py-1">
           <span className="w-2 h-2 rounded-full bg-primary/70 animate-[bounce_1.4s_ease-in-out_infinite]" />
           <span className="w-2 h-2 rounded-full bg-primary/70 animate-[bounce_1.4s_ease-in-out_0.2s_infinite]" />
           <span className="w-2 h-2 rounded-full bg-primary/70 animate-[bounce_1.4s_ease-in-out_0.4s_infinite]" />
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {visibleSegments.map((seg, index) => {
+            const active = index === activeIndex
+            if (seg.type === 'text') {
+              const live = isStreaming && isLast && index === visibleSegments.length - 1
+              return (
+                <div key={`text-${index}`} className="text-sm leading-relaxed">
+                  <div className="prose prose-sm max-w-none dark:prose-invert [&>p]:mb-2 [&>p:last-child]:mb-0">
+                    <Streamdown
+                      mode={live ? 'streaming' : 'static'}
+                      plugins={{ cjk }}
+                      isAnimating={live}
+                      animated={STREAM_ANIMATION}
+                    >
+                      {seg.content}
+                    </Streamdown>
+                  </div>
+                </div>
+              )
+            }
+
+            return (
+              <StepRow
+                key={`${seg.type}-${index}`}
+                seg={seg}
+                expanded={expandedRows.has(index) || active}
+                onToggle={() => toggleRow(index)}
+                animating={active && seg.type === 'reasoning'}
+                isActive={active}
+                sessionId={sessionId}
+                sessionFiles={sessionFiles}
+              />
+            )
+          })}
         </div>
       )}
     </div>
@@ -449,141 +462,14 @@ function formatDuration(ms: number): string {
   return `${m}m${s}s`
 }
 
-// 实时耗时计数：running 期间以 100ms 步进累加，结束后返回后端最终耗时
-function useLiveDuration(running: boolean, finalMs?: number): number | undefined {
-  const [elapsed, setElapsed] = useState(0)
-  const startRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (!running) {
-      startRef.current = null
-      return
-    }
-    if (startRef.current === null) startRef.current = Date.now()
-    setElapsed(Date.now() - startRef.current)
-    const timer = setInterval(() => {
-      if (startRef.current !== null) setElapsed(Date.now() - startRef.current)
-    }, 100)
-    return () => clearInterval(timer)
-  }, [running])
-
-  // 结束后优先展示后端返回的精确耗时；running 期间展示本地累加值。
-  // 停止但后端值尚未到达时（答案已开始流式但 complete 事件未到），冻结在最后的
-  // 本地累加值，避免耗时短暂消失再出现的闪烁。
-  if (!running && finalMs !== undefined) return finalMs
-  if (running) return elapsed
-  return elapsed > 0 ? elapsed : finalMs
-}
-
-// 步骤统计面板：顶部汇总（步骤数 + 整体耗时），可折叠展开各步骤
-function StepSummaryPanel({
-  steps,
-  isStreaming,
-  isLast,
-  totalDurationMs,
-  answerStarted,
-  sessionId,
-  sessionFiles,
-}: {
-  steps: ContentSegment[]
-  isStreaming: boolean
-  isLast: boolean
-  totalDurationMs?: number
-  answerStarted?: boolean
-  sessionId?: string | null
-  sessionFiles?: SessionFileResponse[]
-}) {
-  const [open, setOpen] = useState(true)
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
-  // 步骤面板状态：答案一旦开始产出即视为「执行步骤」结束（与后端耗时截止时刻一致），
-  // 此时停止本地实时计时，避免把答案流式输出的时间也计入步骤耗时。
-  const running = isStreaming && isLast && !answerStarted
-  // 实时耗时：执行中持续累加，结束后切换为后端精确值
-  const displayDuration = useLiveDuration(running, totalDurationMs)
-
-  function toggleStep(i: number) {
-    setExpandedSteps((prev) => {
-      const next = new Set(prev)
-      if (next.has(i)) next.delete(i)
-      else next.add(i)
-      return next
-    })
-  }
-
-  return (
-    <div className="rounded-xl border border-border/50 bg-muted/20 overflow-hidden">
-      {/* 汇总头部 */}
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-muted/40 transition-colors cursor-pointer"
-      >
-        {running ? (
-          <Sparkles className="h-4 w-4 shrink-0 text-primary animate-twinkle" />
-        ) : (
-          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-        )}
-        <span className="text-foreground/80">
-          {running ? '正在执行' : '已完成'}
-          <span className="text-primary font-medium mx-1">{steps.length}</span>
-          个步骤
-        </span>
-        {displayDuration !== undefined && (
-          <span className="text-muted-foreground">
-            ，耗时
-            <span className="text-primary font-medium ml-1">
-              {formatDuration(displayDuration)}
-            </span>
-          </span>
-        )}
-        {open ? (
-          <ChevronUp className="h-4 w-4 ml-auto text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronDown className="h-4 w-4 ml-auto text-muted-foreground shrink-0" />
-        )}
-      </button>
-
-      {/* 步骤列表 */}
-      <div
-        className="grid transition-all duration-300 ease-in-out"
-        style={{
-          gridTemplateRows: open ? '1fr' : '0fr',
-          opacity: open ? 1 : 0,
-        }}
-      >
-        <div className="overflow-hidden">
-          <div className="px-2 pb-2 pt-1 space-y-1.5 border-t border-border/40">
-            {steps.map((seg, i) => {
-              const isActive = running && i === steps.length - 1
-              return (
-                <StepRow
-                  key={i}
-                  seg={seg}
-                  // 流式中自动展开当前步骤以实时显示内容；完成后默认折叠
-                  expanded={expandedSteps.has(i) || isActive}
-                  onToggle={() => toggleStep(i)}
-                  animating={isActive}
-                  sessionId={sessionId}
-                  sessionFiles={sessionFiles}
-                />
-              )
-            })}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // 工具名 → 中文标签映射（步骤行展示用，与 AgentConfig 的 ALL_TOOLS 保持一致）
 const TOOL_LABELS: Record<string, string> = {
   knowledge_search: '语义检索',
   grep_chunks: '关键词检索',
   list_knowledge_chunks: '分页浏览',
   web_search: '网页搜索',
-  thinking: '内部思考',
   read_attachment: '阅读附件',
   read_skill: '加载技能',
-  final_answer: '生成答案',
 }
 
 // 从工具调用参数中提取一段简短描述，用于在步骤标题后展示「调用了什么」的具体信息
@@ -670,8 +556,227 @@ function InlineToolFiles({
   )
 }
 
-// 单个步骤行：思考显示文本摘要，工具调用显示「调用 xxx」前缀，均可折叠
+// 单个活动行：reasoning 显示可折叠 Think 内容，tool_call 显示调用与结果状态。
 function StepRow({
+  seg,
+  expanded,
+  onToggle,
+  animating,
+  isActive,
+  sessionId,
+  sessionFiles,
+}: {
+  seg: ContentSegment
+  expanded: boolean
+  onToggle: () => void
+  animating: boolean
+  isActive: boolean
+  sessionId?: string | null
+  sessionFiles?: SessionFileResponse[]
+}) {
+  const openArtifact = useArtifactStore((s) => s.openArtifact)
+  const isTool = seg.type === 'tool_call'
+  const isSkill = isTool && seg.toolName === 'read_skill'
+  const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content || ''
+  const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
+
+  // read_attachment 步骤：尝试按文件名解析本会话已上传文件，命中可预览类型则可点击预览。
+  const attachmentTarget: ArtifactTarget | null = (() => {
+    if (seg.toolName !== 'read_attachment' || !sessionId || !sessionFiles?.length) return null
+    const wanted = typeof seg.toolArgs?.filename === 'string' ? seg.toolArgs.filename.trim().toLowerCase() : ''
+    const file = wanted
+      ? sessionFiles.find((f) => f.filename.trim().toLowerCase() === wanted)
+      : sessionFiles[0]
+    if (!file) return null
+    const ext = sessionFileExt(file)
+    if (!isPreviewable(ext)) return null
+    return { id: file.id, filename: file.filename, fileType: ext, source: 'session-file', sessionId }
+  })()
+
+  function fileTarget(f: ToolFile): ArtifactTarget | null {
+    const ext = extOf(f.filename)
+    if (!isPreviewable(ext)) return null
+    if (f.source === 'session-file') {
+      return { id: f.id, filename: f.filename, fileType: ext, source: 'session-file', sessionId: sessionId ?? undefined }
+    }
+    return { id: f.id, filename: f.filename, fileType: ext, source: 'document' }
+  }
+  const readFiles = isTool ? seg.files ?? [] : []
+  const summary = seg.type === 'reasoning' ? firstLine(seg.content) : toolLabel
+
+  return (
+    <div
+      className={cn(
+        'rounded-lg border overflow-hidden transition-colors',
+        isActive
+          ? 'border-primary/40 bg-primary/[0.03]'
+          : 'border-border/40 bg-background/40'
+      )}
+    >
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-2.5 py-2 text-xs hover:bg-muted/40 transition-colors cursor-pointer text-left"
+      >
+        {isSkill ? (
+          <BookOpen className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        ) : isTool ? (
+          <Monitor className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        ) : (
+          <Lightbulb
+            className={cn(
+              'h-3.5 w-3.5 shrink-0 text-primary/70',
+              animating && 'animate-twinkle'
+            )}
+          />
+        )}
+
+        {isTool ? (
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="shrink-0 text-foreground/80">{toolLabel}</span>
+            {attachmentTarget ? (
+              <span
+                role="link"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openArtifact(attachmentTarget)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    openArtifact(attachmentTarget)
+                  }
+                }}
+                className="min-w-0 truncate text-primary underline-offset-2 hover:underline cursor-pointer"
+                title="点击预览原文"
+              >
+                {attachmentTarget.filename}
+              </span>
+            ) : readFiles.length > 0 ? (
+              <InlineToolFiles files={readFiles} fileTarget={fileTarget} onOpen={openArtifact} />
+            ) : (
+              argSummary && (
+                <span className="min-w-0 truncate font-mono text-primary/80">{argSummary}</span>
+              )
+            )}
+            <ToolResultStatus success={seg.success} durationMs={seg.durationMs} />
+          </span>
+        ) : (
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="shrink-0 text-muted-foreground">Thinking</span>
+            <span className="min-w-0 truncate text-muted-foreground/80">{summary}</span>
+          </span>
+        )}
+
+        <ChevronDown
+          className="h-3.5 w-3.5 ml-auto text-muted-foreground/60 shrink-0 transition-transform duration-200"
+          style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+        />
+      </button>
+
+      <div
+        className="grid transition-all duration-200 ease-in-out"
+        style={{
+          gridTemplateRows: expanded ? '1fr' : '0fr',
+          opacity: expanded ? 1 : 0,
+        }}
+      >
+        <div className="overflow-hidden">
+          <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
+            {isTool ? (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  {attachmentTarget ? (
+                    <>
+                      已读取附件原文{' '}
+                      <button
+                        onClick={() => openArtifact(attachmentTarget)}
+                        className="font-medium text-primary underline-offset-2 hover:underline cursor-pointer"
+                        title="点击预览原文"
+                      >
+                        {attachmentTarget.filename}
+                      </button>
+                    </>
+                  ) : isSkill ? (
+                    <>
+                      已加载技能 <span className="font-mono">{argSummary || toolLabel}</span>
+                    </>
+                  ) : readFiles.length > 0 ? (
+                    <>读到 {readFiles.length} 个文件：</>
+                  ) : (
+                    <>已调用 <span className="font-mono">{argSummary || toolLabel}</span></>
+                  )}
+                </p>
+                {readFiles.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    {readFiles.map((f, fi) => {
+                      const target = fileTarget(f)
+                      return (
+                        <div key={`${f.id}-${fi}`} className="flex items-center gap-1.5 text-xs">
+                          <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                          {target ? (
+                            <button
+                              onClick={() => openArtifact(target)}
+                              className="truncate text-primary underline-offset-2 hover:underline cursor-pointer text-left"
+                              title="点击预览原文"
+                            >
+                              {f.filename}
+                            </button>
+                          ) : (
+                            <span className="truncate text-muted-foreground">{f.filename}</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed **:text-xs [&>p]:mb-1 [&>p:last-child]:mb-0 text-muted-foreground **:text-muted-foreground">
+                <Streamdown
+                  mode={animating ? 'streaming' : 'static'}
+                  plugins={{ cjk }}
+                  isAnimating={animating}
+                  animated={STREAM_ANIMATION}
+                >
+                  {seg.content}
+                </Streamdown>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function firstLine(text: string): string {
+  return text.split('\n', 1)[0] || ''
+}
+
+function ToolResultStatus({
+  success,
+  durationMs,
+}: {
+  success?: boolean
+  durationMs?: number
+}) {
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-1.5 text-muted-foreground">
+      {durationMs !== undefined && <span className="text-[10px]">{formatDuration(durationMs)}</span>}
+      {success === undefined ? (
+        <Loader2 className="h-3 w-3 animate-spin text-primary/70" />
+      ) : success ? (
+        <CheckCircle2 className="h-3 w-3 text-green-500" />
+      ) : (
+        <XCircle className="h-3 w-3 text-red-500" />
+      )}
+    </span>
+  )
+}
+// Legacy renderer retained only for historical replay compatibility.
+export function LegacyStepRow({
   seg,
   expanded,
   onToggle,

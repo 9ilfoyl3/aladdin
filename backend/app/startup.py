@@ -292,3 +292,32 @@ async def init_graph_store() -> None:
             logger.info("知识图谱功能未启用或不可用，已降级关闭（不影响主链路）")
     except Exception as e:
         logger.warning("初始化知识图谱存储失败（降级关闭，不阻断启动）: %s", e)
+
+
+async def init_milvus_collections() -> None:
+    """启动时幂等建好 Milvus 的两个物理 collection（单 collection + Partition Key 拓扑）。
+
+    与旧拓扑（每个知识库一个 collection、首次写入时懒建）不同，现在全部知识库共用一个
+    物理 collection，因此**建表是一次性的全局动作**，放在启动期做有三个好处：
+
+    - 首个文档入库不再承担建表 + 建 4 类索引的延迟。
+    - 检索接口在"库里还没有任何文档"时也能正常返回空结果，而不是撞上 collection 不存在。
+    - 拓扑（Partition Key / num_partitions）在部署时即固化可见，便于排障。
+
+    建索引参数取**全局默认**（``RetrievalConfig`` 的 Safe_Default）：collection 是全租户
+    共享的，无法按某个租户的配置建索引。租户级 ``hnsw_ef_construction`` / ``hnsw_m``
+    仅在该 collection 尚不存在时由首次写入的 ``ensure_collection`` 生效，故此处不读租户配置。
+    查询侧的 ``hnsw_ef`` 仍是按租户生效的（每次检索传参，不受本函数影响）。
+
+    失败仅记 warning 不阻断启动：Milvus 未就绪时写入/检索路径仍有懒建兜底
+    （``pipeline`` 的 ``ensure_collection``、会话上传的 ``ensure_session_files_collection``）。
+    """
+    try:
+        from app.storage.milvus import get_milvus_client
+
+        await get_milvus_client().ensure_collections()
+        logger.info("Milvus collection 拓扑已就绪（单 collection + Partition Key）")
+    except Exception as e:
+        logger.warning(
+            "初始化 Milvus collection 失败（不阻断启动，写入/检索路径有懒建兜底）: %s", e
+        )

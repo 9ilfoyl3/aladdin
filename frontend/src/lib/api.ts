@@ -412,7 +412,8 @@ export const apiKeyApi = {
 const tenantHeader = (tenantId?: string): RequestInit =>
   tenantId ? { headers: { 'X-Tenant-ID': tenantId } } : {}
 
-// 平台级配置（超管）：当前承载 collection 加载缓存 TTL + 单库/单会话 chunk 硬上限。
+// 平台级配置（超管）：当前承载向量集合加载缓存 TTL + 单库/单会话 chunk 硬上限。
+// 注：全部知识库共用一个 Milvus collection（kb_id 作为 Partition Key），故加载缓存是全局粒度。
 export interface PlatformConfig {
   load_cache_ttl: number
   kb_chunk_cap: number
@@ -449,7 +450,7 @@ export const systemApi = {
       method: 'POST',
       ...tenantHeader(tenantId),
     }),
-  // 平台配置（超管专属）：collection 加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
+  // 平台配置（超管专属）：向量集合加载缓存 TTL + 单库 chunk 上限 + 会话 chunk 天花板
   getPlatformConfig: () => request<PlatformConfigResponse>('/system/platform-config'),
   // 仅提交本次改动的字段（后端 model_dump(exclude_unset=True, exclude_none=True)）
   updatePlatformConfig: (data: Partial<PlatformConfig>) =>
@@ -465,7 +466,7 @@ export const systemApi = {
 export const llmConfigApi = {
   list: (chatVisible?: boolean) =>
     request<unknown[]>(chatVisible !== undefined ? `/llm-configs?chat_visible=${chatVisible}` : '/llm-configs'),
-  create: (data: { name: string; provider: string; vendor?: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_control?: string; max_context_tokens?: number; chat_visible?: boolean }) =>
+  create: (data: { name: string; provider: string; vendor?: string; base_url: string; model: string; api_key?: string; is_default?: boolean; stream_enabled?: boolean; thinking_control?: string; max_context_tokens?: number; max_output_tokens?: number; chat_visible?: boolean }) =>
     request<unknown>('/llm-configs', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -633,6 +634,83 @@ export const ocrConfigApi = {
     request<OCRTestResult>(`/ocr-configs/${id}/test`, { method: 'POST' }),
 }
 
+/** MCP 传输模式：auto=先试标准协议再回落私有 REST */
+export type MCPTransport = 'auto' | 'streamable_http' | 'legacy_rest'
+/** MCP 静态凭据方式：Artoo 向远端证明"我是 Artoo" */
+export type MCPAuthType = 'none' | 'bearer' | 'header'
+
+export interface MCPConfigItem {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  transport: MCPTransport
+  auth_type: MCPAuthType
+  auth_header_name: string | null
+  /** 是否已配置凭据（明文永不回显，仅回掩码） */
+  has_auth_token: boolean
+  auth_token_masked: string | null
+  /** 是否向该 server 透传调用方上下文（会话 / 租户 / 主体） */
+  forward_context: boolean
+  tool_prefix: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 远端 MCP server 暴露的单个工具元信息 */
+export interface MCPToolMeta {
+  name: string
+  description: string
+}
+
+export interface MCPTestResult {
+  reachable: boolean
+  tool_count: number
+  tools: MCPToolMeta[]
+  /** 本次实际走通的协议，用于判断对方是否已升级到标准 MCP */
+  protocol: MCPTransport | null
+  error: string | null
+}
+
+/** 创建/更新 MCP 配置的请求体。auth_token 三态：不传=保持，''=清除，非空=替换 */
+export interface MCPConfigPayload {
+  name: string
+  url: string
+  enabled?: boolean
+  transport?: MCPTransport
+  auth_type?: MCPAuthType
+  auth_token?: string
+  auth_header_name?: string | null
+  forward_context?: boolean
+  tool_prefix?: string | null
+}
+
+// MCP Server 配置接口（平台底座，仅超管）
+export const mcpConfigApi = {
+  list: () => request<MCPConfigItem[]>('/mcp-configs'),
+  create: (data: MCPConfigPayload) =>
+    request<MCPConfigItem>('/mcp-configs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Partial<MCPConfigPayload>) =>
+    request<MCPConfigItem>(`/mcp-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/mcp-configs/${id}`, { method: 'DELETE' }),
+  test: (data: { url: string; transport?: MCPTransport; auth_type?: MCPAuthType; auth_token?: string; auth_header_name?: string | null }) =>
+    request<MCPTestResult>('/mcp-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testSaved: (id: string) =>
+    request<MCPTestResult>(`/mcp-configs/${id}/test`, { method: 'POST' }),
+  tools: (id: string) =>
+    request<MCPToolMeta[]>(`/mcp-configs/${id}/tools`),
+}
+
 export interface ASRConfigItem {
   id: string
   name: string
@@ -706,8 +784,27 @@ export interface AgentPresetItem {
   owner_username: string | null
 }
 
+// 可配进预设 allowed_tools 的工具选项。内置工具 + 平台已启用 MCP server 发现的外部工具。
+// 后端只回工具名/描述/来源 server 名，不含 url 与凭据。
+export interface AgentToolOption {
+  name: string
+  label: string
+  description: string
+  source: 'builtin' | 'mcp'
+  // 基础设施工具：恒注册，取消勾选也关不掉，前端显示为「始终启用」
+  always_on: boolean
+  server_name: string | null
+}
+
+export interface AgentAvailableTools {
+  tools: AgentToolOption[]
+  // 非空表示外部工具发现失败（远端不可达等），此时 tools 仅含内置工具
+  mcp_error: string | null
+}
+
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
+  availableTools: () => request<AgentAvailableTools>('/agent-presets/available-tools'),
   rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
     request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
       method: 'POST',

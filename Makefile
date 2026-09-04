@@ -1,5 +1,7 @@
 .PHONY: install install-backend install-frontend install-graph dev dev-backend dev-worker dev-frontend \
-	infra infra-graph infra-down test clean build build-app build-graph build-app-graph
+	infra infra-graph infra-down milvus-init milvus-describe milvus-reset milvus-prune-dims \
+	purge-dry-run purge-data purge-keep-objects reindex-dry-run reindex-all \
+	test clean build build-app build-graph build-app-graph
 
 # Python 解释器（可通过 make install-backend PYTHON=python3.12 覆盖）
 PYTHON ?= python3
@@ -55,6 +57,44 @@ dev-worker:
 dev-frontend:
 	@echo "前端 http://localhost:3000"
 	cd frontend && npm run dev
+
+# ============================================================
+# Milvus 拓扑（共享 collection + Partition Key + 按维度分表）
+# ============================================================
+# 幂等建表。服务启动时会自动做同样的事，这条用于部署前预建或排障。
+milvus-init:
+	cd backend && ../.venv/bin/python -m scripts.init_milvus
+# 查看当前拓扑（各维度表 / Partition Key / 分区数 / 分片数 / 字段）
+milvus-describe:
+	cd backend && ../.venv/bin/python -m scripts.init_milvus --describe
+# 破坏性重置：删受管表重建 + 清理旧拓扑遗留的 per-KB collection（kb_*）。
+# 只动 Milvus，不清 PG / 对象存储。改 MILVUS_NUM_PARTITIONS 等建表固定项时用这条。
+milvus-reset:
+	cd backend && ../.venv/bin/python -m scripts.init_milvus --reset --drop-legacy
+# 清理非当前 EMBED_DIM 的历史维度表（换 embedding 模型并验证新维度无误后执行）
+milvus-prune-dims:
+	cd backend && ../.venv/bin/python -m scripts.init_milvus --prune-dims
+
+# ============================================================
+# 数据清除 / 重建（拓扑切换用）
+# ============================================================
+# 体检：打印将被清除的数量与动作，不做任何修改
+purge-dry-run:
+	cd backend && ../.venv/bin/python -m scripts.purge_data --dry-run
+# 【破坏性】清空知识内容（Milvus + PG 内容表 + 对象存储 + 图谱 + Redis），
+# 保留租户/用户/API Key/知识库本体/模型配置。需交互输入 PURGE 确认。
+purge-data:
+	cd backend && ../.venv/bin/python -m scripts.purge_data
+# 保留源文件不清对象存储：之后可用 reindex-all 从原件重建索引而非让用户重传
+purge-keep-objects:
+	cd backend && ../.venv/bin/python -m scripts.purge_data --keep-objects
+# 体检：打印重建索引计划（含源文件缺失清单），不做任何修改
+reindex-dry-run:
+	cd backend && ../.venv/bin/python -m scripts.reindex_all --dry-run
+# 从对象存储中的原件重建全部向量索引（需 worker 在运行）。
+# 适用：换 embedding 模型 / 调 num_partitions 且源文件仍在的场景。
+reindex-all:
+	cd backend && ../.venv/bin/python -m scripts.reindex_all --watch
 
 # ============================================================
 # 测试 / 清理

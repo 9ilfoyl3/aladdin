@@ -801,12 +801,15 @@ async def set_visibility(
 
 
 async def _kb_cleanup_background(kb_id: str, doc_info_list: list[dict]) -> None:
-    """后台清理 Milvus collection + MinIO 源文件 + 缓存（按 kb_id，不写受隔离资源）。"""
+    """后台清理 Milvus 向量 + MinIO 源文件 + 缓存（按 kb_id，不写受隔离资源）。"""
     try:
         milvus = _get_milvus()
-        await milvus.drop_collection(kb_id)
+        # 单 collection + Partition Key 拓扑：全部知识库共用一个物理 collection，
+        # 删库必须按 Partition Key ``kb_id == "..."`` 删向量，**不能** drop 物理
+        # collection（那会清掉所有知识库）。Milvus 按分区裁剪只触及本库所在分区。
+        await milvus.delete_by_kb(kb_id)
     except Exception as e:
-        logger.warning("知识库删除 - 删除 Milvus collection 失败（可忽略）: %s", e)
+        logger.warning("知识库删除 - 删除 Milvus 向量失败（可忽略）: %s", e)
 
     # 删除 MinIO 中的源文件 + 缩略图
     from app.storage.object_store import (

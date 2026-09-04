@@ -156,6 +156,7 @@ class LLMConfig(Base):
     # 注：是否开启思考由智能体预设独占控制，本字段仅决定「开启时怎么写入 API」。
     thinking_control: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     max_context_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -200,6 +201,39 @@ class ASRConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
     extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MCPConfig(Base):
+    """MCP Server 配置表（Artoo 作为 MCP client 要连的远端服务）
+
+    属平台底座（capability-config-to-platform），全平台一份，无 tenant_id，
+    仅超级管理员维护。Agent 运行时按此表发现远端 MCP server 的工具注入
+    （default-off，须预设 allowed_tools 显式白名单才注册）。
+    """
+    __tablename__ = "mcp_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 远端 MCP server 的 base URL（如 http://host:port）。标准协议下打 {url}/mcp。
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 传输/协议模式：auto（先试标准 MCP，失败回落私有 REST）| streamable_http（只用标准）
+    # | legacy_rest（只用私有 REST，对接尚未升级的老服务端）。
+    transport: Mapped[str] = mapped_column(String(20), default="auto", nullable=False)
+    # 静态凭据：Artoo 向远端证明"我是 Artoo"。none | bearer（Authorization: Bearer）
+    # | header（自定义头，头名见 auth_header_name）。
+    auth_type: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
+    # 凭据密文（app.auth.secret_box 加密，密钥从 jwt_secret 派生）。**不存明文**：
+    # 这张表里的 token 是第三方系统的凭据，DB 泄露不应等于第三方系统被攻破。
+    auth_token_encrypted: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    auth_header_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # 是否向该 server 透传调用方上下文（session/tenant/subject）。**默认关闭**：
+    # 把 A 方终端用户标识发给不相关的第三方属跨方数据泄露，须逐个显式开启。
+    forward_context: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 工具名前缀（可选）。多个 server 声明同名工具时用它区分；留空保持原始工具名。
+    tool_prefix: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

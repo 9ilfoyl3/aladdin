@@ -58,6 +58,10 @@ async def main():
     from app.startup import _auto_migrate_session_file_columns
     await _auto_migrate_session_file_columns()
 
+    # 幂等建好 Milvus 的两个物理 collection（Worker 可能先于 API 起来，各自幂等）
+    from app.startup import init_milvus_collections
+    await init_milvus_collections()
+
     # 加载 Embedding/Rerank 配置（与 API 共用逻辑）
     await load_embed_configs()
 
@@ -93,14 +97,14 @@ async def main():
     # 启动跨进程失效广播（InvalidationBus）—— M1/M2/M7 多进程热生效
     from app.startup import start_invalidation_bus
     from app.retrieval.cache import get_retrieval_cache
-    from app.storage.milvus import get_milvus_client, MilvusClient
+    from app.storage.milvus import get_milvus_client
     from sqlalchemy import select
 
     async def _handle_kb_data(kb_id: str):
         """收到 kb_data 失效信号：清除对应知识库的 Milvus 加载缓存 + 检索结果缓存"""
-        milvus = get_milvus_client()
-        collection_name = MilvusClient._collection_name(kb_id)
-        milvus._loaded_at.pop(collection_name, None)
+        # 单 collection + Partition Key 拓扑下会清掉承载该知识库的物理 collection 的
+        # 全局加载标记——宁可多 load 不可漏 load（漏 load 会读到旧快照）。
+        get_milvus_client().invalidate_load_cache(kb_id)
         cache = await get_retrieval_cache()
         if cache:
             await cache.invalidate_kb(kb_id)

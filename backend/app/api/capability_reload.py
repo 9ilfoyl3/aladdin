@@ -27,9 +27,10 @@ CAPABILITY_EMBEDDING = "embedding"
 CAPABILITY_RERANK = "rerank"
 CAPABILITY_OCR = "ocr"
 CAPABILITY_ASR = "asr"
+CAPABILITY_MCP = "mcp"
 
 VALID_CAPABILITIES = frozenset(
-    {CAPABILITY_EMBEDDING, CAPABILITY_RERANK, CAPABILITY_OCR, CAPABILITY_ASR}
+    {CAPABILITY_EMBEDDING, CAPABILITY_RERANK, CAPABILITY_OCR, CAPABILITY_ASR, CAPABILITY_MCP}
 )
 
 
@@ -53,6 +54,12 @@ async def reload_capability_locally(capability: str) -> None:
         elif capability in (CAPABILITY_OCR, CAPABILITY_ASR):
             # API 进程无常驻 OCR/ASR Manager，无需动作
             logger.debug("能力配置 %s 本进程无常驻实例，跳过本地重载", capability)
+        elif capability == CAPABILITY_MCP:
+            # MCP 工具发现缓存是进程内模块级单例，直接失效，下次 get 重新查库发现
+            from app.agent.tools.mcp_client import invalidate_mcp_tools_cache
+
+            invalidate_mcp_tools_cache()
+            logger.info("MCP 工具发现缓存已失效，下次请求重新发现")
         else:
             logger.warning("未知能力配置类型，跳过重载: %s", capability)
     except Exception as e:  # noqa: BLE001 — 重载失败不影响配置保存

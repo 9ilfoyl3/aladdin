@@ -9,6 +9,7 @@ import {
   Cpu,
   ScanText,
   AudioLines,
+  Plug,
   Layers,
   Bot,
   Sparkles,
@@ -49,6 +50,7 @@ const navItems = [
   { to: '/embed-config', label: 'Embedding', icon: Layers, group: 'capability' },
   { to: '/ocr-services', label: 'OCR 服务', icon: ScanText, group: 'capability' },
   { to: '/asr-services', label: 'ASR 服务', icon: AudioLines, group: 'capability' },
+  { to: '/mcp-servers', label: 'MCP 服务', icon: Plug, group: 'capability' },
   { to: '/api-keys', label: 'API Key', icon: Key, group: 'capability' },
   { to: '/tenants', label: '租户管理', icon: Building2, group: 'platform' },
   { to: '/users', label: '用户管理', icon: UsersIcon, group: 'manage' },
@@ -81,6 +83,10 @@ function Layout() {
   // - admin（租户管理员）：租户管理菜单（manage，管人/管资产）+ 内容菜单（content）。
   //   不再显示能力配置（capability，已上收平台）。
   // - member（普通成员）：仅内容菜单（content）。
+  // 智能体（/agent-config）对超管开放属有意破例：MCP 服务是平台底座（仅超管可配），
+  // 而外部 MCP 工具 default-off、必须写进某个预设的 allowed_tools 才生效。若超管进不了
+  // 预设页，就出现「只有超管能接 MCP，却只有租户能配预设」的死结。超管在此建的预设
+  // tenant_id 为空 = 平台级、全租户可见（页内已明示），作为代客配置的兜底路径。
   const SUPER_ADMIN_MENUS = new Set([
     '/tenants',
     '/audit-logs',
@@ -88,6 +94,8 @@ function Layout() {
     '/embed-config',
     '/ocr-services',
     '/asr-services',
+    '/mcp-servers',
+    '/agent-config',
     '/retrieval',
     '/api-keys',
   ])
@@ -113,7 +121,8 @@ function Layout() {
   // "租户管理"，避免出现"左侧无此菜单、右侧却是知识库内容"的错位。
   // 注意：置于所有 hook 调用之后，避免条件式调用 hook。
   // 超管可访问：平台菜单（租户管理/审计日志）、平台能力配置（模型/Embedding/OCR/检索测试/
-  // API Key，capability-config-to-platform）、账号自助页（改密）。
+  // API Key，capability-config-to-platform）、智能体预设（代客配置 MCP 工具，见
+  // SUPER_ADMIN_MENUS 处说明）、账号自助页（改密）。
   const SUPER_ADMIN_ALLOWED_PATHS = new Set([
     '/tenants',
     '/audit-logs',
@@ -122,6 +131,8 @@ function Layout() {
     '/embed-config',
     '/ocr-services',
     '/asr-services',
+    '/mcp-servers',
+    '/agent-config',
     '/retrieval',
     '/api-keys',
   ])

@@ -82,6 +82,10 @@ mkdir -p "$OUT/deploy"
 cp deploy/milvus-user.yaml "$OUT/deploy/"
 cp deploy/install.sh "$OUT/"
 chmod +x "$OUT/install.sh"
+# Milvus 拓扑切换用的数据清除脚本：必须随包交付，否则运维在服务器上无脚本可执行。
+# 放在 deploy/ 下（脚本自身会向上一级找 docker-compose.yml，两种布局都兼容）。
+cp deploy/reset-knowledge-data.sh "$OUT/deploy/"
+chmod +x "$OUT/deploy/reset-knowledge-data.sh"
 # 运维部署手册：随包交付，运维在服务器上可直接查阅
 cp deploy/DEPLOY.md "$OUT/"
 # 前端运行时配置：compose 把 ./frontend/public/config.js 只读挂载进容器覆盖镜像内默认。

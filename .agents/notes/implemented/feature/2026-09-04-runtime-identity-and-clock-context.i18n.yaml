@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/feature/2026-09-04-runtime-identity-and-clock-context.md .agents/notes/implemented/feature/2026-09-04-runtime-identity-and-clock-context.zh.md
+2026-09-04-runtime-identity-and-clock-context.md: 75a4d84fa95d1074137b6d58c88380849c5e5aaa
+2026-09-04-runtime-identity-and-clock-context.zh.md: eff6b1cdf90fe1fde87184c8a999c0ab7eaa78d2

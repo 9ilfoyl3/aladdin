@@ -9,6 +9,58 @@ from __future__ import annotations
 import re
 
 
+# ─── 内嵌 data URI 图片（base64）剥离 ───
+# 输出 Markdown 的 OCR provider（MinerU 的 md_content、VL 多模态模型的 content）
+# 在未配置图片外链存储时，会把图片以 data URI 直接内嵌进正文，单张图可达数十万
+# 字符。这类内容对检索零价值，却会一路污染下游：参与 dense embedding 计算扭曲
+# 向量语义、进入 BM25 分词、被召回后原样喂给 LLM 吃光上下文预算。同理适用于
+# 用户直接上传的含内嵌图片的 .md / .html 文件。
+# 故在 chunk 之前统一剥离，替换为占位符——保留「此处有一张图」的版面信息，
+# 同时不破坏所在 HTML 表格 / Markdown 段落的结构。
+IMAGE_PLACEHOLDER = "[图片]"
+
+# 1) HTML img 标签内含 data URI。MinerU 的 md_content 里 HTML 属性引号常被转义
+# 为 \"，故不去匹配引号，改用 [^>]*? 宽松吃掉整个标签。base64 字符集
+# （A-Za-z0-9+/= 及 URL-safe 的 -_）不含 '>'，不会越过标签边界。
+_HTML_IMG_DATA_URI_RE = re.compile(r'<img\b[^>]*?data:[^>]*?>', re.IGNORECASE)
+
+# 2) Markdown 图片语法内含 data URI：![alt](data:image/png;base64,...)
+# base64 字符集不含 ')'，不会越界。
+_MD_IMG_DATA_URI_RE = re.compile(r'!\[[^\]]*\]\(\s*data:[^)]*\)', re.IGNORECASE)
+
+# 3) 兜底：未被上述两种语法完整包裹的裸 data URI（标签被上游截断、CSS url(...)
+# 内嵌等）。刻意不允许空白字符出现在 base64 段中——否则字符类会跨越换行，
+# 连带吞掉后续正常英文正文。要求 payload ≥ 64 字符，避免误伤正文里偶然出现的
+# "data:...;base64," 字样（如技术文档在讲解 data URI 本身）。
+_BARE_DATA_URI_RE = re.compile(
+    r'data:[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{64,}',
+    re.IGNORECASE,
+)
+
+
+def strip_data_uris(text: str) -> str:
+    """剥离文本中内嵌的 data URI 图片（base64），替换为 ``[图片]`` 占位符。
+
+    独立于 :class:`TextCleaner` 的页眉页脚去噪：后者是可由知识库配置
+    ``enable_cleaner`` 关闭的**质量偏好**，而 base64 剥离是无条件必须的
+    **数据卫生**处理——留着它只会污染向量、分词和 LLM 上下文，没有任何场景
+    需要保留。因此由 pipeline 在 chunk 之前无条件调用一次。
+
+    Args:
+        text: 待处理文本（OCR 输出或 loader 提取的正文）。
+
+    Returns:
+        剥离内嵌图片数据后的文本。无内嵌图片时原样返回。
+    """
+    if not text or "data:" not in text:
+        return text
+
+    result = _HTML_IMG_DATA_URI_RE.sub(IMAGE_PLACEHOLDER, text)
+    result = _MD_IMG_DATA_URI_RE.sub(IMAGE_PLACEHOLDER, result)
+    result = _BARE_DATA_URI_RE.sub(IMAGE_PLACEHOLDER, result)
+    return result
+
+
 # 页码正则模式
 _PAGE_NUMBER_PATTERNS = [
     r'^\s*-\s*\d+\s*-\s*$',                # - 3 -

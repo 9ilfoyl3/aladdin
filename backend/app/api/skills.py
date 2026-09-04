@@ -166,7 +166,7 @@ async def generate_skill(
 
     复用 agent_config rewrite-prompt 的范式。产出的 instructions 是技能被加载后 Agent
     将遵循的完整操作指南，只描述「该技能擅长什么、何时用、按什么步骤做、输出什么」，
-    不复述检索流程 / 工具调用 / final_answer 等底层规则（那些由核心提示词负责）。
+        不复述检索流程 / 工具调用 / 终止条件等底层规则（那些由核心提示词负责）。
 
     返回 {name, description, instructions} 供前端回填表单，用户确认后再保存。
     """
@@ -191,7 +191,7 @@ async def generate_skill(
         "instructions 写作要求：\n"
         "1. 聚焦该技能特有的方法论：适用场景、工作步骤、输出格式、注意事项。\n"
         "2. 智能体已有的检索工具是 knowledge_search（语义检索）、grep_chunks（关键词检索）、"
-        "list_knowledge_chunks（精读原文）、thinking（思考）、final_answer（提交答案）。"
+        "list_knowledge_chunks（精读原文）。"
         "可以引用这些工具来编排步骤，但不要复述它们的底层调用规则、引用格式、语言要求"
         "——这些已由核心提示词负责。\n"
         "3. 不要编造智能体没有的能力（如执行脚本、联网下载、调用外部 API）。\n"
