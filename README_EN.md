@@ -101,6 +101,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Capability | Details |
 |------------|---------|
 | Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images / audio |
+| File Preview | Unified artifact side-panel preview (open-file-viewer): PDF / Word / Excel / PPT / images / text / Markdown / CSV / email / archives / EPUB — ~30 formats; one-click preview from chat attachments and document lists, Word pages fit panel width by default, colors follow the app theme |
 | Link Import | Paste a web / WeChat article link; the backend fetches and extracts the main text as Markdown and saves it into the KB, retaining the source URL and cover image — mobile-friendly |
 | Document Organization | Folder hierarchy management, rename, thumbnail preview (authenticated fetch) |
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
